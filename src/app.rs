@@ -429,9 +429,11 @@ pub fn resolve_command<R: crate::commands::CommandRunner>(
     let needs_coordinates = matches!(
         &command,
         Command::Capture {
+            geometry: None,
             coordinates: Some(_),
             ..
         } | Command::Record {
+            geometry: None,
             coordinates: Some(_),
             ..
         }
