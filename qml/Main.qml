@@ -58,4 +58,9 @@ ApplicationWindow {
             Menu.activateId(id)
         }
     }
+
+    // Recognized-text review shares the TextResultDialog singleton's state.
+    TextResultDialog {
+        id: textResultDialog
+    }
 }

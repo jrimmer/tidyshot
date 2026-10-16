@@ -10,12 +10,13 @@ fn main() {
             "qml/PanelButton.qml",
             "qml/MenuPanel.qml",
             "qml/TrayMenu.qml",
+            "qml/TextResultDialog.qml",
         ],
     ))
     .qt_module("Quick")
     .qt_module("QuickControls2")
     .qt_module("QuickTest")
-    .files(["src/bridge.rs", "src/menu.rs"])
+    .files(["src/bridge.rs", "src/menu.rs", "src/text_result.rs"])
     .build();
 
     build_scroll_helper();

@@ -65,8 +65,9 @@ impl Default for TextSettings {
 
 /// Reads QR codes out of an image.
 ///
-/// Production uses [`QrReaderViaCommand`]; tests substitute a fake so no
-/// decoder binary or native library is needed.
+/// No pure-Rust decoder is vendored yet; production wires a decoder through
+/// this trait once it is, and tests substitute a fake so the extraction merge
+/// is asserted without a native library.
 pub trait QrReader {
     fn read(&self, path: &Path) -> Result<String, String>;
 }
@@ -76,12 +77,12 @@ pub trait QrReader {
 /// `zbarimg --raw --quiet <path>` prints one value per line, matching the
 /// multi-code newline joining upstream. If a vendored decoder replaces this,
 /// the trait boundary stays the same.
-pub struct QrReaderViaCommand<R> {
+pub struct CommandQrReader<R> {
     runner: R,
     program: String,
 }
 
-impl<R> QrReaderViaCommand<R> {
+impl<R> CommandQrReader<R> {
     #[must_use]
     pub fn new(runner: R, program: impl Into<String>) -> Self {
         Self {
@@ -91,7 +92,7 @@ impl<R> QrReaderViaCommand<R> {
     }
 }
 
-impl<R: CommandRunner> QrReader for QrReaderViaCommand<R> {
+impl<R: CommandRunner> QrReader for CommandQrReader<R> {
     fn read(&self, path: &Path) -> Result<String, String> {
         let spec = CommandSpec::new(&self.program)
             .args(["--raw", "--quiet"])
@@ -537,6 +538,146 @@ pub fn present<R: CommandRunner>(
         return Presentation::Copied;
     }
     Presentation::Dialog(result)
+}
+
+// --- QML bridge: the recognized-text dialog ------------------------------
+
+#[cxx_qt::bridge]
+pub mod qobject {
+    unsafe extern "C++" {
+        include!("cxx-qt-lib/qstring.h");
+        type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qstringlist.h");
+        type QStringList = cxx_qt_lib::QStringList;
+    }
+
+    extern "RustQt" {
+        /// The recognized-text dialog exposed to QML.
+        #[qobject]
+        #[qml_element]
+        #[qml_singleton]
+        #[qproperty(QString, text)]
+        #[qproperty(QString, status)]
+        #[qproperty(QStringList, link_labels, cxx_name = "linkLabels")]
+        #[qproperty(QStringList, link_urls, cxx_name = "linkUrls")]
+        #[qproperty(bool, copied)]
+        #[qproperty(bool, can_open, cxx_name = "canOpen")]
+        #[qproperty(bool, detect)]
+        type TextResultDialog = super::TextResultDialogRust;
+
+        /// Replace the edited text.
+        #[qinvokable]
+        #[cxx_name = "updateText"]
+        fn update_text(self: Pin<&mut Self>, text: &QString);
+
+        /// Copy the current text to the clipboard.
+        #[qinvokable]
+        fn copy(self: Pin<&mut Self>);
+
+        /// The URL of link `row`, empty when out of range.
+        #[qinvokable]
+        #[cxx_name = "linkUrl"]
+        fn link_url(self: Pin<&mut Self>, row: i32) -> QString;
+    }
+}
+
+use core::pin::Pin;
+use qobject::{QString, QStringList};
+
+/// Rust state behind the QML recognized-text dialog.
+///
+/// Every mutable field is a QML property, because cxx-qt exposes pinned
+/// objects without `DerefMut`. The dialog keeps the link projections in sync
+/// whenever the text changes.
+pub struct TextResultDialogRust {
+    text: QString,
+    status: QString,
+    link_labels: QStringList,
+    link_urls: QStringList,
+    copied: bool,
+    can_open: bool,
+    detect: bool,
+}
+
+impl Default for TextResultDialogRust {
+    fn default() -> Self {
+        Self {
+            text: QString::from(""),
+            status: QString::from(TextResult::REVIEW),
+            link_labels: QStringList::default(),
+            link_urls: QStringList::default(),
+            copied: false,
+            can_open: false,
+            detect: true,
+        }
+    }
+}
+
+impl qobject::TextResultDialog {
+    /// Replace the edited text and refresh the link projections.
+    pub fn update_text(mut self: Pin<&mut Self>, text: &QString) {
+        self.as_mut().set_text(text.clone());
+        self.as_mut().set_copied(false);
+        self.as_mut().set_status(QString::from(TextResult::EDITED));
+        let text = text.to_string();
+        let links = if *self.detect() {
+            detected_links(&text)
+        } else {
+            Vec::new()
+        };
+        let mut labels = QStringList::default();
+        let mut urls = QStringList::default();
+        for link in &links {
+            labels.append(QString::from(link.label.clone()));
+            urls.append(QString::from(link.url.clone()));
+        }
+        self.as_mut().set_link_labels(labels);
+        self.as_mut().set_link_urls(urls);
+        self.as_mut().set_can_open(!links.is_empty());
+    }
+
+    /// Copy the current text through `wl-copy`.
+    pub fn copy(mut self: Pin<&mut Self>) {
+        let value = self.text().to_string();
+        let spec = crate::commands::CommandSpec::new("wl-copy")
+            .args(["--type", "text/plain;charset=utf-8"])
+            .stdin(value.into_bytes());
+        match crate::commands::SystemRunner.run(&spec) {
+            Ok(_) => {
+                self.as_mut().set_copied(true);
+                self.as_mut().set_status(QString::from(TextResult::COPIED));
+            }
+            Err(error) => {
+                self.as_mut()
+                    .set_status(QString::from(format!("Could not copy text: {error}")));
+            }
+        }
+    }
+
+    /// The URL of link `row`, or an empty string.
+    pub fn link_url(self: Pin<&mut Self>, row: i32) -> QString {
+        let urls = self.link_urls();
+        if row < 0 {
+            return QString::default();
+        }
+        urls.get(row as isize)
+            .map_or_else(QString::default, |url| url.clone())
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    #[test]
+    fn default_dialog_starts_empty_and_detecting() {
+        let dialog = TextResultDialogRust::default();
+        assert_eq!(dialog.text.to_string(), "");
+        assert_eq!(dialog.status.to_string(), TextResult::REVIEW);
+        assert!(dialog.detect);
+        assert!(!dialog.can_open);
+        assert_eq!(dialog.link_labels.len(), 0);
+    }
 }
 
 #[cfg(test)]
