@@ -12,6 +12,8 @@ cxx-qt = "0.10.0"
 cxx-qt-lib = { version = "0.10.0", features = ["full"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 getrandom = "0.4.3"
+# pidfd_open and kill(2) for the encoder lifetime guard; the crate is already
+# vendored as a transitive dependency.
 libc = "0.2.190"
 
 [build-dependencies]
