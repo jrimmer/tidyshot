@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# bin/native — build the Wayland scroll helper into native/scroll-helper.
+#
+# The helper speaks zwlr_virtual_pointer_v1 so auto-scroll can advance a page
+# without synthesising key events. It is generated from the protocol XML in
+# this directory, so the build stays self-contained.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if ! command -v wayland-scanner >/dev/null; then
+    echo "wayland-scanner is required to build native/scroll-helper" >&2
+    exit 1
+fi
+if ! pkg-config --exists wayland-client; then
+    echo "wayland-client development files are required to build native/scroll-helper" >&2
+    exit 1
+fi
+
+build_dir="$(mktemp -d)"
+trap 'rm -rf "$build_dir"' EXIT
+
+wayland-scanner client-header native/wlr-virtual-pointer-unstable-v1.xml "$build_dir/virtual-pointer.h"
+wayland-scanner private-code native/wlr-virtual-pointer-unstable-v1.xml "$build_dir/virtual-pointer.c"
+gcc -Wall -Wextra -O2 -I"$build_dir" \
+    native/scroll-helper.c "$build_dir/virtual-pointer.c" \
+    -o native/scroll-helper \
+    $(pkg-config --cflags --libs wayland-client)
+echo "built native/scroll-helper"
