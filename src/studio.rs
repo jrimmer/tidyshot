@@ -1001,8 +1001,9 @@ pub fn export_studio<R: CommandRunner>(
     let result = std::thread::scope(|scope| {
         let runner_ref = runner;
         let error = std::sync::Arc::clone(&error_slot);
-        let sender = sender.clone();
         let first_decoded = first_decoded;
+        let first_composed = first_composed;
+        let mut first_composed = Some(first_composed);
         let camera_path = camera_path.clone();
         scope.spawn(move || {
             let emit = |bytes: &[u8]| sender.send(bytes.to_vec()).is_ok();
@@ -1030,20 +1031,24 @@ pub fn export_studio<R: CommandRunner>(
                 }
                 for index in 0..count {
                     let t = a + index as f64 * speed / fps;
-                    let local =
-                        (((t - a) * source_fps).round() as usize).min(available - 1);
-                    let offset = local * per_frame;
-                    let image = rgb_to_image(&decoded[offset..offset + per_frame], width, height);
-                    let camera = camera_path.as_deref().and_then(|path| {
-                        let size = camera_size?;
-                        decode_camera_frame(
-                            runner_ref,
-                            path,
-                            (t - camera_offset).max(0.0),
-                            size,
-                        )
-                    });
-                    let composed = compose_frame(&image, t, &metadata, &options, camera.as_ref());
+                    let composed = if segment_index == first_index && index == 0 {
+                        first_composed.take().unwrap()
+                    } else {
+                        let local = (((t - a) * source_fps).round() as usize).min(available - 1);
+                        let offset = local * per_frame;
+                        let image =
+                            rgb_to_image(&decoded[offset..offset + per_frame], width, height);
+                        let camera = camera_path.as_deref().and_then(|path| {
+                            let size = camera_size?;
+                            decode_camera_frame(
+                                runner_ref,
+                                path,
+                                (t - camera_offset).max(0.0),
+                                size,
+                            )
+                        });
+                        compose_frame(&image, t, &metadata, &options, camera.as_ref())
+                    };
                     if composed.width != out_width || composed.height != out_height {
                         *error.lock().unwrap() =
                             Some("The composition changed size mid-export".to_owned());
