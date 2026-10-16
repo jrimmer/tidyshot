@@ -113,15 +113,6 @@ pub fn key_colors(options: &std::collections::BTreeMap<String, Value>) -> (Strin
     }
 }
 
-/// A parsed key event for the timeline and event editor.
-#[derive(Debug, Clone, PartialEq)]
-pub struct KeyEvent {
-    pub t: f64,
-    pub label: String,
-    pub state: f64,
-    pub command: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
