@@ -321,9 +321,42 @@ pub fn paint_cursor(
 }
 
 /// One composed frame from the source and optional camera.
-// Ported from omnishot/studio.py (compose_frame / compose_screen / compose_scene)
+///
+/// Motion blur, when enabled, averages several sharp compositions sampled
+/// inside the frame's shutter window before returning a single image.
+// Ported from omnishot/studio.py (compose_frame) and
+// omnishot/motion_blur.py (compose_motion)
 #[must_use]
 pub fn compose_frame(
+    frame: &Image,
+    t: f64,
+    metadata: &Value,
+    options: &Options,
+    camera: Option<&Image>,
+) -> Image {
+    let times = crate::motion_blur::shutter_times(t, options);
+    if times.len() == 1 || blur_level(options) == 0 {
+        return compose_sharp_frame(frame, t, metadata, options, camera);
+    }
+    let mut accumulation = vec![0u32; frame.width * frame.height * 4];
+    for seconds in &times {
+        let rendered = compose_sharp_frame(frame, *seconds, metadata, options, camera);
+        for (target, source) in accumulation.iter_mut().zip(rendered.data.iter()) {
+            *target += u32::from(*source);
+        }
+    }
+    let count = times.len() as u32;
+    let data: Vec<u8> = accumulation
+        .into_iter()
+        .map(|value| ((value + count / 2) / count).min(255) as u8)
+        .collect();
+    Image::new(frame.width, frame.height, data)
+}
+
+/// One sharp composition, without motion blur.
+// Ported from omnishot/studio.py (compose_screen / compose_scene)
+#[must_use]
+pub fn compose_sharp_frame(
     frame: &Image,
     t: f64,
     metadata: &Value,
@@ -663,23 +696,7 @@ pub fn compose_scene(
 // Ported from omnishot/motion_blur.py (compose_motion)
 #[must_use]
 pub fn compose_motion(frame: &Image, t: f64, metadata: &Value, options: &Options) -> Image {
-    let times = crate::motion_blur::shutter_times(t, options);
-    if times.len() == 1 || blur_level(options) == 0 {
-        return compose_frame(frame, t, metadata, options, None);
-    }
-    let mut accumulation = vec![0u32; frame.width * frame.height * 4];
-    for seconds in &times {
-        let rendered = compose_frame(frame, *seconds, metadata, options, None);
-        for (target, source) in accumulation.iter_mut().zip(rendered.data.iter()) {
-            *target += u32::from(*source);
-        }
-    }
-    let count = times.len() as u32;
-    let data: Vec<u8> = accumulation
-        .into_iter()
-        .map(|value| ((value + count / 2) / count).min(255) as u8)
-        .collect();
-    Image::new(frame.width, frame.height, data)
+    compose_frame(frame, t, metadata, options, None)
 }
 
 /// Build the `ffmpeg` encoder arguments for an export.
@@ -823,56 +840,72 @@ pub fn export_studio<R: CommandRunner>(
     if width == 0 || height == 0 {
         return Err("Cannot open source recording".to_owned());
     }
-
-    let mut args: Vec<String> = vec![
-        "-hide_banner".to_owned(),
-        "-loglevel".to_owned(),
-        "error".to_owned(),
-        "-y".to_owned(),
-    ];
-    if request.start > 0.0 {
-        args.push("-ss".to_owned());
-        args.push(request.start.to_string());
-    }
-    args.push("-i".to_owned());
-    let source = request.source.to_string_lossy().into_owned();
-    args.push(source.clone());
-    args.extend([
-        "-f".to_owned(),
-        "rawvideo".to_owned(),
-        "-pix_fmt".to_owned(),
-        "rgb24".to_owned(),
-        "-".to_owned(),
-    ]);
-    let decode = runner
-        .run(
-            &CommandSpec::new("ffmpeg")
-                .args(args)
-                .timeout(std::time::Duration::from_secs(30)),
-        )
-        .map_err(|error| error.to_string())?;
-    if decode.stdout.len() < width * height * 3 {
-        return Err("Could not decode recording".to_owned());
-    }
+    let source_fps = stream
+        .get("avg_frame_rate")
+        .and_then(Value::as_str)
+        .and_then(parse_frame_rate)
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .unwrap_or(30.0);
 
     let metadata = request.metadata;
     let options = request.options;
     let per_frame = width * height * 3;
-    let mut raw = Vec::with_capacity(plan.times.len() * per_frame);
-    for time in &plan.times {
-        let index = ((time - request.start).max(0.0) * request.fps) as usize;
-        let offset = index * per_frame;
-        let Some(bytes) = decode.stdout.get(offset..offset + per_frame) else {
-            return Err("Could not decode recording".to_owned());
-        };
-        let image = rgb_to_image(bytes, width, height);
-        let composed = compose_frame(&image, *time, metadata, options, None);
-        raw.extend(pixels_to_rgb(&composed));
+    let mut raw = Vec::new();
+    let mut output_size: Option<(usize, usize)> = None;
+    for (a, b) in &plan.segments {
+        let count = segment_frame_counts(&[(*a, *b)], request.fps, request.speed)[0].2;
+        if count == 0 {
+            continue;
+        }
+        // Decode one retained interval on its own, so a cut never pulls frames
+        // from the other side of the gap and memory stays bounded per segment.
+        let decoded = runner
+            .run(
+                &CommandSpec::new("ffmpeg")
+                    .args(["-hide_banner", "-loglevel", "error"])
+                    .args(["-ss"])
+                    .arg(a.to_string())
+                    .args(["-t"])
+                    .arg((b - a).to_string())
+                    .args(["-i"])
+                    .arg(request.source.to_string_lossy().into_owned())
+                    .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                    .timeout(std::time::Duration::from_secs(30)),
+            )
+            .map_err(|error| error.to_string())?;
+        let available = decoded.stdout.len() / per_frame;
+        for index in 0..count {
+            let time = a + index as f64 * request.speed / request.fps;
+            let local =
+                (((time - a) * source_fps).round() as usize).min(available.saturating_sub(1));
+            let offset = local * per_frame;
+            let Some(bytes) = decoded.stdout.get(offset..offset + per_frame) else {
+                return Err("Could not decode recording".to_owned());
+            };
+            let image = rgb_to_image(bytes, width, height);
+            let composed = compose_frame(&image, time, metadata, options, None);
+            // Padding, aspect and zoom decide the final size; the encoder must
+            // be told that size, not the source's.
+            output_size.get_or_insert((composed.width, composed.height));
+            raw.extend(pixels_to_rgb(&composed));
+        }
+    }
+    let Some((out_width, out_height)) = output_size else {
+        return Err("The edit contains no frames".to_owned());
+    };
+    let expected = out_width * out_height * 3;
+    if raw.len() % expected != 0 {
+        return Err("The composition changed size mid-export".to_owned());
     }
 
     let mut command = CommandSpec::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(encoder_arguments(options, width, height, request.fps));
+        .args(encoder_arguments(
+            options,
+            out_width,
+            out_height,
+            request.fps,
+        ));
     let partial = partial_path(request.destination);
     command = command.arg(partial.to_string_lossy().into_owned());
     command = command.stdin(raw);
@@ -885,6 +918,16 @@ pub fn export_studio<R: CommandRunner>(
             Err(error.to_string())
         }
     }
+}
+
+fn parse_frame_rate(value: &str) -> Option<f64> {
+    let (numerator, denominator) = value.split_once('/')?;
+    let numerator: f64 = numerator.parse().ok()?;
+    let denominator: f64 = denominator.parse().ok()?;
+    if denominator == 0.0 {
+        return None;
+    }
+    Some(numerator / denominator)
 }
 
 fn rgb_to_image(bytes: &[u8], width: usize, height: usize) -> Image {

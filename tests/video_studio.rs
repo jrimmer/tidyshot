@@ -525,3 +525,127 @@ fn with_blur(options: &Options, level: i32) -> Options {
     out.insert("motion_blur".to_owned(), Value::Number(f64::from(level)));
     out
 }
+
+#[test]
+fn a_real_export_writes_a_playable_higher_resolution_file() {
+    // Ported from tests/test_studio.py (test_studio_export_real_media).
+    // Skips when the ffmpeg CLI is unavailable, as the source test does.
+    if !command_available("ffmpeg") || !command_available("ffprobe") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tidyshot-video-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("source.mp4");
+    let destination = dir.join("edited.mp4");
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=15",
+            "-t",
+            "1.2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let metadata = Value::Object(BTreeMap::from([
+        (
+            "cursor".to_owned(),
+            Value::Array(vec![
+                cursor(0.0, 0.2),
+                Value::Object(BTreeMap::from([
+                    ("t".to_owned(), Value::Number(1.2)),
+                    ("x".to_owned(), Value::Number(0.8)),
+                    ("y".to_owned(), Value::Number(0.6)),
+                ])),
+            ]),
+        ),
+        (
+            "events".to_owned(),
+            Value::Array(vec![Value::Object(BTreeMap::from([
+                ("kind".to_owned(), Value::String("click".to_owned())),
+                ("t".to_owned(), Value::Number(0.4)),
+                ("x".to_owned(), Value::Number(0.5)),
+                ("y".to_owned(), Value::Number(0.5)),
+            ]))]),
+        ),
+    ]));
+    let options = Options::from([
+        ("start".to_owned(), Value::Number(0.0)),
+        ("end".to_owned(), Value::Number(1.1)),
+        ("speed".to_owned(), Value::Number(1.0)),
+        ("fps".to_owned(), Value::Number(15.0)),
+        ("width".to_owned(), Value::Number(320.0)),
+        ("padding".to_owned(), Value::Number(20.0)),
+        ("background".to_owned(), Value::String("#25304f".to_owned())),
+        ("cursor".to_owned(), Value::Bool(true)),
+        (
+            "cuts".to_owned(),
+            Value::Array(vec![Value::Array(vec![
+                Value::Number(0.6),
+                Value::Number(0.8),
+            ])]),
+        ),
+    ]);
+    let request = ExportRequest {
+        source: &source,
+        destination: &destination,
+        metadata: &metadata,
+        options: &options,
+        fps: 15.0,
+        speed: 1.0,
+        start: 0.0,
+        end: 1.1,
+        cuts: &[(0.6, 0.8)],
+    };
+    tidyshot::studio::export_studio(&tidyshot::commands::SystemRunner, &request).unwrap();
+    assert!(destination.exists());
+
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=width,height:format=duration",
+            "-of",
+            "json",
+        ])
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert!(probe.status.success());
+    let probe = tidyshot::json::parse(&String::from_utf8_lossy(&probe.stdout)).unwrap();
+    let stream = &probe.get("streams").unwrap().as_array().unwrap()[0];
+    // 320x240 plus 20 px padding on each side is 360x280.
+    assert_eq!(stream.get("width").and_then(Value::as_f64), Some(360.0));
+    assert_eq!(stream.get("height").and_then(Value::as_f64), Some(280.0));
+    let duration = probe
+        .get("format")
+        .and_then(|f| f.get("duration"))
+        .and_then(Value::as_str)
+        .and_then(|d| d.parse::<f64>().ok())
+        .unwrap();
+    assert!(duration > 0.3 && duration < 1.2, "{duration}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn command_available(program: &str) -> bool {
+    std::process::Command::new(program)
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
