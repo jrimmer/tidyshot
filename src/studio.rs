@@ -331,7 +331,7 @@ pub fn compose_frame(
     camera: Option<&Image>,
 ) -> Image {
     let (canvas, zoom) = compose_screen(frame, t, metadata, options);
-    compose_scene(&canvas, metadata, options, camera, zoom)
+    compose_scene(&canvas, t, metadata, options, camera, zoom)
 }
 
 /// Draw the input-layer effects (cursor and clicks) and apply the zoom crop.
@@ -460,12 +460,13 @@ fn zoom_crop(frame: &Image, zoom: f64, zx: f64, zy: f64) -> Image {
 #[must_use]
 pub fn compose_scene(
     canvas: &Image,
+    t: f64,
     metadata: &Value,
     options: &Options,
     camera: Option<&Image>,
     zoom: f64,
 ) -> Image {
-    let options = video_camera::options_at(metadata, options, 0.0);
+    let options = video_camera::options_at(metadata, options, t);
     let width = canvas.width;
     let height = canvas.height;
     let output_width = options
@@ -616,7 +617,7 @@ pub fn compose_scene(
     }
 
     if options.get("keys").is_none_or(Value::is_truthy) {
-        let keys = visible_keys(&edited_events(metadata, &options), 0.0, &options, metadata);
+        let keys = visible_keys(&edited_events(metadata, &options), t, &options, metadata);
         if !keys.is_empty() {
             let (chip_background, _) = key_colors(&options);
             let chip = color(

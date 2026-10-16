@@ -16,6 +16,9 @@ use crate::json::Value;
 /// The environment variable Qt's media backend reads once at startup.
 pub const VARIABLE: &str = "QT_FFMPEG_DECODING_HW_DEVICE_TYPES";
 
+/// The stored setting's default: previews decode in software.
+pub const DEFAULT_HARDWARE_VIDEO_DECODING: bool = false;
+
 /// The interaction between the setting, the GPU and an explicit override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderPolicy {
