@@ -19,8 +19,8 @@ use super::{Workspace, checkpoint};
 /// The result of recovering interrupted takes.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RecoveryOutcome {
-    /// Recordings that were recovered, in the order they were found.
-    pub recovered: Vec<String>,
+    /// Recordings that were recovered, with the message written to the sidecar.
+    pub recovered: Vec<(String, String)>,
     /// Recordings that could not be recovered and were marked failed.
     pub failed: Vec<String>,
     /// Recordings still leased by a live encoder.
@@ -75,7 +75,7 @@ pub fn recover<R: CommandRunner>(
     prefer_source: bool,
 ) -> io::Result<Option<String>> {
     let metadata_path = swap_suffix(path, ".studio.json");
-    let restored = checkpoint::restore_checkpoint(workspace, path).unwrap_or(false);
+    let restored = checkpoint::restore_checkpoint(workspace, runner, path).unwrap_or(false);
 
     let metadata = fs::read_to_string(&metadata_path)
         .ok()

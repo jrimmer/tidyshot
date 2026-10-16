@@ -8,19 +8,20 @@
 //! never ends mid-record.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, Read, Seek, Write};
+use std::io::{self, BufRead, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::commands::CommandRunner;
 use crate::json::Value;
 
 use super::Workspace;
-use super::recovery::swap_suffix;
+use super::recovery::{self, swap_suffix};
 
 /// The maximum size of a single checkpoint line, matching the Python cap.
-const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 /// A checkpoint writer that owns the append fd.
 ///
@@ -123,18 +124,9 @@ pub fn read_checkpoint(path: &Path) -> Value {
     let Ok(file) = File::open(path) else {
         return Value::Object(metadata);
     };
-    let reader = io::BufReader::new(file);
-    let mut handle = reader.take(MAX_LINE_BYTES * 64);
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        let Ok(read) = handle.read_until(b'\n', &mut line) else {
-            break;
-        };
-        if read == 0 {
-            break;
-        }
-        // A torn tail has no closing newline; stop at the last complete line.
+    let mut reader = io::BufReader::new(file);
+    // A torn tail has no closing newline; stop at the last complete line.
+    while let Ok(Some(line)) = read_line_limited(&mut reader, MAX_LINE_BYTES) {
         if !line.ends_with(b"\n") {
             break;
         }
@@ -164,9 +156,45 @@ pub fn read_checkpoint(path: &Path) -> Value {
     Value::Object(metadata)
 }
 
+/// Read one line, capped at `max` bytes, mirroring `readline(max)` in Python.
+///
+/// A line that reaches the cap without a newline is returned anyway, so the
+/// caller stops on the same torn or oversized record the source rejects.
+fn read_line_limited<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(line));
+        }
+        if let Some(index) = available.iter().position(|&byte| byte == b'\n') {
+            line.extend_from_slice(&available[..=index]);
+            reader.consume(index + 1);
+            return Ok(Some(line));
+        }
+        let room = max.saturating_sub(line.len());
+        if room == 0 {
+            return Ok(Some(line));
+        }
+        let take = room.min(available.len());
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if line.len() >= max {
+            return Ok(Some(line));
+        }
+    }
+}
+
 /// Restore a checkpoint into a sidecar unless a final one already committed.
 // Ported from omnishot/recording_checkpoint.py (restore_checkpoint)
-pub fn restore_checkpoint(workspace: &Workspace, path: &Path) -> io::Result<bool> {
+pub fn restore_checkpoint<R: CommandRunner>(
+    workspace: &Workspace,
+    runner: &R,
+    path: &Path,
+) -> io::Result<bool> {
     let checkpoint = swap_suffix(path, ".studio.checkpoint");
     if !checkpoint.is_file() {
         return Ok(false);
@@ -190,7 +218,8 @@ pub fn restore_checkpoint(workspace: &Workspace, path: &Path) -> io::Result<bool
             .ok()
             .and_then(|c| c.parent().map(Path::to_path_buf))
             == workspace.tracks().canonicalize().ok()
-            && camera.is_file();
+            && camera.is_file()
+            && recovery::valid_video(runner, &camera);
         if !valid {
             entries.remove("camera_path");
             entries.insert(
@@ -221,8 +250,11 @@ impl CheckpointScheduler {
         })
     }
 
-    /// Write one metadata batch.
+    /// Write one metadata batch, unless the scheduler has stopped.
     pub fn tick(&self, record: &Value) -> io::Result<()> {
+        if self.stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let mut guard = self.writer.lock().unwrap();
         if let Some(writer) = guard.as_mut() {
             writer.append(record)?;
@@ -263,6 +295,22 @@ pub const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(1000);
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// No ffprobe video is ever valid, which exercises the camera-error path.
+    struct NoVideoRunner;
+
+    impl CommandRunner for NoVideoRunner {
+        fn run(
+            &self,
+            _spec: &crate::commands::CommandSpec,
+        ) -> Result<crate::commands::CommandOutput, crate::commands::CommandError> {
+            Ok(crate::commands::CommandOutput {
+                status: 0,
+                stdout: br#"{"streams":[]}"#.to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
 
     fn scratch(name: &str) -> Workspace {
         let dir =
@@ -327,13 +375,14 @@ mod tests {
     fn torn_last_batch_keeps_previous_checkpoint() {
         let workspace = scratch("torn");
         let path = workspace.captures().join("take.mp4");
+        let runner = NoVideoRunner;
         let checkpoint = swap_suffix(&path, ".studio.checkpoint");
         fs::write(
             &checkpoint,
             b"{\"version\":1,\"source_path\":\"take.mp4\",\"cursor\":[{\"t\":1}]}\n{\"cursor\":[",
         )
         .unwrap();
-        assert!(restore_checkpoint(&workspace, &path).unwrap());
+        assert!(restore_checkpoint(&workspace, &runner, &path).unwrap());
         let sidecar = swap_suffix(&path, ".studio.json");
         let restored = crate::json::parse(&fs::read_to_string(&sidecar).unwrap()).unwrap();
         assert_eq!(restored.get("cursor").unwrap().as_array().unwrap().len(), 1);
@@ -348,9 +397,29 @@ mod tests {
             ("events", Value::Array(Vec::new())),
         ]);
         fs::write(&sidecar, final_value.to_string_pretty()).unwrap();
-        assert!(restore_checkpoint(&workspace, &path).unwrap());
+        assert!(restore_checkpoint(&workspace, &runner, &path).unwrap());
         let existing = crate::json::parse(&fs::read_to_string(&sidecar).unwrap()).unwrap();
         assert_eq!(existing, final_value);
+    }
+
+    #[test]
+    fn camera_track_without_video_becomes_an_error() {
+        let workspace = scratch("camera");
+        let path = workspace.captures().join("take.mp4");
+        let camera = workspace.tracks().join("take-camera.mp4");
+        fs::write(&camera, b"not playable").unwrap();
+        let checkpoint = swap_suffix(&path, ".studio.checkpoint");
+        let record = obj(&[
+            ("version", Value::Number(1.0)),
+            ("camera_path", Value::String(camera.display().to_string())),
+        ]);
+        fs::write(&checkpoint, format!("{}\n", record.to_string_compact())).unwrap();
+
+        assert!(restore_checkpoint(&workspace, &NoVideoRunner, &path).unwrap());
+        let sidecar = swap_suffix(&path, ".studio.json");
+        let restored = crate::json::parse(&fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert!(restored.get("camera_path").is_none());
+        assert!(restored.get("camera_error").is_some());
     }
 
     #[test]
