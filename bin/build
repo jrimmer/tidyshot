@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# bin/build — build tidyshot into build/tidyshot.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mkdir -p build
+cargo build --release --offline
+cp target/release/tidyshot build/tidyshot
+echo "built build/tidyshot"

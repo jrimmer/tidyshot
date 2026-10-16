@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# bin/test — unit tests plus the offscreen QML load, offscreen-safe.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export QT_QPA_PLATFORM=offscreen
+cargo test --offline
+echo "TIDYSHOT TESTS OK"

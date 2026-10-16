@@ -3,3 +3,6 @@ Cargo.lock.bak
 *.so
 *.o
 /work/
+/target
+.beads/
+.qmlls.ini
