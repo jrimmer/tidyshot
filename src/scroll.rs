@@ -852,6 +852,34 @@ mod tests {
     }
 
     #[test]
+    fn auto_scroll_moves_the_pointer_once_when_it_starts() {
+        let (mut session, _log, _completed, _cancelled) =
+            session(Rect::new(10, 10, 200, 100), false);
+        session.running = true;
+        // Enabling auto-scroll centres the pointer once.
+        session.set_auto(true);
+        // auto_advance must not recentre; it only checks the pointer is
+        // inside and injects the wheel step, matching the reference.
+        session.auto_advance();
+        assert!(session.auto);
+        assert!(session.scrolled_last);
+    }
+
+    #[test]
+    fn auto_scroll_pauses_when_the_pointer_leaves_the_capture() {
+        let (mut session, log, _completed, _cancelled) =
+            session(Rect::new(10, 10, 200, 100), false);
+        session.running = true;
+        session.auto = true;
+        // Move the fake pointer outside the selection through the input.
+        session.input.move_cursor(0, 0).unwrap();
+        session.auto_advance();
+        assert!(session.auto, "a pointer outside pauses without disabling");
+        assert!(session.status().contains("Move the pointer inside"));
+        assert!(!log.events().iter().any(|event| event.starts_with("scroll")));
+    }
+
+    #[test]
     fn finish_waits_for_the_current_frame_without_starting_another() {
         let (mut session, _log, completed, _cancelled) =
             session(Rect::new(10, 10, 200, 100), false);
