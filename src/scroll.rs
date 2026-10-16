@@ -491,6 +491,32 @@ pub struct SystemScrollInput<'a, R: CommandRunner> {
     pub native: PathBuf,
 }
 
+/// Locate the directory holding the built native helpers.
+///
+/// The helpers live beside the executable in an installed build and in the
+/// source tree during development. Returning both candidates lets the caller
+/// report a missing helper with an actionable message.
+#[must_use]
+pub fn native_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("native"));
+        candidates.push(dir.to_path_buf());
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("native"));
+    candidates
+}
+
+/// The first candidate directory that holds a built `scroll-helper`.
+#[must_use]
+pub fn native_dir() -> Option<PathBuf> {
+    native_candidates()
+        .into_iter()
+        .find(|dir| dir.join("scroll-helper").is_file())
+}
+
 impl<R: CommandRunner> ScrollInput for SystemScrollInput<'_, R> {
     fn cursor(&self) -> Result<(i32, i32), String> {
         let value = hypr(self.runner, "cursorpos").map_err(|error| error.to_string())?;
@@ -1193,5 +1219,27 @@ mod limit_tests {
         assert_eq!(session.output().unwrap().data, first_image.data);
         // A retry is offered and a fresh start is possible.
         assert!(session.start_label.contains("Retry"));
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+
+    #[test]
+    fn native_dir_lookup_prefers_a_directory_with_the_helper() {
+        // The workspace has a built helper once bin/native has run; the
+        // lookup must return a path that actually contains the binary.
+        if let Some(dir) = native_dir() {
+            assert!(dir.join("scroll-helper").is_file());
+        }
+        // Candidates are always non-empty and include the manifest directory,
+        // so a missing helper is reported against a concrete location.
+        let candidates = native_candidates();
+        assert!(!candidates.is_empty());
+        assert!(
+            candidates.iter().any(|dir| dir.ends_with("native")),
+            "{candidates:?}"
+        );
     }
 }
