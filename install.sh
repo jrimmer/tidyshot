@@ -14,9 +14,14 @@ fi
 
 # Fail before changing user configuration when prerequisites are missing.
 task_missing=()
-for task_command in cargo qmake6 hyprctl omarchy omarchy-shell grim slurp wl-copy ffmpeg ffprobe tesseract gpu-screen-recorder update-desktop-database update-mime-database xdg-mime notify-send; do
+for task_command in cargo hyprctl omarchy omarchy-shell grim slurp wl-copy ffmpeg ffprobe tesseract gpu-screen-recorder update-desktop-database update-mime-database xdg-mime notify-send; do
   command -v "$task_command" >/dev/null 2>&1 || task_missing+=("$task_command")
 done
+# cxx-qt-build finds Qt through the `QMAKE` override or a `qmake`/`qmake6`
+# binary on PATH; do not insist on the distro-specific `qmake6` name.
+if [[ -z ${QMAKE:-} ]] && ! command -v qmake6 >/dev/null 2>&1 && ! command -v qmake >/dev/null 2>&1; then
+  task_missing+=(qmake6)
+fi
 if (( ${#task_missing[@]} )); then
   printf 'Missing dependencies: %s\nSee README.md for installation instructions.\n' "${task_missing[*]}" >&2
   exit 1
