@@ -63,6 +63,29 @@ impl Default for TextSettings {
     }
 }
 
+impl TextSettings {
+    /// Read the OCR keys out of a JSON settings object, keeping defaults for
+    /// anything missing or the wrong type.
+    // Ported from omnishot/backend.py (DEFAULTS)
+    #[must_use]
+    pub fn from_value(settings: &crate::json::Value) -> Self {
+        let get = |key: &str| settings.get(key);
+        Self {
+            ocr_languages: get("ocr_languages")
+                .and_then(crate::json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(ocr::AUTO)
+                .to_owned(),
+            ocr_linebreaks: get("ocr_linebreaks")
+                .and_then(crate::json::Value::as_bool)
+                .unwrap_or(true),
+            ocr_detect_links: get("ocr_detect_links")
+                .and_then(crate::json::Value::as_bool)
+                .unwrap_or(true),
+        }
+    }
+}
+
 /// Reads QR codes out of an image.
 ///
 /// No pure-Rust decoder is vendored yet; production wires a decoder through
@@ -540,6 +563,30 @@ pub fn present<R: CommandRunner>(
     Presentation::Dialog(result)
 }
 
+/// Extract text from `path` under `settings`, then present the result.
+///
+/// `linebreaks` overrides the saved preference for this call only. This is the
+/// whole `recognize_text` path: extract once, then copy or open the review
+/// dialog. When nothing was recognized the OCR/QR error is returned so the
+/// caller can surface it.
+// Ported from omnishot/app.py (recognize_text)
+pub fn recognize<R: CommandRunner, Q: QrReader>(
+    runner: &R,
+    qr: &Q,
+    path: &Path,
+    settings: &TextSettings,
+    linebreaks: Option<bool>,
+) -> Result<Presentation, TextError> {
+    let value = extract(
+        runner,
+        qr,
+        path,
+        &settings.ocr_languages,
+        linebreaks.unwrap_or(settings.ocr_linebreaks),
+    )?;
+    Ok(present(runner, &value, settings, false))
+}
+
 // --- QML bridge: the recognized-text dialog ------------------------------
 
 #[cxx_qt::bridge]
@@ -903,5 +950,77 @@ mod tests {
         let no_detect = TextResult::new("see https://example.com/x now", false, false);
         assert_eq!(no_detect.open(0), None);
         assert!(!no_detect.can_open());
+    }
+
+    #[test]
+    fn recognize_extracts_then_copies_or_opens_the_dialog() {
+        // Detection off and a clean copy: the whole path is a copy action.
+        let runner = FakeRunner::default();
+        runner.push("hello");
+        runner.push("");
+        let qr = FakeQr::returning("");
+        let settings = TextSettings {
+            ocr_languages: "eng".to_owned(),
+            ocr_detect_links: false,
+            ..TextSettings::default()
+        };
+        assert_eq!(
+            recognize(&runner, &qr, Path::new("shot.png"), &settings, None).unwrap(),
+            Presentation::Copied
+        );
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.program == "wl-copy")
+        );
+
+        // A line-break override reaches the OCR command.
+        let runner = FakeRunner::default();
+        runner.push("Silver meadow\nAmber sunrise");
+        runner.push("");
+        let qr = FakeQr::returning("");
+        let linebreaks_off = TextSettings {
+            ocr_languages: "eng".to_owned(),
+            ocr_detect_links: false,
+            ..TextSettings::default()
+        };
+        recognize(
+            &runner,
+            &qr,
+            Path::new("shot.png"),
+            &linebreaks_off,
+            Some(false),
+        )
+        .unwrap();
+        let seen = runner.seen.lock().unwrap();
+        assert!(seen.iter().any(|spec| {
+            spec.program == "wl-copy"
+                && String::from_utf8_lossy(spec.stdin.as_deref().unwrap())
+                    .contains("Silver meadow Amber sunrise")
+        }));
+    }
+
+    #[test]
+    fn settings_default_and_json_override() {
+        assert_eq!(TextSettings::default().ocr_languages, ocr::AUTO);
+        assert!(TextSettings::default().ocr_linebreaks);
+        assert!(TextSettings::default().ocr_detect_links);
+
+        let value = crate::json::parse(
+            r#"{"ocr_languages":"eng+spa","ocr_linebreaks":false,"ocr_detect_links":false}"#,
+        )
+        .unwrap();
+        let settings = TextSettings::from_value(&value);
+        assert_eq!(settings.ocr_languages, "eng+spa");
+        assert!(!settings.ocr_linebreaks);
+        assert!(!settings.ocr_detect_links);
+
+        let partial =
+            TextSettings::from_value(&crate::json::parse("{\"ocr_languages\":\"\"}").unwrap());
+        assert_eq!(partial.ocr_languages, ocr::AUTO);
+        assert!(partial.ocr_linebreaks);
     }
 }
