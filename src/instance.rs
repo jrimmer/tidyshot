@@ -180,7 +180,14 @@ impl Instance {
     /// Returns `Ok(None)` when the peer sent nothing usable, so one bad client
     /// never brings the server down.
     pub fn accept(&self) -> Result<Option<Vec<String>>, InstanceError> {
-        let (stream, _) = self.listener.accept().map_err(InstanceError::Read)?;
+        let (stream, _) = match self.listener.accept() {
+            Ok(accepted) => accepted,
+            // A sender that connects and exits before the accept completes
+            // (ECONNABORTED) must not end the listener for the rest of the
+            // session; only real read failures should.
+            Err(error) if transient_accept(&error) => return Ok(None),
+            Err(error) => return Err(InstanceError::Read(error)),
+        };
         match read_command(stream) {
             Ok(Some(argv)) => Ok(Some(argv)),
             Ok(None) => Ok(None),
@@ -196,6 +203,17 @@ impl Drop for Instance {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket);
     }
+}
+
+/// Whether an `accept()` failure is a peer race rather than a broken listener.
+fn transient_accept(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    )
 }
 
 /// Read one newline-terminated command from a connection.
@@ -345,6 +363,24 @@ mod tests {
         let _instance = Instance::bind(&socket).unwrap();
         let mode = fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn a_peer_race_is_not_fatal_to_the_listener() {
+        // The kinds a quick connect-and-exit peer can produce must be treated
+        // as "no command this time", not as a dead socket.
+        for kind in [
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::ConnectionReset,
+        ] {
+            assert!(transient_accept(&io::Error::new(kind, "peer race")));
+        }
+        assert!(!transient_accept(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "not transient"
+        )));
     }
 
     #[test]

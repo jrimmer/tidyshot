@@ -6,6 +6,10 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+
+        include!("tidyshot/src/qt_shutdown.h");
+        /// Queue a graceful Qt shutdown on the event-loop thread.
+        fn tidyshot_request_quit();
     }
 
     extern "RustQt" {

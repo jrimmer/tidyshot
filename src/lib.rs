@@ -49,11 +49,28 @@ pub mod ui_scale;
 
 /// Initialise the cxx-qt registrations and run the application.
 pub fn run() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    run_with(&argv);
+}
+
+/// Run the application for one argument vector.
+///
+/// The first invocation resolves any URL coordinates against the live
+/// compositor before the window loads, so a direct coordinate link behaves
+/// the same as one forwarded to a running instance. A resolution failure is
+/// reported and exits instead of starting an empty GUI.
+pub fn run_with(argv: &[String]) {
     cxx_qt::init_crate!(tidyshot);
     cxx_qt::init_qml_module!("tidyshot");
-    start_instance();
     note_startup_ocr();
+    if let Err(error) = app::route_and_resolve(argv, &commands::SystemRunner) {
+        eprintln!("tidyshot: {error}");
+        std::process::exit(2);
+    }
     let mut app = cxx_qt_lib::QGuiApplication::new();
+    // Bind the socket after the application exists so a forwarded `quit`
+    // reaches a live event loop.
+    start_instance();
     let mut engine = cxx_qt_lib::QQmlApplicationEngine::new();
     if let Some(engine) = engine.as_mut() {
         engine.load(&cxx_qt_lib::QUrl::from("qrc:/qt/qml/tidyshot/qml/Main.qml"));
@@ -83,15 +100,21 @@ fn start_instance() {
         let _ = instance::serve(&instance, |argv| {
             // Re-parse and route so a forwarded command is understood exactly
             // as the command line understands it, and a malformed payload is
-            // reported rather than dropped silently. Window actions are
+            // reported rather than dropped silently. A coordinate URL is
+            // resolved against the live compositor here. Window actions are
             // handled by the layer that owns the windows; the headless ones
             // are performed here.
-            match app::route_argv(&argv) {
-                Ok(app::Command::Quit) => std::process::exit(0),
+            match app::route_and_resolve(&argv, &commands::SystemRunner) {
+                Ok(app::Command::Quit) => {
+                    // Queue the quit onto the Qt thread and stop accepting;
+                    // the listener is dropped so its socket file is removed.
+                    crate::bridge::qobject::tidyshot_request_quit();
+                    return false;
+                }
                 Ok(_) => {}
                 Err(error) => eprintln!("tidyshot: {error}"),
             }
-            // Keep accepting: only `quit` ends the loop, and it exits above.
+            // Keep accepting: only `quit` ends the loop.
             true
         });
     });

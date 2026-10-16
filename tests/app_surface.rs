@@ -142,6 +142,30 @@ fn documented_url_parameters_survive_parsing_and_routing() {
         route(&local).unwrap(),
         Command::Edit(PathBuf::from("/tmp/a.png"))
     );
+    // Coordinate parameters are carried on the command until dispatch.
+    let coordinates =
+        parse(&["omnishot://capture-area?x=100&y=120&width=200&height=150&display=1"]);
+    match route(&coordinates).unwrap() {
+        Command::Capture {
+            coordinates: Some(coords),
+            ..
+        } => {
+            assert_eq!(coords.x, Some(100));
+            assert_eq!(coords.y, Some(120));
+            assert_eq!(coords.width, Some(200));
+            assert_eq!(coords.height, Some(150));
+            assert_eq!(coords.display, Some(1));
+        }
+        other => panic!("{other:?}"),
+    }
+    let recording = parse(&["omnishot://record-screen?x=10&y=20&width=300&height=200"]);
+    match route(&recording).unwrap() {
+        Command::Record {
+            coordinates: Some(coords),
+            ..
+        } => assert_eq!(coords.width, Some(300)),
+        other => panic!("{other:?}"),
+    }
     // OCR line-break overrides.
     let url = parse(&["omnishot://capture-text?linebreaks=false"]);
     match route(&url).unwrap() {

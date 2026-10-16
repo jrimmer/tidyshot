@@ -52,6 +52,9 @@ pub enum Command {
     Capture {
         command: String,
         geometry: Option<String>,
+        /// URL coordinates still to be resolved into `geometry` using the
+        /// live monitors at dispatch time.
+        coordinates: Option<crate::api::Coordinates>,
         action: Option<String>,
         delay: Option<i64>,
         linebreaks: Option<bool>,
@@ -97,6 +100,8 @@ pub enum Command {
     /// Open recording setup.
     Record {
         geometry: Option<String>,
+        /// URL coordinates still to be resolved into `geometry`.
+        coordinates: Option<crate::api::Coordinates>,
     },
     /// Stop the active recording.
     Stop,
@@ -141,6 +146,7 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
         return Ok(Command::Capture {
             command: "area".to_owned(),
             geometry: args.geometry.clone(),
+            coordinates: args.url.as_ref().and_then(|url| url.coordinates),
             action: Some(action.to_string()),
             delay: args.delay,
             linebreaks: None,
@@ -152,6 +158,7 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
     let capture = |name: &str, action: Option<String>| Command::Capture {
         command: name.to_owned(),
         geometry: args.geometry.clone(),
+        coordinates: args.url.as_ref().and_then(|url| url.coordinates),
         action,
         delay: args.delay,
         linebreaks: args.url.as_ref().and_then(|url| url.linebreaks),
@@ -227,6 +234,7 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
         }
         "record" => Ok(Command::Record {
             geometry: args.geometry.clone(),
+            coordinates: args.url.as_ref().and_then(|url| url.coordinates),
         }),
         "stop" => Ok(Command::Stop),
         "pause" => Ok(Command::Pause),
@@ -303,32 +311,136 @@ pub fn capture_actions(settings: &Value, recording: bool) -> BTreeSet<String> {
     actions
 }
 
-/// Resolve URL coordinates into a CLI geometry string.
+/// Validate an explicit after-capture action from a URL.
+pub fn valid_action(action: &str) -> bool {
+    CAPTURE_ACTIONS.contains(&action)
+}
+
+/// Fill a command's `geometry` from its URL coordinates.
 ///
-/// The URL API uses a lower-left origin; `--geometry` uses the compositor's
-/// upper-left origin, so this converts once at the boundary.
-// Ported from omnishot/app.py (dispatch)
-pub fn url_geometry_text(
-    args: &Args,
+/// A capture or recording link that names `x`/`y`/`width`/`height`/
+/// `display` is resolved against the live monitors and cursor here, so a
+/// forwarded coordinate URL keeps its region instead of silently degrading
+/// to an interactive capture. Commands without coordinates are returned
+/// unchanged.
+pub fn resolve_geometry(
+    command: Command,
+    monitors: &[crate::geometry::MonitorGeometry],
+    cursor: crate::api::Point,
+) -> Result<Command, RouteError> {
+    match command {
+        Command::Capture {
+            command,
+            geometry,
+            coordinates,
+            action,
+            delay,
+            linebreaks,
+            start,
+            autoscroll,
+        } => {
+            let geometry = geometry.or(resolve_coordinates(coordinates, monitors, cursor)?);
+            Ok(Command::Capture {
+                command,
+                geometry,
+                coordinates,
+                action,
+                delay,
+                linebreaks,
+                start,
+                autoscroll,
+            })
+        }
+        Command::Record {
+            geometry,
+            coordinates,
+        } => {
+            let geometry = geometry.or(resolve_coordinates(coordinates, monitors, cursor)?);
+            Ok(Command::Record {
+                geometry,
+                coordinates,
+            })
+        }
+        command => Ok(command),
+    }
+}
+
+fn resolve_coordinates(
+    coordinates: Option<crate::api::Coordinates>,
     monitors: &[crate::geometry::MonitorGeometry],
     cursor: crate::api::Point,
 ) -> Result<Option<String>, RouteError> {
-    let Some(url) = &args.url else {
-        return Ok(None);
-    };
-    let Some(coordinates) = &url.coordinates else {
+    let Some(coordinates) = coordinates else {
         return Ok(None);
     };
     let rect =
-        crate::api::url_geometry(coordinates, monitors, cursor).map_err(|error| RouteError {
+        crate::api::url_geometry(&coordinates, monitors, cursor).map_err(|error| RouteError {
             message: error.to_string(),
         })?;
     Ok(Some(crate::geometry::geometry_text(rect)))
 }
 
-/// Validate an explicit after-capture action from a URL.
-pub fn valid_action(action: &str) -> bool {
-    CAPTURE_ACTIONS.contains(&action)
+/// Read the connected monitors and pointer position for coordinate links.
+///
+/// The URL API uses a lower-left origin and a display index, so the live
+/// Hyprland data is needed before the rectangle can be computed. A missing
+/// or malformed reply surfaces an error rather than guessing.
+// Ported from omnishot/backend.py (capture_monitors, hypr)
+pub fn live_monitors<R: crate::commands::CommandRunner>(
+    runner: &R,
+) -> Result<(Vec<crate::geometry::MonitorGeometry>, crate::api::Point), RouteError> {
+    let monitors = crate::commands::hypr(runner, "monitors").map_err(|error| RouteError {
+        message: error.to_string(),
+    })?;
+    let rows = monitors.as_array().unwrap_or(&[]);
+    let geometries: Vec<crate::geometry::MonitorGeometry> = rows
+        .iter()
+        .map(|monitor| crate::geometry::MonitorGeometry {
+            x: number(monitor, "x"),
+            y: number(monitor, "y"),
+            width: number(monitor, "width"),
+            height: number(monitor, "height"),
+            scale: monitor.get("scale").and_then(Value::as_f64).unwrap_or(1.0),
+            transform: number(monitor, "transform"),
+        })
+        .collect();
+    let cursor = crate::commands::hypr(runner, "cursorpos")
+        .ok()
+        .map(|value| crate::api::Point {
+            x: number(&value, "x"),
+            y: number(&value, "y"),
+        })
+        .unwrap_or(crate::api::Point { x: 0, y: 0 });
+    Ok((geometries, cursor))
+}
+
+fn number(value: &Value, key: &str) -> i32 {
+    value
+        .get(key)
+        .and_then(Value::as_f64)
+        .map_or(0, |number| number as i32)
+}
+
+/// Resolve a command's URL coordinates against the live compositor.
+pub fn resolve_command<R: crate::commands::CommandRunner>(
+    command: Command,
+    runner: &R,
+) -> Result<Command, RouteError> {
+    let needs_coordinates = matches!(
+        &command,
+        Command::Capture {
+            coordinates: Some(_),
+            ..
+        } | Command::Record {
+            coordinates: Some(_),
+            ..
+        }
+    );
+    if !needs_coordinates {
+        return Ok(command);
+    }
+    let (monitors, cursor) = live_monitors(runner)?;
+    resolve_geometry(command, &monitors, cursor)
 }
 
 /// True when a settings tab is one the dialog knows.
@@ -349,6 +461,21 @@ pub fn route_argv(argv: &[String]) -> Result<Command, String> {
         Command::Unknown(command) => Err(format!("unknown command: {command}")),
         command => Ok(command),
     }
+}
+
+/// Parse, route and resolve a forwarded or direct command for dispatch.
+///
+/// This is the runtime entry the single-instance server and the initial
+/// invocation share. A URL that carries `x`/`y`/`width`/`height`/`display`
+/// has its region resolved here, against the live compositor, so the
+/// dispatch step app.py performs is not skipped.
+// Ported from omnishot/app.py (Controller.dispatch)
+pub fn route_and_resolve<R: crate::commands::CommandRunner>(
+    argv: &[String],
+    runner: &R,
+) -> Result<Command, String> {
+    let command = route_argv(argv)?;
+    resolve_command(command, runner).map_err(|error| error.to_string())
 }
 
 /// The newest capture in a history listing.
@@ -468,6 +595,7 @@ mod tests {
             Command::Capture {
                 command: "select".into(),
                 geometry: None,
+                coordinates: None,
                 action: None,
                 delay: None,
                 linebreaks: None,
@@ -484,6 +612,7 @@ mod tests {
             Command::Capture {
                 command: "area".into(),
                 geometry: None,
+                coordinates: None,
                 action: Some("save".into()),
                 delay: None,
                 linebreaks: None,
@@ -511,9 +640,8 @@ mod tests {
     fn url_coordinates_convert_into_a_geometry_string() {
         use crate::api::Point;
         use crate::geometry::MonitorGeometry;
-        let args =
-            parse_args(["omnishot://capture-area?x=100&y=120&width=200&height=150&display=1"])
-                .unwrap();
+        let command =
+            routed(&["omnishot://capture-area?x=100&y=120&width=200&height=150&display=1"]);
         let monitors = [MonitorGeometry {
             x: -1920,
             y: 0,
@@ -522,17 +650,87 @@ mod tests {
             scale: 1.5,
             transform: 0,
         }];
-        let geometry = url_geometry_text(&args, &monitors, Point { x: 0, y: 0 })
-            .unwrap()
-            .unwrap();
-        assert_eq!(geometry, "-1820,930 200x150");
-        // A command without coordinates needs no conversion.
-        let plain = parse_args(["area"]).unwrap();
-        assert!(
-            url_geometry_text(&plain, &monitors, Point { x: 0, y: 0 })
-                .unwrap()
-                .is_none()
+        let resolved = resolve_geometry(command, &monitors, Point { x: 0, y: 0 }).unwrap();
+        match resolved {
+            Command::Capture { geometry, .. } => {
+                assert_eq!(geometry.as_deref(), Some("-1820,930 200x150"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // A command without coordinates is untouched.
+        let plain = routed(&["area"]);
+        assert_eq!(
+            resolve_geometry(plain, &monitors, Point { x: 0, y: 0 }).unwrap(),
+            routed(&["area"])
         );
+    }
+
+    #[test]
+    fn a_forwarded_coordinate_url_keeps_its_region() {
+        // The live compositor supplies the monitors and pointer position; the
+        // forwarded command must come out with a concrete geometry, not an
+        // interactive capture.
+        use crate::commands::{CommandError, CommandOutput, CommandRunner, CommandSpec};
+        use std::sync::Mutex;
+
+        struct Fake {
+            seen: Mutex<Vec<CommandSpec>>,
+        }
+        impl CommandRunner for Fake {
+            fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+                self.seen.lock().unwrap().push(spec.clone());
+                let stdout = match spec.args.as_slice() {
+                    [flag, query] if flag == "-j" && query == "monitors" => {
+                        br#"[{"name":"left","x":0,"y":0,"width":1920,"height":1080,"scale":1.0,"transform":0,"focused":true}]"#.to_vec()
+                    }
+                    [flag, query] if flag == "-j" && query == "cursorpos" => {
+                        br#"{"x":100,"y":200}"#.to_vec()
+                    }
+                    _ => b"false".to_vec(),
+                };
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout,
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let runner = Fake {
+            seen: Mutex::new(Vec::new()),
+        };
+        let argv = vec!["omnishot://record-screen?x=10&y=20&width=300&height=200".to_owned()];
+        match route_and_resolve(&argv, &runner).unwrap() {
+            Command::Record { geometry, .. } => {
+                assert_eq!(geometry.as_deref(), Some("10,860 300x200"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Both compositor queries were made.
+        let seen = runner.seen.lock().unwrap();
+        assert!(seen.iter().any(|spec| spec.args == ["-j", "monitors"]));
+        assert!(seen.iter().any(|spec| spec.args == ["-j", "cursorpos"]));
+    }
+
+    #[test]
+    fn a_coordinate_url_without_a_display_is_an_error() {
+        use crate::commands::{CommandError, CommandOutput, CommandRunner, CommandSpec};
+        struct Empty;
+        impl CommandRunner for Empty {
+            fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+                let stdout = if spec.args == ["-j", "monitors"] {
+                    b"[]".to_vec()
+                } else {
+                    b"{}".to_vec()
+                };
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout,
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let argv = vec!["omnishot://capture-area?x=1&y=2&width=30&height=40".to_owned()];
+        assert!(route_and_resolve(&argv, &Empty).is_err());
     }
 
     #[test]

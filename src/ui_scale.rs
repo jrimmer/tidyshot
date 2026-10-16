@@ -63,10 +63,20 @@ pub fn paths() -> (PathBuf, PathBuf) {
     let state = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join(".local/state"));
-    (
-        state.join("omarchy/current/theme/shell.toml"),
-        config.join("omarchy/shell.toml"),
-    )
+    paths_for(&config, &state)
+}
+
+/// The theme file for one config and state root.
+///
+/// The state-dir theme wins; the config dir is the documented fallback when
+/// it is absent, so a machine that keeps its theme under the config dir still
+/// follows the Omarchy appearance.
+fn paths_for(config: &Path, state: &Path) -> (PathBuf, PathBuf) {
+    let mut theme = state.join("omarchy/current/theme/shell.toml");
+    if !theme.exists() {
+        theme = config.join("omarchy/current/theme/shell.toml");
+    }
+    (theme, config.join("omarchy/shell.toml"))
 }
 
 fn home() -> PathBuf {
@@ -136,7 +146,7 @@ pub fn read(candidates: Option<&[PathBuf]>) -> Option<Appearance> {
     }
     let follows = match get(&spacing, "scale-with-font") {
         None => true,
-        Some(value) => value.as_bool()?,
+        Some(value) => value.as_bool(),
     };
     Some(Appearance {
         font_size,
@@ -189,8 +199,7 @@ pub fn size(width: f64, height: f64, factor: f64) -> (i32, i32) {
 #[must_use]
 pub fn stylesheet(text: &str, appearance: &Appearance) -> String {
     let mut out = String::with_capacity(text.len());
-    for (index, segment) in text.split_inclusive([';', '{', '}']).enumerate() {
-        let _ = index;
+    for segment in text.split_inclusive([';', '{', '}']) {
         let delimiter = segment
             .chars()
             .last()
@@ -294,15 +303,18 @@ impl TomlValue {
         }
     }
 
-    fn as_bool(&self) -> Option<bool> {
+    fn as_bool(&self) -> bool {
         match self {
-            TomlValue::Bool(value) => Some(*value),
-            TomlValue::Text(text) => match text.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => Some(true),
-                "false" | "0" | "no" | "off" => Some(false),
-                _ => None,
-            },
-            _ => None,
+            TomlValue::Bool(value) => *value,
+            // Python treats a non-string scale-with-font by truthiness.
+            TomlValue::Integer(value) => *value != 0,
+            TomlValue::Float(value) => *value != 0.0,
+            // A string is false only for the documented false words;
+            // anything else, including "enabled", is true.
+            TomlValue::Text(text) => !matches!(
+                text.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            ),
         }
     }
 }
@@ -435,6 +447,58 @@ mod tests {
         let appearance = read(Some(&[dir.join("absent.toml"), only])).unwrap();
         assert_eq!(appearance.font_size, 16);
         assert_eq!(appearance.spacing, 1.0);
+    }
+
+    // Ported from omnishot/test_ui_scale.py (test_config_theme_is_the_fallback)
+    #[test]
+    fn the_config_theme_is_used_when_the_state_theme_is_absent() {
+        let dir = scratch("fallback");
+        let config = dir.join("config");
+        let state = dir.join("state");
+        let config_theme = config.join("omarchy/current/theme/shell.toml");
+        std::fs::create_dir_all(config_theme.parent().unwrap()).unwrap();
+        std::fs::write(&config_theme, "[font]\nbase-size=18\n").unwrap();
+        let (theme, override_path) = paths_for(&config, &state);
+        assert_eq!(theme, config_theme);
+        assert_eq!(override_path, config.join("omarchy/shell.toml"));
+        // A state theme wins over the config fallback.
+        let state_theme = state.join("omarchy/current/theme/shell.toml");
+        std::fs::create_dir_all(state_theme.parent().unwrap()).unwrap();
+        std::fs::write(&state_theme, "[font]\nbase-size=22\n").unwrap();
+        assert_eq!(paths_for(&config, &state).0, state_theme);
+    }
+
+    #[test]
+    fn scale_with_font_accepts_non_boolean_values_like_python() {
+        let dir = scratch("follows");
+        let file = dir.join("theme.toml");
+        // A numeric 1 and a non-false word are both true upstream.
+        for value in ["1", "\"enabled\"", "\"yes\""] {
+            std::fs::write(
+                &file,
+                format!("[spacing]\nscale=1.0\nscale-with-font={value}\n"),
+            )
+            .unwrap();
+            assert!(
+                read(Some(std::slice::from_ref(&file)))
+                    .unwrap()
+                    .font_spacing,
+                "{value} must be true"
+            );
+        }
+        for value in ["0", "\"false\"", "\"off\""] {
+            std::fs::write(
+                &file,
+                format!("[spacing]\nscale=1.0\nscale-with-font={value}\n"),
+            )
+            .unwrap();
+            assert!(
+                !read(Some(std::slice::from_ref(&file)))
+                    .unwrap()
+                    .font_spacing,
+                "{value} must be false"
+            );
+        }
     }
 
     #[test]

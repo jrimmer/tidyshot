@@ -18,6 +18,7 @@ fn main() {
     .qt_module("QuickControls2")
     .qt_module("QuickTest")
     .cpp_file("src/cpp/qml_load.cpp")
+    .cpp_file("src/qt_shutdown.cpp")
     .files([
         "src/bridge.rs",
         "src/menu.rs",

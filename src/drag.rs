@@ -49,12 +49,20 @@ pub fn drag_accepted(completion: bool, qt_ignored: bool) -> bool {
 type BeginHook = unsafe extern "C" fn() -> libc::c_ulong;
 type EndHook = unsafe extern "C" fn(libc::c_ulong) -> libc::c_int;
 
+/// Resolve the helper symbols once, like upstream's import-time ctypes cache.
+static BEGIN_HOOK: std::sync::OnceLock<Option<BeginHook>> = std::sync::OnceLock::new();
+static END_HOOK: std::sync::OnceLock<Option<EndHook>> = std::sync::OnceLock::new();
+
 fn begin_hook() -> Option<BeginHook> {
-    symbol("omnishot_drag_begin").map(|pointer| unsafe { std::mem::transmute(pointer) })
+    *BEGIN_HOOK.get_or_init(|| {
+        symbol("omnishot_drag_begin").map(|pointer| unsafe { std::mem::transmute(pointer) })
+    })
 }
 
 fn end_hook() -> Option<EndHook> {
-    symbol("omnishot_drag_end").map(|pointer| unsafe { std::mem::transmute(pointer) })
+    *END_HOOK.get_or_init(|| {
+        symbol("omnishot_drag_end").map(|pointer| unsafe { std::mem::transmute(pointer) })
+    })
 }
 
 /// Look up a preloaded symbol in the global scope.
