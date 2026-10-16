@@ -160,8 +160,8 @@ impl Region {
 
 /// Apply the requested effect to `region` of `buffer`.
 ///
-/// `strength` is the effect radius or block factor; values below two are
-/// clamped up, matching the editor's minimum.
+/// `strength` is the effect radius or block factor. Blur runs at a radius of
+/// at least two; pixelate lifts its block factor to at least five.
 // Ported from omnishot/annotation_effects.py (render_effect)
 pub fn apply(
     buffer: &mut RgbaBuffer<'_>,
