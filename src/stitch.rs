@@ -646,8 +646,8 @@ impl ScrollStitcher {
             if frame.width * frame.height > self.max_pixels {
                 return Err(StitchError::TooLarge);
             }
-            self.image = Some(frame.clone());
-            self.previous = Some(frame);
+            self.previous = Some(frame.clone());
+            self.image = Some(frame);
             self.accepted = 1;
             return Ok((
                 true,
