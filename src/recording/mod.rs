@@ -9,6 +9,7 @@
 
 pub mod checkpoint;
 pub mod display;
+pub mod encoder;
 pub mod journal;
 pub mod options;
 pub mod recorder;
