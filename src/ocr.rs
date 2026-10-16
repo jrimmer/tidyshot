@@ -106,8 +106,7 @@ impl From<CommandError> for OcrError {
 
 /// The tessdata directory under the user's data home.
 ///
-/// `XDG_DATA_HOME` wins, then `$HOME/.local/share`; the directory name keeps
-/// parity with the Python app so an existing model install is reused.
+/// `XDG_DATA_HOME` wins, then `$HOME/.local/share`.
 #[must_use]
 pub fn model_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
