@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -90,6 +91,16 @@ impl Journal {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The lease lock the encoder inherits, while this journal still holds it.
+    ///
+    /// The encoder receives this descriptor so its flock outlives the app: a
+    /// crashed app leaves the lock held until the encoder exits, and recovery
+    /// reports the take as pending instead of discarding a live recording.
+    #[must_use]
+    pub fn lease_fd(&self) -> Option<BorrowedFd<'_>> {
+        self.lock.as_ref().map(AsFd::as_fd)
     }
 
     /// Merge `fields` into the record and persist it atomically.

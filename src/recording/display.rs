@@ -7,6 +7,8 @@
 //! environment the clean-capture plugin and `gpu-screen-recorder` read.
 
 use std::collections::BTreeMap;
+use std::io;
+use std::path::Path;
 
 use crate::json::Value;
 
@@ -85,6 +87,9 @@ impl Monitor {
 }
 
 /// A display's bounds in logical pixels, with a rotated transform swapped.
+///
+/// `hyprctl` always reports a non-zero scale; a zero would divide by zero, so
+/// it falls back to unscaled bounds rather than producing an infinite size.
 #[must_use]
 pub fn monitor_bounds(monitor: &Monitor) -> (i64, i64, i64, i64) {
     let (mut width, mut height) = (monitor.width as f64, monitor.height as f64);
@@ -262,11 +267,17 @@ impl CleanCapture {
                     return Err(CaptureError::NoOverlap);
                 }
                 // Controls sit on the display with the largest captured share.
-                let chosen = parts
-                    .iter()
-                    .max_by_key(|part| part.width * part.height)
-                    .map(|part| part.name.clone())
-                    .unwrap_or_default();
+                // Python's `max` keeps the first maximal part on a tie, unlike
+                // `max_by_key`; two equal-area shares must pick the earlier
+                // monitor so controls placement matches the source.
+                let mut chosen = parts.first();
+                for part in parts.iter().skip(1) {
+                    if part.width * part.height > chosen.map_or(0, |best| best.width * best.height)
+                    {
+                        chosen = Some(part);
+                    }
+                }
+                let chosen = chosen.map(|part| part.name.clone()).unwrap_or_default();
                 let controls = monitor_bounds(
                     monitors
                         .iter()
@@ -305,10 +316,27 @@ impl CleanCapture {
         })
     }
 
-    /// Mark the clean-capture source active. The native plugin lease is
-    /// driven by the bridge, which owns the compositor connection.
-    pub fn start(&mut self) {
+    /// Mark the clean-capture source active once its plugin libraries exist.
+    ///
+    /// As in the source, a missing `clean-mirror.so` or `clean-capture.so`
+    /// fails the take with a rebuild hint; the compositor plugin lease itself
+    /// is driven by the bridge, which owns the compositor connection.
+    pub fn start(&mut self) -> io::Result<()> {
+        self.start_in(&super::native_dir())
+    }
+
+    /// Like [`CleanCapture::start`], checking an explicit native directory.
+    pub fn start_in(&mut self, native_dir: &Path) -> io::Result<()> {
+        for name in ["clean-mirror.so", "clean-capture.so"] {
+            if !native_dir.join(name).is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "OmniShot's capture components need rebuilding. Run install.sh from the OmniShot folder.",
+                ));
+            }
+        }
         self.enabled = true;
+        Ok(())
     }
 
     pub fn stop(&mut self) {
@@ -514,5 +542,40 @@ mod tests {
             capture_target(&displays(), Some((0, 0, 1, 10))).unwrap_err(),
             CaptureError::TooSmall
         );
+    }
+
+    #[test]
+    fn equal_area_parts_choose_the_first_display_for_controls() {
+        // Two identical displays side by side, split evenly across the seam.
+        let left = monitor("left", 0, 0, 1920, 1080, 1.0);
+        let right = monitor("right", 1920, 0, 1920, 1080, 1.0);
+        let capture = CleanCapture::new(&[left, right], Some((960, 0, 1920, 1080)), false).unwrap();
+        assert_eq!(capture.parts.len(), 2);
+        assert_eq!(capture.parts[0].width * capture.parts[0].height, 960 * 1080);
+        assert_eq!(capture.parts[1].width * capture.parts[1].height, 960 * 1080);
+        // Python's max keeps the first maximal part; controls must land on the
+        // left display rather than the right.
+        assert_eq!(capture.controls_bounds, (0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn start_requires_the_native_capture_libraries() {
+        let dir =
+            std::env::temp_dir().join(format!("tidyshot-display-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut capture = CleanCapture::new(&displays(), Some((100, 100, 200, 200)), true).unwrap();
+        let err = capture.start_in(&dir).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            err.to_string()
+                .contains("capture components need rebuilding")
+        );
+        assert!(!capture.enabled);
+
+        std::fs::write(dir.join("clean-mirror.so"), b"placeholder").unwrap();
+        std::fs::write(dir.join("clean-capture.so"), b"placeholder").unwrap();
+        capture.start_in(&dir).unwrap();
+        assert!(capture.enabled);
     }
 }

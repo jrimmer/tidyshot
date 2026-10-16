@@ -27,6 +27,21 @@ use std::path::{Path, PathBuf};
 use crate::json::Value;
 use crate::storage;
 
+/// The directory holding the native helper libraries, the source's `native/`.
+///
+/// Installed builds keep the guard and capture plugins beside the executable;
+/// `TIDYSHOT_NATIVE_DIR` points at them for a source tree or a test.
+#[must_use]
+pub fn native_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("TIDYSHOT_NATIVE_DIR") {
+        return PathBuf::from(dir);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join("native")))
+        .unwrap_or_else(|| PathBuf::from("native"))
+}
+
 /// The on-disk layout a recording lives in.
 ///
 /// Only the parts the journal and recovery need are implemented here; the full

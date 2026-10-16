@@ -40,14 +40,14 @@ fn python_round(value: f64) -> u32 {
 /// A GIF take never records audio or scales its resolution.
 ///
 /// The setup dialog applies this after reading the widgets, so a GIF take
-/// carries native size and no audio even when the MP4 controls were set.
+/// carries native size and no audio even when the MP4 controls were set. Only
+/// the fields the source clears are touched; the separate-track and mono
+/// choices stay as the user left them.
 pub fn normalize_for_gif(options: &mut super::recorder::RecordOptions) {
     options.size = "Native".to_owned();
     options.scale_video = false;
     options.system = false;
     options.microphone = false;
-    options.separate_audio = false;
-    options.mono = false;
 }
 
 /// Apply the GIF profile to `options` when its format is GIF.
@@ -101,7 +101,9 @@ mod tests {
         assert!(!options.scale_video);
         assert!(!options.system);
         assert!(!options.microphone);
-        assert!(!options.mono);
+        // The source leaves the track and mono preferences alone.
+        assert!(options.separate_audio);
+        assert!(options.mono);
     }
 
     #[test]
