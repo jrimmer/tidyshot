@@ -11,6 +11,7 @@ pub mod color;
 pub mod commands;
 pub mod compat;
 pub mod compress;
+pub mod crop;
 pub mod doctor;
 pub mod editor;
 pub mod effects;
