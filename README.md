@@ -47,6 +47,13 @@ against a throwaway HOME with stubbed desktop commands, and
 `tests/editor_port.rs` drives the annotate editor document, project file,
 clipboard and renderer.
 
+`cargo run --release --bin bench [reps]` is a fixed-workload timing harness for
+the scroll stitcher and the annotation effects. It is not a gate; the unit
+tests assert behaviour. The workloads are deterministic synthetic pages and
+real decoded fixtures, so the numbers are comparable across revisions. The
+OmniShot Python baseline is not measured: `omnishot/stitch.py` needs `cv2` and
+`numpy`, which the lease does not have.
+
 ## Annotate editor
 
 The editor is ported from OmniShot's `editor.py`, `annotation_*.py`, `crop.py`,
