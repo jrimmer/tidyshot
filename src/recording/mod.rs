@@ -6,6 +6,10 @@
 //! sidecar marker, and on relaunch recovers or discards it. Nothing here may
 //! read or delete a take while its encoder still holds the lease, and a full
 //! disk must not cost the user a playable recording.
+//!
+//! The capture layout, the encoder command and its shutdown, the GIF profile,
+//! and the mono audio pass live beside it; all of them build argument vectors
+//! or write through [`crate::storage`] so the Qt layer owns process and UI.
 
 pub mod audio;
 pub mod checkpoint;
