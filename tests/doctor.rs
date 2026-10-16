@@ -449,9 +449,6 @@ fn untested_helper_strips_the_package_release() {
 
 #[test]
 fn supported_versions_have_one_source() {
-    // TidyShot has no README compatibility line or native build script yet;
-    // the single source is src/compat.rs, and no other module may redeclare
-    // the tested versions.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let compat = std::fs::read_to_string(manifest.join("src/compat.rs")).unwrap();
     for version in compat::TESTED_OMARCHY.iter().chain(compat::TESTED_HYPRLAND) {
@@ -460,6 +457,22 @@ fn supported_versions_have_one_source() {
             "src/compat.rs does not list tested version {version}"
         );
     }
+    // README.md states the versions a user should match.
+    let stated = std::fs::read_to_string(manifest.join("README.md"))
+        .unwrap()
+        .lines()
+        .find(|line| line.starts_with("Developed and tested on"))
+        .expect("README.md has no test-compatibility line")
+        .to_owned();
+    for version in compat::TESTED_OMARCHY.iter().chain(compat::TESTED_HYPRLAND) {
+        assert!(
+            stated.contains(version),
+            "README.md does not list tested version {version}; update it to match src/compat.rs"
+        );
+    }
+    // install.sh runs the same table before building; that integration is
+    // wired by the installer unit, which owns install.sh.
+    // No other module may redeclare the tested versions.
     let mut sources = Vec::new();
     collect_rs(&manifest.join("src"), &mut sources);
     for path in sources {

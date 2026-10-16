@@ -4,6 +4,8 @@ Screen capture, annotation and recording for Omarchy, rebuilt in Rust with
 Qt Quick via cxx-qt. A reimplementation of OmniShot; no affiliation with
 CleanShot X.
 
+Developed and tested on **Omarchy 4.0.2 with Hyprland 0.56.2**.
+
 Status: pilot scaffold. `bin/build` builds, `bin/test` runs the suite
 offscreen. Crates are vendored under `vendor/`; builds run offline.
 
