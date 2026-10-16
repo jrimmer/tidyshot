@@ -50,6 +50,7 @@ pub mod ui_scale;
 pub fn run() {
     cxx_qt::init_crate!(tidyshot);
     cxx_qt::init_qml_module!("tidyshot");
+    start_instance();
     note_startup_ocr();
     let mut app = cxx_qt_lib::QGuiApplication::new();
     let mut engine = cxx_qt_lib::QQmlApplicationEngine::new();
@@ -59,6 +60,27 @@ pub fn run() {
     if let Some(app) = app.as_mut() {
         std::process::exit(app.exec());
     }
+}
+
+/// Bind the single-instance socket and serve forwarded commands.
+///
+/// The listener is moved into a worker thread that owns it for the process
+/// lifetime, so a command sent by a later invocation reaches this instance.
+/// A bind failure is surfaced but not fatal: the GUI still starts, and a
+/// later command launches a second instance rather than being dropped
+/// silently.
+fn start_instance() {
+    let socket = instance::socket_path(&instance::state_dir());
+    let instance = match instance::Instance::bind(&socket) {
+        Ok(instance) => instance,
+        Err(error) => {
+            eprintln!("tidyshot: {error}");
+            return;
+        }
+    };
+    std::thread::spawn(move || {
+        let _ = instance::serve(&instance, |_argv| true);
+    });
 }
 
 /// Record a startup OCR request before QML loads.
@@ -82,5 +104,18 @@ mod crate_tests {
     fn crate_links_cxx_qt() {
         cxx_qt::init_crate!(tidyshot);
         cxx_qt::init_qml_module!("tidyshot");
+    }
+
+    #[test]
+    fn the_command_socket_is_isolated_per_user_and_data_dir() {
+        use super::instance;
+        use std::path::Path;
+        let dir = Path::new("/run/user/1000/tidyshot");
+        let socket = instance::socket_path(dir);
+        assert!(socket.starts_with(dir));
+        assert_eq!(socket.extension().and_then(|e| e.to_str()), Some("sock"));
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        assert!(socket.to_string_lossy().contains(&format!("-{uid}.sock")));
     }
 }

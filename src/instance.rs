@@ -30,6 +30,21 @@ pub fn socket_path(state_dir: &Path) -> PathBuf {
     state_dir.join(format!("tidyshot-{}.sock", user_id()))
 }
 
+/// The per-user runtime directory the socket lives in.
+///
+/// `XDG_RUNTIME_DIR` is the right home for a socket; when it is unset the data
+/// directory is a working fallback so the protocol still functions.
+#[must_use]
+pub fn state_dir() -> PathBuf {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("XDG_DATA_HOME").map(PathBuf::from))
+        .unwrap_or_else(|_| {
+            std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from).join(".local/share")
+        })
+        .join("tidyshot")
+}
+
 fn user_id() -> u32 {
     // SAFETY: getuid has no preconditions and cannot fail.
     unsafe { libc::getuid() }

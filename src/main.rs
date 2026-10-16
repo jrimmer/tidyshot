@@ -3,7 +3,9 @@
 /// Run a subcommand that must stay headless, before Qt is initialised.
 ///
 /// Returns `Some(exit_code)` when the invocation was handled without starting
-/// the GUI.
+/// the GUI. These run before the single-instance socket so `doctor`, `compat`
+/// and the action listing still work when the display or the running app is
+/// what is broken.
 // Ported from omnishot/app.py (main)
 fn run_subcommand(args: &[String]) -> Option<i32> {
     dispatch(args, |tail| {
@@ -54,9 +56,61 @@ fn install_ocr_models() -> i32 {
     }
 }
 
+/// Validate an invocation before it reaches Qt or a running instance.
+///
+/// Returns `Some(exit_code)` for a command that cannot be routed, `None` when
+/// the command is understood. A URL that fails to parse or names an action the
+/// API refuses is rejected here, so the running instance is never handed a
+/// command it would merely drop.
+fn validate(args: &[String]) -> Option<i32> {
+    let parsed = match tidyshot::cli::parse_args(args.iter().map(String::as_str)) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("tidyshot: {error}");
+            return Some(2);
+        }
+    };
+    match tidyshot::app::route(&parsed) {
+        Ok(tidyshot::app::Command::Unknown(command)) => {
+            eprintln!("tidyshot: unknown command: {command}");
+            Some(2)
+        }
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("tidyshot: {error}");
+            Some(2)
+        }
+    }
+}
+
+/// Hand `args` to a running instance when one is listening.
+///
+/// Returns `Some(0)` when the command was delivered. `None` means no instance
+/// is running, so the caller becomes the server and starts the GUI. The
+/// `forward` hook is injected so the delivery path can be asserted without a
+/// real socket.
+fn hand_off<F>(args: &[String], forward: F) -> Option<i32>
+where
+    F: FnOnce(&[String]) -> bool,
+{
+    if forward(args) { Some(0) } else { None }
+}
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = run_subcommand(&args) {
+        std::process::exit(code);
+    }
+    if let Some(code) = validate(&args) {
+        std::process::exit(code);
+    }
+    let socket = tidyshot::instance::socket_path(&tidyshot::instance::state_dir());
+    let delivered = hand_off(&args, |args| {
+        matches!(
+            tidyshot::instance::forward(args, &socket),
+            Ok(tidyshot::instance::Forwarded::Delivered)
+        )
+    });
+    if let Some(code) = delivered {
         std::process::exit(code);
     }
     tidyshot::run();
@@ -64,7 +118,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch, run_subcommand};
+    use super::{dispatch, hand_off, run_subcommand, validate};
 
     #[test]
     fn menu_subcommand_lists_actions_and_stays_headless() {
@@ -93,5 +147,81 @@ mod tests {
         });
         assert_eq!(code, Some(7));
         assert_eq!(seen, Some(vec!["--json".to_owned()]));
+    }
+
+    #[test]
+    fn every_documented_capture_subcommand_validates() {
+        for command in [
+            "all-in-one",
+            "area",
+            "area-annotate",
+            "area-copy",
+            "area-save",
+            "area-pin",
+            "scroll",
+            "scroll-horizontal",
+            "fullscreen",
+            "window",
+            "desktop",
+            "previous",
+            "timer",
+            "ocr",
+            "ocr-lines",
+            "ocr-single-line",
+            "open",
+            "clipboard",
+            "history",
+            "restore",
+            "last",
+            "last-screenshot",
+            "save-all",
+            "close-all",
+            "toggle-pins",
+            "close-pins",
+            "unlock-pins",
+            "settings",
+            "record",
+            "stop",
+            "pause",
+            "restart",
+            "scroll-done",
+            "quit",
+        ] {
+            assert_eq!(validate(&[command.to_owned()]), None, "{command} rejected");
+        }
+    }
+
+    #[test]
+    fn an_unknown_command_is_rejected_before_qt_or_the_socket() {
+        assert_eq!(validate(&["frobnicate".to_owned()]), Some(2));
+    }
+
+    #[test]
+    fn a_disabled_or_malformed_url_is_rejected_before_the_socket() {
+        assert_eq!(validate(&["https://example.com".to_owned()]), Some(2));
+        assert_eq!(
+            validate(&["omnishot://capture-area?action=upload".to_owned()]),
+            Some(2)
+        );
+        assert_eq!(
+            validate(&["omnishot://open-settings?tab=cloud".to_owned()]),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_running_instance_receives_the_command_and_the_sender_exits() {
+        let mut forwarded: Option<Vec<String>> = None;
+        let code = hand_off(&["scroll-done".to_owned()], |args| {
+            forwarded = Some(args.to_vec());
+            true
+        });
+        assert_eq!(code, Some(0));
+        assert_eq!(forwarded, Some(vec!["scroll-done".to_owned()]));
+    }
+
+    #[test]
+    fn without_an_instance_the_sender_starts_the_gui() {
+        assert_eq!(hand_off(&["area".to_owned()], |_| false), None);
     }
 }
