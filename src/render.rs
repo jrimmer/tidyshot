@@ -75,8 +75,9 @@ pub struct Rendered {
 #[must_use]
 pub fn render(base: &Image, objects: &[Annotation], transform: ViewTransform) -> Image {
     let mut data = base.data.clone();
+    let ordered = order(objects);
     let mut canvas = Canvas::new(&mut data, base.width, base.height);
-    for object in objects {
+    for object in &ordered {
         paint(&mut canvas, base, object, transform);
     }
     Image::new(base.width, base.height, data)
