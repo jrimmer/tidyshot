@@ -277,10 +277,11 @@ enum TomlValue {
 impl TomlValue {
     fn as_int(&self) -> Option<i64> {
         match self {
+            // Python's int() truncates toward zero; a bool is 1 or 0.
             TomlValue::Integer(value) => Some(*value),
-            TomlValue::Float(value) if value.fract() == 0.0 => Some(*value as i64),
+            TomlValue::Float(value) => Some(*value as i64),
+            TomlValue::Bool(value) => Some(i64::from(*value)),
             TomlValue::Text(text) => text.trim().parse().ok(),
-            _ => None,
         }
     }
 
