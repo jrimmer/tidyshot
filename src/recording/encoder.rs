@@ -118,18 +118,50 @@ fn pidfd_open_self() -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
-/// Clear `FD_CLOEXEC` so the descriptor survives the child's `execve`.
-fn make_inheritable(fd: RawFd) -> io::Result<()> {
-    // SAFETY: `fcntl` with `F_SETFD` only changes this descriptor's flags.
+/// Read a descriptor's `FD_*` flags.
+fn fd_flags(fd: RawFd) -> io::Result<i32> {
+    // SAFETY: `fcntl` with `F_GETFD` only reads this descriptor's flags.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(flags)
+}
+
+/// Set a descriptor's `FD_*` flags.
+fn set_fd_flags(fd: RawFd, flags: i32) -> io::Result<()> {
     // SAFETY: `fcntl` with `F_SETFD` only changes this descriptor's flags.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Restores `FD_CLOEXEC` on borrowed descriptors once the child is spawned.
+///
+/// The descriptors must be inheritable across `execve`, but only for that one
+/// spawn; leaving them open in later children would leak the lease and pidfd.
+struct RestoreCloexec(Vec<(RawFd, i32)>);
+
+impl Drop for RestoreCloexec {
+    fn drop(&mut self) {
+        for (fd, flags) in &self.0 {
+            let _ = set_fd_flags(*fd, *flags);
+        }
+    }
+}
+
+/// Clear `FD_CLOEXEC` so the descriptors survive the child's `execve`.
+fn make_inheritable(fds: &[RawFd]) -> io::Result<RestoreCloexec> {
+    let mut saved = Vec::with_capacity(fds.len());
+    for fd in fds {
+        saved.push((*fd, fd_flags(*fd)?));
+    }
+    for fd in fds {
+        let flags = fd_flags(*fd)?;
+        set_fd_flags(*fd, flags & !libc::FD_CLOEXEC)?;
+    }
+    Ok(RestoreCloexec(saved))
 }
 
 /// A launched encoder that can be stopped without a hang.
@@ -158,11 +190,11 @@ impl Encoder {
                 "the encoder command is empty",
             ));
         };
-        make_inheritable(guard.owner_fd())?;
-        make_inheritable(guard.library_fd())?;
+        let mut descriptors = vec![guard.owner_fd(), guard.library_fd()];
         if let Some(lease) = guard.lease_fd() {
-            make_inheritable(lease)?;
+            descriptors.push(lease);
         }
+        let _restore = make_inheritable(&descriptors)?;
         let mut child = Command::new(program);
         child.args(args);
         child.stdin(Stdio::piped());
@@ -433,33 +465,29 @@ mod tests {
 
     #[test]
     fn running_encoder_keeps_the_inherited_lease_held() {
-        use std::fs::File;
-        // A lock file stands in for the journal lease; the encoder must keep
-        // the flock after the app closes its own descriptor.
-        let lock_path = std::env::temp_dir().join(format!(
-            "tidyshot-encoder-inherit-lease-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_file(&lock_path);
-        let lease = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .unwrap();
-        lease.try_lock().unwrap();
+        use crate::json::Value;
+        use crate::recording::Workspace;
+        use crate::recording::journal::Journal;
+        let workspace = Workspace::new(
+            std::env::temp_dir().join(format!("tidyshot-encoder-journal-{}", std::process::id())),
+        );
+        workspace.ensure().unwrap();
+        let path = workspace.captures().join("take.mp4");
+        let journal = Journal::begin(workspace, &path, Value::Object(BTreeMap::new())).unwrap();
+        let lock_path = path.with_extension("recording.lock");
 
         let dir = native_dir("journal-lease");
-        let guard = RecordGuard::open_in(&dir, Some(lease.as_fd())).unwrap();
+        // The guard borrows the journal's own lease, exactly as the recorder
+        // would hand it to the encoder.
+        let guard = RecordGuard::open_in(&dir, journal.lease_fd()).unwrap();
         let mut child = encoder("while :; do sleep 0.05; done", &guard);
 
-        // The app dies: its pidfd and its descriptor for the lease both close,
-        // but the encoder still holds the inherited lease fd, so recovery must
+        // The app dies: its pidfd closes and the journal drops its descriptor,
+        // but the encoder still holds the inherited lease, so recovery must
         // see the take as live rather than discard a still-writing recording.
         drop(guard);
-        drop(lease);
-        let probe = File::options()
+        drop(journal);
+        let probe = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&lock_path)

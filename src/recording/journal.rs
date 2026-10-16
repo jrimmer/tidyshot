@@ -141,9 +141,10 @@ impl Journal {
     }
 
     fn release(&mut self) {
-        if let Some(lock) = self.lock.take() {
-            let _ = lock.unlock();
-        }
+        // Close the descriptor without `flock(LOCK_UN)`. The source's `close()`
+        // only closes, so a lease inherited by a live encoder keeps the lock
+        // held after the app's own descriptor goes away.
+        self.lock.take();
     }
 }
 
