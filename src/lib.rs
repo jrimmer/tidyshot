@@ -1,6 +1,7 @@
 // The library target every binary and test links.
 pub mod annotation;
 pub mod api;
+pub mod backgrounds;
 pub mod bridge;
 pub mod capture;
 pub mod capture_session;

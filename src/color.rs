@@ -21,7 +21,7 @@ const DEFAULT_PALETTE: &[&str] = &[
 ];
 
 /// An 8-bit RGBA color.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rgba {
     pub red: u8,
     pub green: u8,
