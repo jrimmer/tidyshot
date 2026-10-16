@@ -876,3 +876,120 @@ mod tests {
         assert!(session.output().is_some(), "stitched image is preserved");
     }
 }
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use crate::commands::{CommandError, CommandOutput};
+    use std::sync::Mutex;
+
+    /// A runner that returns queued outputs and records the specs it saw.
+    #[derive(Default)]
+    struct FakeRunner {
+        results: Mutex<Vec<Result<CommandOutput, CommandError>>>,
+        seen: Mutex<Vec<CommandSpec>>,
+    }
+
+    impl FakeRunner {
+        fn push(&self, status: i32, stdout: &[u8]) {
+            self.results.lock().unwrap().push(Ok(CommandOutput {
+                status,
+                stdout: stdout.to_vec(),
+                stderr: Vec::new(),
+            }));
+        }
+    }
+
+    impl CommandRunner for FakeRunner {
+        fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+            self.seen.lock().unwrap().push(spec.clone());
+            self.results.lock().unwrap().remove(0)
+        }
+    }
+
+    #[test]
+    fn auto_scroll_moves_the_pointer_then_injects_a_wheel_step() {
+        let runner = FakeRunner::default();
+        runner.push(0, b"");
+        runner.push(0, b"");
+        runner.push(0, b"");
+        let native = std::env::temp_dir().join("tidyshot-scroll-test");
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(native.join("scroll-helper"), b"#!/bin/sh\n").unwrap();
+        let input = SystemScrollInput {
+            runner: &runner,
+            native,
+        };
+        input.move_cursor(120, 40).unwrap();
+        input.scroll_step(false, 3).unwrap();
+        let seen = runner.seen.lock().unwrap();
+        assert_eq!(seen[0].program, "hyprctl");
+        assert!(seen[0].args[1].contains("cursor.move"));
+        assert_eq!(seen[1].program.ends_with("scroll-helper"), true);
+        assert_eq!(seen[1].args, ["vertical", "3"]);
+    }
+
+    #[test]
+    fn horizontal_scroll_uses_the_horizontal_helper_axis() {
+        let runner = FakeRunner::default();
+        runner.push(0, b"");
+        let native = std::env::temp_dir().join("tidyshot-scroll-test-h");
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(native.join("scroll-helper"), b"#!/bin/sh\n").unwrap();
+        let input = SystemScrollInput {
+            runner: &runner,
+            native,
+        };
+        input.scroll_step(true, 3).unwrap();
+        let seen = runner.seen.lock().unwrap();
+        assert_eq!(seen[0].args, ["horizontal", "3"]);
+    }
+
+    #[test]
+    fn a_missing_scroll_helper_is_reported_not_silently_skipped() {
+        let runner = FakeRunner::default();
+        let native = std::env::temp_dir().join("tidyshot-scroll-missing");
+        let input = SystemScrollInput {
+            runner: &runner,
+            native,
+        };
+        let error = input.scroll_step(false, 3).unwrap_err();
+        assert!(error.contains("install.sh"), "{error}");
+        assert!(runner.seen.lock().unwrap().is_empty(), "helper never ran");
+    }
+
+    #[test]
+    fn cursor_position_is_read_from_hyprctl() {
+        let runner = FakeRunner::default();
+        runner.push(0, br#"{"x":100,"y":200}"#);
+        let native = std::env::temp_dir();
+        let input = SystemScrollInput {
+            runner: &runner,
+            native,
+        };
+        assert_eq!(input.cursor().unwrap(), (100, 200));
+    }
+
+    #[test]
+    fn ppm_grab_parses_grim_output() {
+        let runner = FakeRunner::default();
+        let mut ppm = b"P6\n2 2\n255\n".to_vec();
+        ppm.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        runner.push(0, &ppm);
+        let capture = SystemScrollCapture::new(&runner);
+        let frame = capture.grab(Rect::new(0, 0, 2, 2)).unwrap();
+        assert_eq!(frame.data, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let seen = runner.seen.lock().unwrap();
+        assert_eq!(seen[0].program, "grim");
+        assert!(seen[0].args.iter().any(|a| a == "ppm"));
+    }
+
+    #[test]
+    fn a_truncated_ppm_is_an_error() {
+        let runner = FakeRunner::default();
+        runner.push(0, b"P6\n2 2\n255\n\x01\x02");
+        let capture = SystemScrollCapture::new(&runner);
+        let error = capture.grab(Rect::new(0, 0, 2, 2)).unwrap_err();
+        assert!(error.contains("truncated"), "{error}");
+    }
+}
