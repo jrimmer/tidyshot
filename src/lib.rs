@@ -30,8 +30,10 @@ pub mod raster;
 pub mod recording;
 pub mod render;
 pub mod scroll;
+pub mod spotlight;
 pub mod stitch;
 pub mod storage;
+pub mod text_styles;
 pub mod toolbar;
 
 /// Initialise the cxx-qt registrations and run the application.
