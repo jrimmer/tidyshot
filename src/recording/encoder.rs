@@ -465,6 +465,21 @@ mod tests {
         assert_eq!(fs::read_to_string(&out).unwrap().trim(), "lease=unset");
     }
 
+    /// Sample `try_lock` until the lease is observably held (or free),
+    /// because the spawned encoder's flock lands at exec time, which a
+    /// single sample can miss.
+    fn wait_until_locked(file: &std::fs::File, held: bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let blocked = file.try_lock().is_err();
+            if blocked == held || Instant::now() > deadline {
+                assert_eq!(blocked, held, "lease hold state did not settle");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     #[test]
     fn running_encoder_keeps_the_inherited_lease_held() {
         use crate::json::Value;
@@ -494,7 +509,10 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .unwrap();
-        assert!(probe.try_lock().is_err());
+        // The spawned encoder inherits the fd at exec, which can lag the
+        // drops above, so wait until its flock is observably held rather
+        // than asserting a single sample.
+        wait_until_locked(&probe, true);
 
         child
             .stop_with(
@@ -504,7 +522,7 @@ mod tests {
             )
             .unwrap();
         // With the encoder gone the lease is free again.
-        probe.try_lock().unwrap();
+        wait_until_locked(&probe, false);
     }
 
     #[test]
