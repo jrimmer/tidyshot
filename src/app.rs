@@ -72,8 +72,6 @@ pub enum Command {
     /// Routed with no argument: open the chooser in the UI.
     EditChooser,
     PinChooser,
-    #[allow(dead_code)]
-    OverlayChooser,
     /// Show the capture history.
     History,
     /// Restore the most recently closed preview.
@@ -492,6 +490,34 @@ mod tests {
                 path: PathBuf::new(),
                 linebreaks: Some(false),
             }
+        );
+    }
+
+    #[test]
+    fn url_coordinates_convert_into_a_geometry_string() {
+        use crate::api::Point;
+        use crate::geometry::MonitorGeometry;
+        let args =
+            parse_args(["omnishot://capture-area?x=100&y=120&width=200&height=150&display=1"])
+                .unwrap();
+        let monitors = [MonitorGeometry {
+            x: -1920,
+            y: 0,
+            width: 2880,
+            height: 1800,
+            scale: 1.5,
+            transform: 0,
+        }];
+        let geometry = url_geometry_text(&args, &monitors, Point { x: 0, y: 0 })
+            .unwrap()
+            .unwrap();
+        assert_eq!(geometry, "-1820,930 200x150");
+        // A command without coordinates needs no conversion.
+        let plain = parse_args(["area"]).unwrap();
+        assert!(
+            url_geometry_text(&plain, &monitors, Point { x: 0, y: 0 })
+                .unwrap()
+                .is_none()
         );
     }
 
