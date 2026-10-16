@@ -706,7 +706,18 @@ pub fn compose_motion(frame: &Image, t: f64, metadata: &Value, options: &Options
 // Ported from omnishot/studio.py (export_studio encoder selection)
 #[must_use]
 pub fn encoder_arguments(options: &Options, width: usize, height: usize, fps: f64) -> Vec<String> {
-    let mut args = vec![
+    let mut args = Vec::new();
+    // `-vaapi_device` is a device option and must come before the rawvideo
+    // input; splicing it into the input option list would split a flag from
+    // its value.
+    if options.get("hardware").is_some_and(Value::is_truthy) {
+        let device = options
+            .get("render_device")
+            .and_then(Value::as_str)
+            .unwrap_or("/dev/dri/renderD128");
+        args.extend(["-vaapi_device".to_owned(), device.to_owned()]);
+    }
+    args.extend([
         "-f".to_owned(),
         "rawvideo".to_owned(),
         "-pixel_format".to_owned(),
@@ -717,13 +728,8 @@ pub fn encoder_arguments(options: &Options, width: usize, height: usize, fps: f6
         format!("{fps}"),
         "-i".to_owned(),
         "pipe:0".to_owned(),
-    ];
+    ]);
     if options.get("hardware").is_some_and(Value::is_truthy) {
-        let device = options
-            .get("render_device")
-            .and_then(Value::as_str)
-            .unwrap_or("/dev/dri/renderD128");
-        args.splice(5..5, ["-vaapi_device".to_owned(), device.to_owned()]);
         args.extend([
             "-vf".to_owned(),
             "format=nv12,hwupload".to_owned(),

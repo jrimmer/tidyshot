@@ -275,6 +275,12 @@ fn export_defaults_to_software_x264_and_plans_retained_frames() {
     );
     assert!(hardware.contains(&"h264_vaapi".to_owned()));
     assert!(hardware.contains(&"/dev/dri/renderD128".to_owned()));
+    // The VAAPI device is a global option, before the rawvideo input; it must
+    // not split `-video_size` from its value.
+    assert_eq!(hardware.first().map(String::as_str), Some("-vaapi_device"));
+    assert_eq!(hardware[1], "/dev/dri/renderD128");
+    assert!(!software.contains(&"-vaapi_device".to_owned()));
+    assert!(hardware.windows(2).any(|w| w == ["-video_size", "320x180"]));
 
     let request = ExportRequest {
         source: Path::new("/tmp/source.mp4"),
