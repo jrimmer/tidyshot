@@ -154,16 +154,23 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
         autoscroll: args.url.as_ref().and_then(|url| url.autoscroll),
     };
 
+    // A URL `action` parameter behaves like `--action`. An explicit flag wins
+    // so a link cannot override the command line.
+    let action = args
+        .action
+        .clone()
+        .or_else(|| args.url.as_ref().and_then(|url| url.action.clone()));
+
     match command {
         "menu" | "all-in-one" => {
             if command == "all-in-one" {
-                Ok(capture("select", args.action.clone()))
+                Ok(capture("select", action.clone()))
             } else {
                 Ok(Command::Menu)
             }
         }
         "select" | "area" | "window" | "fullscreen" | "desktop" | "previous" | "scroll"
-        | "scroll-horizontal" | "timer" => Ok(capture(command, args.action.clone())),
+        | "scroll-horizontal" | "timer" => Ok(capture(command, action.clone())),
         "ocr" => {
             if let Some(path) = &args.path {
                 Ok(Command::Ocr {
@@ -171,7 +178,7 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
                     linebreaks: args.url.as_ref().and_then(|url| url.linebreaks),
                 })
             } else {
-                Ok(capture("ocr", args.action.clone()))
+                Ok(capture("ocr", action.clone()))
             }
         }
         "open" => match &args.path {
