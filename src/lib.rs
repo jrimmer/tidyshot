@@ -78,6 +78,9 @@ pub fn run() {
 /// the same as one forwarded to a running instance. A resolution failure is
 /// reported and exits instead of starting an empty GUI.
 pub fn run_with(argv: &[String]) {
+    // Qt reads its hardware-decoding variable when the media backend starts,
+    // so the preview policy is applied before QGuiApplication is constructed.
+    video_decoder::configure_preview_decoder(&std::collections::BTreeMap::new());
     cxx_qt::init_crate!(tidyshot);
     cxx_qt::init_qml_module!("tidyshot");
     note_startup_ocr();
