@@ -143,14 +143,14 @@ pub fn fit_size(
             };
             let low = (minimum as f64).max(minimum as f64 * ratio);
             let high = (max_width as f64).min(max_height as f64 * ratio);
-            // A degenerate high bound (workspace smaller than the minimum)
-            // must not invert the clamp.
-            width = width.max(low).min(high.max(low));
+            // The workspace bound always wins, even when it lies below the
+            // ratio-lifted minimum; only the minimum can be undershot.
+            width = width.max(low).min(high);
             (width, width / ratio)
         }
         _ => (
-            width.clamp(minimum, max_width.max(minimum)) as f64,
-            height.clamp(minimum, max_height.max(minimum)) as f64,
+            width.max(minimum).min(max_width) as f64,
+            height.max(minimum).min(max_height) as f64,
         ),
     };
     (python_round(width).max(1), python_round(height).max(1))
@@ -331,6 +331,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ratio_resize_never_exceeds_a_bound_below_the_minimum() {
+        // Regression: the workspace bound is narrower than the ratio-lifted
+        // minimum, so the clamp must let the bound win and undershoot the
+        // minimum instead of spilling outside the bounds.
+        let bounds = Rect::new(-592, -1400, 808, 2905);
+        let result = resize_selection(
+            Rect::new(179, 1180, 37, 403),
+            "rb",
+            784,
+            4763,
+            bounds,
+            Some(16.0 / 9.0),
+            40,
+        );
+        assert_eq!(result, Rect::new(179, 1180, 37, 21));
+        assert!(bounds.contains(&result), "{result:?}");
+    }
+
+    #[test]
+    fn free_resize_uses_the_bound_when_it_is_below_the_minimum() {
+        let bounds = Rect::new(0, 0, 50, 30);
+        let original = Rect::new(0, 0, 40, 40);
+        // Dragging an edge outward when the bound is narrower than the
+        // minimum: the bound must win so the result stays inside.
+        let result = resize_selection(original, "rb", -1000, -1000, bounds, None, 400);
+        assert_eq!(result, Rect::new(0, 0, 50, 30));
+        assert!(bounds.contains(&result), "{result:?}");
     }
 
     #[test]

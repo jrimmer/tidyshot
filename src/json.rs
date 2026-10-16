@@ -43,6 +43,20 @@ impl Value {
         }
     }
 
+    /// Python truthiness: null, zero, and empty strings, arrays and objects
+    /// are false; every other value is true.
+    #[must_use]
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Number(n) => *n != 0.0,
+            Value::String(s) => !s.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            Value::Object(o) => !o.is_empty(),
+        }
+    }
+
     #[must_use]
     pub fn as_array(&self) -> Option<&[Value]> {
         match self {

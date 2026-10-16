@@ -22,8 +22,8 @@ pub fn palette_chain(filters: &[String], options: &BTreeMap<String, Value>) -> S
         .get("gif_quality")
         .and_then(Value::as_f64)
         .unwrap_or(100.0)
-        .clamp(1.0, 100.0);
-    let colors = (16.0 + quality * 2.4).round().clamp(4.0, 256.0) as i64;
+        .clamp(1.0, 100.0) as i64;
+    let colors = (16.0 + quality as f64 * 2.4).round().clamp(4.0, 256.0) as i64;
     let optimize = options
         .get("gif_optimize")
         .and_then(Value::as_bool)
@@ -87,6 +87,13 @@ mod tests {
         let plain = palette_chain(&[], &options(&[("gif_optimize", Value::Bool(false))]));
         assert!(plain.contains("paletteuse=dither=sierra2_4a"));
         assert!(!plain.contains("diff_mode"));
+    }
+
+    #[test]
+    fn quality_is_truncated_to_an_integer_before_scaling() {
+        // 80.9 truncates to 80, so colors = round(16 + 80 * 2.4) = 208.
+        let chain = palette_chain(&[], &options(&[("gif_quality", Value::Number(80.9))]));
+        assert!(chain.contains("max_colors=208[p]"), "{chain}");
     }
 
     #[test]

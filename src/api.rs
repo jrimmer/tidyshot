@@ -158,9 +158,11 @@ pub fn parse_url(value: &str) -> Result<UrlCommand, ApiError> {
         ("display", 4),
     ] {
         if let Some(raw) = first(&query, field) {
-            let number: i64 = raw
-                .parse()
-                .map_err(|_| ApiError::new("Capture coordinates are out of range"))?;
+            let text = raw.trim();
+            let normalized = text.replace('_', "");
+            let number: i64 = normalized.parse().map_err(|_| {
+                ApiError::new(format!("Capture coordinate {field} is not a valid integer"))
+            })?;
             if number.abs() > MAX_COORDINATE {
                 return Err(ApiError::new("Capture coordinates are out of range"));
             }
@@ -380,5 +382,15 @@ mod tests {
     fn unsupported_scheme_is_rejected() {
         assert!(parse_url("https://example.com").is_err());
         assert!(parse_url("omnishot://open-annotate?action=copy").is_ok());
+    }
+
+    #[test]
+    fn coordinates_accept_python_integer_forms() {
+        // Python's int() accepts underscores and surrounding whitespace.
+        let args =
+            parse_url("omnishot://capture-area?x=1_000&y=%205%20&width=200&height=150").unwrap();
+        let coordinates = args.coordinates.unwrap();
+        assert_eq!(coordinates.x, Some(1000));
+        assert_eq!(coordinates.y, Some(5));
     }
 }

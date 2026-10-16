@@ -15,6 +15,11 @@ pub const SWATCHES: &[&str] = &[
     "#ef4b9b", "#ffffff",
 ];
 
+/// The default `palette` setting; favorites filter these out.
+const DEFAULT_PALETTE: &[&str] = &[
+    "#ff5b61", "#ffbc42", "#53d49b", "#60a5fa", "#b48bfa", "#ffffff", "#15171d",
+];
+
 /// An 8-bit RGBA color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgba {
@@ -39,6 +44,9 @@ impl Rgba {
     #[must_use]
     pub fn from_hex(value: &str) -> Option<Self> {
         let hex = value.strip_prefix('#').unwrap_or(value);
+        if !hex.is_ascii() {
+            return None;
+        }
         let parse = |text: &str| u8::from_str_radix(text, 16).ok();
         match hex.len() {
             3 => {
@@ -116,7 +124,7 @@ pub fn color_text(color: Rgba) -> String {
 // Ported from omnishot/color_picker.py (favorite_colors)
 #[must_use]
 pub fn favorite_colors(settings: &BTreeMap<String, Value>) -> Vec<String> {
-    let palette_defaults: Vec<String> = SWATCHES.iter().map(|s| (*s).to_owned()).collect();
+    let palette_defaults: Vec<String> = DEFAULT_PALETTE.iter().map(|s| (*s).to_owned()).collect();
     let values: Vec<String> = match settings.get("custom_colors").and_then(Value::as_array) {
         Some(custom) => custom
             .iter()
@@ -186,6 +194,22 @@ mod tests {
     }
 
     #[test]
+    fn parsing_non_ascii_input_returns_none_instead_of_panicking() {
+        assert_eq!(Rgba::from_hex("ab\u{20ac}d"), None);
+        assert_eq!(Rgba::from_hex("\u{20ac}"), None);
+        assert_eq!(Rgba::from_hex("#ff\u{20ac}"), None);
+        // A malformed stored favorite must be dropped, not crash the picker.
+        let stored = settings(&[(
+            "custom_colors",
+            Value::Array(vec![
+                Value::String("ab\u{20ac}d".into()),
+                Value::String("#2468ac".into()),
+            ]),
+        )]);
+        assert_eq!(favorite_colors(&stored), vec!["#2468ac".to_owned()]);
+    }
+
+    #[test]
     fn opacity_channel_round_trips_the_picker_value() {
         let color = Rgba::new(0x24, 0x68, 0xac, 255).with_opacity_percent(50);
         assert_eq!(color.alpha, 128);
@@ -215,5 +239,28 @@ mod tests {
         )]);
         assert_eq!(favorite_colors(&palette), vec!["#123456".to_owned()]);
         assert!(favorite_colors(&BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn default_palette_filter_keeps_swatches_absent_from_the_defaults() {
+        // #ff8a34, #26c6be and #ef4b9b are swatches but not default palette
+        // entries, so a stored palette must still surface them as favorites.
+        let palette = settings(&[(
+            "palette",
+            Value::Array(vec![
+                Value::String("#ff8a34".into()),
+                Value::String("#26c6be".into()),
+                Value::String("#ef4b9b".into()),
+                Value::String("#15171d".into()),
+            ]),
+        )]);
+        assert_eq!(
+            favorite_colors(&palette),
+            vec![
+                "#ff8a34".to_owned(),
+                "#26c6be".to_owned(),
+                "#ef4b9b".to_owned()
+            ]
+        );
     }
 }

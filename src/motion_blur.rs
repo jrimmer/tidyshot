@@ -21,11 +21,7 @@ pub fn blur_level(options: &BTreeMap<String, Value>) -> u32 {
     let value = match options.get("motion_blur") {
         Some(value) => value,
         None => {
-            if options
-                .get("blur")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
+            if options.get("blur").is_some_and(Value::is_truthy) {
                 return 2;
             }
             return 0;
@@ -110,6 +106,13 @@ mod tests {
     fn legacy_blur_boolean_maps_to_medium() {
         assert_eq!(blur_level(&options(&[("blur", Value::Bool(true))])), 2);
         assert_eq!(blur_level(&options(&[("blur", Value::Bool(false))])), 0);
+        // Any truthy legacy value means Medium, not just Bool(true).
+        assert_eq!(blur_level(&options(&[("blur", Value::Number(1.0))])), 2);
+        assert_eq!(blur_level(&options(&[("blur", Value::Number(0.0))])), 0);
+        assert_eq!(
+            blur_level(&options(&[("blur", Value::String("yes".into()))])),
+            2
+        );
         assert_eq!(blur_level(&BTreeMap::new()), 0);
     }
 

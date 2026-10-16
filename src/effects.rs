@@ -36,11 +36,59 @@ pub struct RgbaBuffer<'a> {
     stride: usize,
 }
 
+/// The alpha-weighted average of the ring of pixels just outside `region`.
+/// Each boundary pixel is sampled once; the four corners belong to the top
+/// and bottom rows alone.
+fn boundary_average(buffer: &RgbaBuffer<'_>, region: Region) -> [f64; 3] {
+    let (mut sum_r, mut sum_g, mut sum_b, mut weight) = (0.0f64, 0.0, 0.0, 0.0);
+    let mut accumulate = |x: usize, y: usize| {
+        // Only pixels strictly outside the region may feed the replacement,
+        // so the concealed content cannot leak into its own texture.
+        if x >= region.x
+            && x < region.x + region.width
+            && y >= region.y
+            && y < region.y + region.height
+        {
+            return;
+        }
+        let Some(pixel) = buffer.pixel(x, y) else {
+            return;
+        };
+        let alpha = f64::from(pixel[3]) / 255.0;
+        sum_r += f64::from(pixel[0]) * alpha;
+        sum_g += f64::from(pixel[1]) * alpha;
+        sum_b += f64::from(pixel[2]) * alpha;
+        weight += alpha;
+    };
+    let left = region.x.saturating_sub(1);
+    let right = (region.x + region.width).min(buffer.width.saturating_sub(1));
+    let top = region.y.saturating_sub(1);
+    let bottom = (region.y + region.height).min(buffer.height.saturating_sub(1));
+    for x in left..=right {
+        accumulate(x, top);
+        accumulate(x, bottom);
+    }
+    // The side columns exclude the corner rows already counted above.
+    for y in (top + 1)..bottom {
+        accumulate(left, y);
+        accumulate(right, y);
+    }
+    if weight > 0.0 {
+        [sum_r / weight, sum_g / weight, sum_b / weight]
+    } else {
+        [216.0, 220.0, 228.0]
+    }
+}
+
 impl<'a> RgbaBuffer<'a> {
     /// Borrow an RGBA8 buffer. `stride` is bytes per row and must be at least
     /// `width * 4`; `height` is the number of addressable rows.
     #[must_use]
     pub fn new(data: &'a mut [u8], width: usize, height: usize, stride: usize) -> Self {
+        debug_assert!(
+            stride >= width.saturating_mul(4),
+            "stride must cover a full row"
+        );
         Self {
             data,
             width,
@@ -200,43 +248,7 @@ pub fn secure_blur(buffer: &mut RgbaBuffer<'_>, region: Region, strength: u32, s
         return;
     };
     let strength = strength.max(2) as f64;
-    let (mut sum_r, mut sum_g, mut sum_b, mut weight) = (0.0f64, 0.0, 0.0, 0.0);
-    let mut accumulate = |x: usize, y: usize| {
-        // Only pixels strictly outside the region may feed the replacement,
-        // so the concealed content cannot leak into its own texture.
-        if x >= region.x
-            && x < region.x + region.width
-            && y >= region.y
-            && y < region.y + region.height
-        {
-            return;
-        }
-        let Some(pixel) = buffer.pixel(x, y) else {
-            return;
-        };
-        let alpha = f64::from(pixel[3]) / 255.0;
-        sum_r += f64::from(pixel[0]) * alpha;
-        sum_g += f64::from(pixel[1]) * alpha;
-        sum_b += f64::from(pixel[2]) * alpha;
-        weight += alpha;
-    };
-    let left = region.x.saturating_sub(1);
-    let right = (region.x + region.width).min(buffer.width.saturating_sub(1));
-    let top = region.y.saturating_sub(1);
-    let bottom = (region.y + region.height).min(buffer.height.saturating_sub(1));
-    for x in left..=right {
-        accumulate(x, top);
-        accumulate(x, bottom);
-    }
-    for y in top..=bottom {
-        accumulate(left, y);
-        accumulate(right, y);
-    }
-    let base = if weight > 0.0 {
-        [sum_r / weight, sum_g / weight, sum_b / weight]
-    } else {
-        [216.0, 220.0, 228.0]
-    };
+    let base = boundary_average(buffer, region);
 
     // One lattice cell per (spacing) pixels, smoothly interpolated, so the
     // replacement looks like a texture rather than per-pixel noise.
@@ -280,7 +292,7 @@ pub fn pixelate(
     let Some(region) = clip(buffer, region) else {
         return;
     };
-    let factor = factor.max(2) as usize;
+    let factor = factor.max(5) as usize;
     let blocks_x = region.width.div_ceil(factor);
     let blocks_y = region.height.div_ceil(factor);
     let mut blocks: Vec<[f32; 4]> = Vec::with_capacity(blocks_x * blocks_y);
@@ -452,6 +464,47 @@ mod tests {
             buffer[offset + 2],
             buffer[offset + 3],
         ]
+    }
+
+    #[test]
+    fn pixelate_uses_the_documented_minimum_block_size() {
+        // Upstream pixelate clamps the block factor to at least five.
+        let mut data = image(20, 1);
+        for x in 0..20 {
+            let offset = x * 4;
+            data[offset] = (x * 12) as u8;
+        }
+        let mut buffer = RgbaBuffer::new(&mut data, 20, 1, 20 * 4);
+        pixelate(
+            &mut buffer,
+            Region::new(0, 0, 20, 1),
+            2,
+            PixelateMode::Classic,
+            0,
+        );
+        // With a factor of five the first block spans x = 0..4.
+        assert_eq!(buffer.pixel(0, 0).unwrap(), buffer.pixel(4, 0).unwrap());
+        assert_ne!(buffer.pixel(0, 0).unwrap(), buffer.pixel(5, 0).unwrap());
+    }
+
+    #[test]
+    fn boundary_average_weights_each_ring_pixel_once() {
+        // A single bright corner pixel must contribute exactly one sample, not
+        // once per row and once per column.
+        let mut data = image(5, 5);
+        for offset in (0..5 * 5 * 4).step_by(4) {
+            data[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
+        }
+        // Region is the center 3x3 (1,1)..(3,3); its ring is the border.
+        // Put 100 at corner (0,0) and 200 at top edge (1,0).
+        data[0..4].copy_from_slice(&[100, 100, 100, 255]);
+        let offset = 4;
+        data[offset..offset + 4].copy_from_slice(&[200, 200, 200, 255]);
+        let buffer = RgbaBuffer::new(&mut data, 5, 5, 5 * 4);
+        let base = boundary_average(&buffer, Region::new(1, 1, 3, 3));
+        // 16 ring pixels: 100 once + 200 once + 14 zeros.
+        let expected = (100.0 + 200.0) / 16.0;
+        assert!((base[0] - expected).abs() < 1e-9, "{base:?}");
     }
 
     #[test]
