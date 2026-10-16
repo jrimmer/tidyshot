@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
+
+use crate::commands::{CommandRunner, CommandSpec, SystemRunner};
 
 /// Omarchy releases the app is tested against.
 pub const TESTED_OMARCHY: &[&str] = &["4.0.2"];
@@ -78,24 +80,11 @@ pub fn header_abi_hash(version_h: &Path) -> Option<String> {
 // Ported from omnishot/compat.py (header_version_file)
 #[must_use]
 pub fn header_version_file() -> Option<PathBuf> {
-    header_version_file_with(|| {
-        let output = Command::new("pkg-config")
-            .args(["--cflags-only-I", "hyprland"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        String::from_utf8(output.stdout).ok()
-    })
-}
-
-/// Resolve the version header from pkg-config output, injectable for tests.
-pub fn header_version_file_with<F>(run: F) -> Option<PathBuf>
-where
-    F: FnOnce() -> Option<String>,
-{
-    version_file_from_flags(&run()?)
+    let spec = CommandSpec::new("pkg-config")
+        .args(["--cflags-only-I", "hyprland"])
+        .timeout(Duration::from_secs(10));
+    let output = SystemRunner.run(&spec).ok()?;
+    version_file_from_flags(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Find `version.h` among whitespace-separated compiler include flags.
@@ -174,11 +163,11 @@ pub fn cli(argv: &[String]) -> i32 {
 
 fn command_stdout(args: &[&str]) -> Option<String> {
     let (program, rest) = args.split_first()?;
-    let output = Command::new(program).args(rest).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let spec = CommandSpec::new(*program)
+        .args(rest.iter().copied())
+        .timeout(Duration::from_secs(10));
+    let output = SystemRunner.run(&spec).ok()?;
+    Some(output.stdout_string().trim().to_owned())
 }
 
 /// Parse `#define NAME "value"` lines into a map.
