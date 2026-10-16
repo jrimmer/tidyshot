@@ -291,19 +291,36 @@ fn match_prefixed(rest: &str, prefix: &str) -> Option<usize> {
 }
 
 /// Match the scheme-less `label.label.final[:port][/path]` form.
+///
+/// The intermediate labels are the greedy `(label\.)+` run; the final label
+/// is the last label whose first character is a letter, so a trailing numeric
+/// label is left out exactly as the regex backtracking does.
 fn match_dotted(rest: &str) -> Option<usize> {
-    let mut position = 0;
-    let mut labels = 0;
-    while let Some(end) = match_leading_label(rest, position)
-        && rest[end..].starts_with('.')
-    {
-        labels += 1;
-        position = end + 1;
-    }
-    if labels == 0 {
+    let position = match_leading_label(rest, 0)?;
+    if !rest[position..].starts_with('.') {
         return None;
     }
-    position = match_final_label(rest, position)?;
+    let mut final_end = None;
+    let mut cursor = position + 1;
+    loop {
+        let end = word_hyphen_end(rest, cursor);
+        if end == cursor {
+            break;
+        }
+        if rest[cursor..]
+            .chars()
+            .next()
+            .is_some_and(char::is_alphabetic)
+        {
+            final_end = Some(end);
+        }
+        if rest[end..].starts_with('.') {
+            cursor = end + 1;
+        } else {
+            break;
+        }
+    }
+    let mut position = final_end?;
     if rest[position..].starts_with(':') {
         let mut digits = 0;
         let mut end = position + 1;
@@ -341,17 +358,6 @@ fn match_leading_label(rest: &str, position: usize) -> Option<usize> {
     let first = rest[position..].chars().next().unwrap();
     let last = rest[position..end].chars().next_back().unwrap();
     (is_word_not_underscore(first) && is_word_not_underscore(last)).then_some(end)
-}
-
-/// Match the final `[^\W\d_](?:[\w-]*[^\W_])?` label at `position`.
-fn match_final_label(rest: &str, position: usize) -> Option<usize> {
-    let end = word_hyphen_end(rest, position);
-    if end == position {
-        return None;
-    }
-    let first = rest[position..].chars().next().unwrap();
-    let last = rest[position..end].chars().next_back().unwrap();
-    (first.is_alphabetic() && is_word_not_underscore(last)).then_some(end)
 }
 
 /// The end of the maximal `[\w-]` run starting at `position`.
@@ -827,6 +833,27 @@ mod tests {
             "{:?}",
             detected_links(text)
         );
+    }
+
+    #[test]
+    fn scheme_less_links_stop_at_punctuation_and_ports() {
+        assert_eq!(
+            detected_links("see example.com."),
+            vec![link("example.com", "https://example.com")]
+        );
+        assert_eq!(
+            detected_links("a.b.c.d.example.com"),
+            vec![link("a.b.c.d.example.com", "https://a.b.c.d.example.com")]
+        );
+        assert_eq!(
+            detected_links("example.com:8080/x?y=1#z"),
+            vec![link(
+                "example.com:8080/x?y=1#z",
+                "https://example.com:8080/x?y=1#z"
+            )]
+        );
+        // A zero port is malformed and a trailing numeric label is not a host.
+        assert!(detected_links("example.com:0").is_empty());
     }
 
     #[test]
