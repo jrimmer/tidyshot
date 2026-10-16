@@ -889,7 +889,7 @@ mod tests {
             let (changed, _) = stitch.push(frame(&source, 600, 600)).unwrap();
             assert!(!changed);
         }
-        assert!(stitch.output().unwrap().as_bytes() == &source);
+        assert!(stitch.output().unwrap().as_bytes() == source.as_slice());
     }
 
     #[test]
@@ -906,7 +906,7 @@ mod tests {
         assert!(!changed, "{message}");
         assert_eq!(stitch.position(), 0);
         assert_eq!(stitch.accepted(), 1);
-        assert!(stitch.output().unwrap().as_bytes() == &source);
+        assert!(stitch.output().unwrap().as_bytes() == source.as_slice());
     }
 
     #[test]

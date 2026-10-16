@@ -319,7 +319,7 @@ impl ScrollSession {
             }
         }
         if self.finish_pending {
-            return Some(self.finalize());
+            return self.finalize();
         }
         if self.auto {
             self.auto_advance();
@@ -380,24 +380,23 @@ impl ScrollSession {
             self.finish_pending = true;
             return None;
         }
-        Some(self.finalize())
+        self.finalize()
     }
 
-    /// Release every lease, emit the image, and mark the session finished.
-    fn finalize(&mut self) -> FrameData {
+    /// Release every lease, emit the image when one exists, and mark the
+    /// session finished.
+    fn finalize(&mut self) -> Option<FrameData> {
         self.finish_pending = false;
         self.finished = true;
-        let frame = self.stitcher.output().unwrap_or(FrameData {
-            data: Vec::new(),
-            width: 0,
-            height: 0,
-            channels: 3,
-        });
+        let frame = self.stitcher.output();
         self.close_surfaces();
-        if let Some(mut completed) = self.on_completed.take() {
+        if let Some(frame) = frame
+            && let Some(mut completed) = self.on_completed.take()
+        {
             completed(frame.clone());
+            return Some(frame);
         }
-        frame
+        None
     }
 
     /// Release the keyboard lease, capture surfaces and mirror, in that order.
@@ -602,4 +601,279 @@ impl<R: CommandRunner> ScrollCapture for SystemScrollCapture<'_, R> {
 #[must_use]
 pub fn stitch_message(error: &StitchError) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stitch::FrameRef;
+    use std::sync::{Arc, Mutex};
+
+    /// Shared event log so the test can assert the release ordering.
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<String>>>);
+
+    impl Log {
+        fn push(&self, event: &str) {
+            self.0.lock().unwrap().push(event.to_owned());
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// A capture backend that records lifecycle events.
+    struct FakeCapture {
+        log: Log,
+        reject_first: bool,
+        started: std::cell::Cell<bool>,
+        enabled: std::cell::Cell<bool>,
+    }
+
+    impl FakeCapture {
+        fn new(log: Log, reject_first: bool) -> Self {
+            Self {
+                log,
+                reject_first,
+                started: std::cell::Cell::new(false),
+                enabled: std::cell::Cell::new(false),
+            }
+        }
+    }
+
+    impl ScrollCapture for FakeCapture {
+        fn grab(&self, _rect: Rect) -> Result<FrameData, String> {
+            Err("unused".to_owned())
+        }
+
+        fn mirror_start(&self) -> Result<(), String> {
+            if self.reject_first && !self.started.get() {
+                self.started.set(true);
+                self.log.push("rejected");
+                return Err("Capture components need rebuilding".to_owned());
+            }
+            self.enabled.set(true);
+            self.log.push("start");
+            Ok(())
+        }
+
+        fn mirror_stop(&self) -> Result<(), String> {
+            if self.enabled.get() {
+                self.log.push("stop");
+                self.enabled.set(false);
+            }
+            Ok(())
+        }
+    }
+
+    /// A pointer backend that is fixed inside the capture.
+    struct FakeInput {
+        position: std::cell::Cell<(i32, i32)>,
+        log: Log,
+    }
+
+    impl ScrollInput for FakeInput {
+        fn cursor(&self) -> Result<(i32, i32), String> {
+            Ok(self.position.get())
+        }
+
+        fn move_cursor(&self, x: i32, y: i32) -> Result<(), String> {
+            self.position.set((x, y));
+            Ok(())
+        }
+
+        fn scroll_step(&self, horizontal: bool, amount: i32) -> Result<(), String> {
+            self.log.push(&format!(
+                "scroll {} {}",
+                if horizontal { "h" } else { "v" },
+                amount
+            ));
+            Ok(())
+        }
+    }
+
+    /// A UI recorder that asserts the release ordering.
+    struct FakeUi {
+        log: Log,
+        previews: usize,
+    }
+
+    impl ScrollUi for FakeUi {
+        fn before_grab(&mut self) -> bool {
+            false
+        }
+        fn after_grab(&mut self) {}
+        fn update(&mut self, _frame: &FrameData) {
+            self.previews += 1;
+        }
+        fn keys_stop(&mut self) {
+            self.log.push("keys stopped");
+        }
+        fn visuals_close(&mut self) {
+            self.log.push("visuals closed");
+        }
+    }
+
+    fn frame(width: usize, height: usize, value: u8) -> FrameData {
+        FrameData::new(vec![value; width * height * 3], width, height, 3)
+    }
+
+    fn session(
+        rect: Rect,
+        reject_first: bool,
+    ) -> (ScrollSession, Log, Arc<Mutex<usize>>, Arc<Mutex<usize>>) {
+        let log = Log::default();
+        let completed = Arc::new(Mutex::new(0usize));
+        let cancelled = Arc::new(Mutex::new(0usize));
+        let capture = Box::new(FakeCapture::new(log.clone(), reject_first));
+        let input = Box::new(FakeInput {
+            position: std::cell::Cell::new((10, 10)),
+            log: log.clone(),
+        });
+        let ui = Box::new(FakeUi {
+            log: log.clone(),
+            previews: 0,
+        });
+        let mut session = ScrollSession::new(rect, false, capture, input, ui);
+        {
+            let completed = completed.clone();
+            session.on_completed = Some(Box::new(move |_| *completed.lock().unwrap() += 1));
+        }
+        {
+            let cancelled = cancelled.clone();
+            session.on_cancelled = Some(Box::new(move || *cancelled.lock().unwrap() += 1));
+        }
+        (session, log, completed, cancelled)
+    }
+
+    #[test]
+    fn finish_waits_for_the_current_frame_without_starting_another() {
+        let (mut session, _log, completed, _cancelled) =
+            session(Rect::new(10, 10, 200, 100), false);
+        session.running = true;
+        let job = session.begin_grab().expect("first grab");
+        assert!(session.is_busy());
+
+        // A finish while the frame is in flight stops new grabs but waits.
+        assert!(session.finish().is_none());
+        assert!(!session.is_running());
+        assert!(session.begin_grab().is_none(), "no second grab while busy");
+
+        session.stitcher.push(frame(200, 100, 125).view()).unwrap();
+        let done = session.complete(job, Ok(frame(200, 100, 125)));
+        assert!(done.is_some());
+        assert!(session.closed);
+        assert_eq!(*completed.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn completion_releases_controls_before_the_image_is_delivered() {
+        let (mut session, log, completed, cancelled) = session(Rect::new(10, 10, 200, 100), false);
+        session.start();
+        session.stitcher.push(frame(200, 100, 125).view()).unwrap();
+        let job = session.begin_grab().expect("grab");
+        assert!(session.finish().is_none());
+        let done = session.complete(job, Ok(frame(200, 100, 125))).unwrap();
+        // The image is the stitched one, and release happened before delivery.
+        assert_eq!(done.data, frame(200, 100, 125).data);
+        assert_eq!(
+            log.events(),
+            ["start", "keys stopped", "visuals closed", "stop"]
+        );
+        assert!(!session.is_running());
+        assert_eq!(*cancelled.lock().unwrap(), 0);
+        assert_eq!(*completed.lock().unwrap(), 1);
+        // A nested modal loop re-enters accept after completion; it must not
+        // restart the finished capture.
+        assert!(session.keyboard_action("accept").is_none());
+        assert!(session.closed);
+        // No mirror restart after completion.
+        assert_eq!(log.events().iter().filter(|e| *e == "start").count(), 1);
+    }
+
+    #[test]
+    fn end_message_survives_unchanged_frames() {
+        let (mut session, _log, _completed, _cancelled) =
+            session(Rect::new(10, 10, 200, 100), false);
+        session.running = true;
+        session.set_auto(true);
+        session.stitcher.push(frame(200, 100, 125).view()).unwrap();
+        session.scrolled_last = true;
+        session.no_change = 3;
+        let job = session.begin_grab().expect("grab");
+        session.complete(job, Ok(frame(200, 100, 125)));
+        assert!(session.reached_end);
+        assert!(!session.auto);
+        assert!(session.status().contains("Reached the end"));
+
+        // A later unchanged frame keeps the end message rather than replacing
+        // it with "No new content".
+        session.scrolled_last = false;
+        let job = session.begin_grab().expect("grab");
+        session.complete(job, Ok(frame(200, 100, 125)));
+        assert!(session.status().contains("Reached the end"));
+    }
+
+    #[test]
+    fn mirror_failure_retry_and_cancel_during_frame() {
+        let (mut session, log, _completed, _cancelled) = session(Rect::new(10, 10, 200, 100), true);
+        session.start();
+        assert!(!session.is_running());
+        assert!(session.start_label.contains("Retry"));
+        assert!(session.status.contains("rebuilding"));
+
+        session.start();
+        assert!(session.is_running());
+        assert!(log.events().contains(&"start".to_owned()));
+        let job = session.begin_grab().expect("grab");
+        session.complete(job, Err("Display disconnected".to_owned()));
+        assert!(!session.is_running());
+        assert!(session.status.contains("Display disconnected"));
+
+        session.start();
+        assert!(session.begin_grab().is_some());
+        session.close();
+        assert!(session.cancelled);
+        let events = log.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.as_str() == "rejected"
+                    || e.as_str() == "start"
+                    || e.as_str() == "stop")
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["rejected", "start", "stop", "start", "stop"]
+        );
+        // Completing the in-flight frame after cancel is ignored.
+        let stale = ScrollJob {
+            generation: 0,
+            rect: session.rect,
+        };
+        assert!(session.complete(stale, Ok(frame(200, 100, 0))).is_none());
+    }
+
+    #[test]
+    fn alignment_failure_keeps_the_stitched_image_and_pauses_auto() {
+        let (mut session, _log, _completed, _cancelled) =
+            session(Rect::new(10, 10, 200, 100), false);
+        session.running = true;
+        session.set_auto(true);
+        session.scrolled_last = true;
+        let source: Vec<u8> = (0..200 * 100 * 3)
+            .map(|index| ((index * 31) % 200) as u8)
+            .collect();
+        session
+            .stitcher
+            .push(FrameRef::new(&source, 200, 100, 3))
+            .unwrap();
+        let job = session.begin_grab().expect("grab");
+        let noise: Vec<u8> = (0..200 * 100 * 3)
+            .map(|index| ((index * 97 + 13) % 255) as u8)
+            .collect();
+        session.complete(job, Ok(FrameData::new(noise, 200, 100, 3)));
+        assert!(!session.auto, "auto pauses on an unalignable frame");
+        assert!(session.output().is_some(), "stitched image is preserved");
+    }
 }
