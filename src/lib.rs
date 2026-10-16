@@ -7,6 +7,7 @@ pub mod commands;
 pub mod effects;
 pub mod filenames;
 pub mod geometry;
+pub mod gif;
 pub mod json;
 pub mod media_import;
 pub mod motion_blur;
