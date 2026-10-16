@@ -293,6 +293,43 @@ impl Timeline {
         true
     }
 
+    /// Update the selected zoom's fields, returning `true` when it changed.
+    // Ported from omnishot/timeline_zooms.py (change_zoom)
+    pub fn change_zoom(
+        &mut self,
+        scale: Option<f64>,
+        x: Option<f64>,
+        y: Option<f64>,
+        follow: Option<bool>,
+    ) -> bool {
+        let Some(index) = self.selected_zoom_index() else {
+            return false;
+        };
+        let zoom = &mut self.zooms[index];
+        if let Some(scale) = scale {
+            zoom.scale = scale;
+        }
+        if let Some(x) = x {
+            zoom.x = x;
+        }
+        if let Some(y) = y {
+            zoom.y = y;
+        }
+        if let Some(follow) = follow {
+            zoom.follow = follow;
+        }
+        true
+    }
+
+    /// The index of the selected zoom, when one is selected.
+    #[must_use]
+    pub fn selected_zoom_index(&self) -> Option<usize> {
+        match self.selected {
+            Some(Selection::Zoom(index)) if index < self.zooms.len() => Some(index),
+            _ => None,
+        }
+    }
+
     /// Split the zoom under the playhead, returning `true` when split.
     // Ported from omnishot/timeline_zooms.py (split_zoom_at_playhead)
     pub fn split_zoom_at_playhead(&mut self) -> bool {

@@ -649,3 +649,30 @@ fn command_available(program: &str) -> bool {
         .status()
         .is_ok_and(|status| status.success())
 }
+
+#[test]
+fn zoom_inspector_level_and_mode_edit_the_selected_zoom() {
+    // Ported from tests/test_zoom_actions.py and omnishot/zoom_inspector.py.
+    let mut t = Timeline::default();
+    t.set_duration(18000.0);
+    t.set_frame_rate(30.0);
+    assert_eq!(t.add_zoom_at(2.0), Some(0));
+    // The level spinner and slider write the scale; the mode writes follow.
+    assert!(t.change_zoom(Some(2.4), None, None, None));
+    assert_eq!(t.selected_zoom().unwrap().scale, 2.4);
+    assert!(t.change_zoom(None, None, None, Some(false)));
+    assert!(!t.selected_zoom().unwrap().follow);
+    assert!(t.change_zoom(None, Some(0.7), Some(0.4), None));
+    assert_eq!(t.selected_zoom().map(|z| (z.x, z.y)), Some((0.7, 0.4)));
+    // "Apply Zoom Level to All" copies the selected scale.
+    t.zooms.push(Zoom {
+        start: 5.0,
+        end: 6.0,
+        scale: 1.5,
+        x: 0.5,
+        y: 0.5,
+        follow: false,
+    });
+    assert!(t.apply_zoom_level_to_all());
+    assert!(t.zooms.iter().all(|z| (z.scale - 2.4).abs() < 1e-9));
+}
