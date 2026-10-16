@@ -7,10 +7,10 @@ fn crate_links_cxx_qt() {
     cxx_qt::init_qml_module!("tidyshot");
 }
 
-// The offscreen load assertion. The round-2 hang came from proving the window
-// by running its event loop; this loads the packaged Main.qml in a fresh
-// engine and inspects QQmlApplicationEngine::rootObjects() instead, so a load
-// failure is a plain assertion and no event loop ever starts.
+// The offscreen load assertion. Proving the window by running its event loop
+// hangs when there is no compositor; this loads the packaged Main.qml in a
+// fresh engine and inspects QQmlApplicationEngine::rootObjects() instead, so a
+// load failure is a plain assertion and no event loop ever starts.
 #[test]
 fn main_qml_loads_offscreen() {
     // The harness exports the offscreen platform, but set it here too so a
