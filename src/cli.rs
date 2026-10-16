@@ -37,6 +37,9 @@ pub const CAPTURE_COMMANDS: &[&str] = &[
     "ocr",
 ];
 
+/// OCR shortcut commands and the line-break override each one applies.
+pub const OCR_SHORTCUTS: &[(&str, bool)] = &[("ocr-lines", true), ("ocr-single-line", false)];
+
 /// Parsed command-line arguments.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Args {
@@ -45,6 +48,9 @@ pub struct Args {
     pub geometry: Option<String>,
     pub action: Option<String>,
     pub delay: Option<i64>,
+    /// OCR line-break override from an `ocr-lines` / `ocr-single-line`
+    /// shortcut or from a URL, taking precedence over the saved preference.
+    pub linebreaks: Option<bool>,
     /// Present when the command came from a local URL.
     pub url: Option<UrlCommand>,
 }
@@ -74,6 +80,7 @@ where
     let mut geometry = None;
     let mut action = None;
     let mut delay = None;
+    let mut linebreaks = None;
 
     let mut items = argv.into_iter().map(|item| item.as_ref().to_owned());
     while let Some(item) = items.next() {
@@ -129,11 +136,20 @@ where
         if parsed.path.is_some() {
             path = parsed.path.clone();
         }
+        linebreaks = parsed.linebreaks;
         command = parsed.command.clone();
         url = Some(parsed);
     } else if Path::new(&command).is_file() {
         path = Some(std::mem::take(&mut command));
         command = "open".to_owned();
+    }
+
+    // `ocr-lines` and `ocr-single-line` dispatch to the same OCR action with
+    // an explicit line-break override, exactly as the source dispatch does.
+    if let Some((_, override_linebreaks)) = OCR_SHORTCUTS.iter().find(|(name, _)| *name == command)
+    {
+        linebreaks = Some(*override_linebreaks);
+        command = "ocr".to_owned();
     }
 
     Ok(Args {
@@ -142,6 +158,7 @@ where
         geometry,
         action,
         delay,
+        linebreaks,
         url,
     })
 }
@@ -398,5 +415,22 @@ mod tests {
             .is_none()
         );
         let _ = std::fs::remove_dir_all(&native);
+    }
+
+    #[test]
+    fn ocr_shortcuts_override_the_line_break_preference() {
+        let lines = parse_args(["ocr-lines"]).unwrap();
+        assert_eq!(lines.command, "ocr");
+        assert_eq!(lines.linebreaks, Some(true));
+        let single = parse_args(["ocr-single-line"]).unwrap();
+        assert_eq!(single.command, "ocr");
+        assert_eq!(single.linebreaks, Some(false));
+    }
+
+    #[test]
+    fn a_url_linebreak_override_is_kept_and_a_shortcut_wins() {
+        let args = parse_args(["omnishot://capture-text?linebreaks=false"]).unwrap();
+        assert_eq!(args.command, "ocr");
+        assert_eq!(args.linebreaks, Some(false));
     }
 }

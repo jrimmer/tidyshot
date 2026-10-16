@@ -928,7 +928,9 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "getrandom",
+ "idna",
  "libc",
+ "url",
 ]
 
 [[package]]

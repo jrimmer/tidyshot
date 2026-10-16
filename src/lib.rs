@@ -24,6 +24,7 @@ pub mod media_import;
 pub mod menu;
 pub mod mirror;
 pub mod motion_blur;
+pub mod ocr;
 pub mod pin;
 pub mod pngzip;
 pub mod project;
@@ -34,6 +35,7 @@ pub mod scroll;
 pub mod spotlight;
 pub mod stitch;
 pub mod storage;
+pub mod text_result;
 pub mod text_styles;
 pub mod toolbar;
 
