@@ -617,6 +617,87 @@ impl Document {
         }
     }
 
+    /// Snap a highlight annotation's vertical span to the text ink around its
+    /// center line. Only a highlight annotation is adjusted.
+    // Ported from omnishot/editor.py (smart_highlight)
+    pub fn smart_highlight(&mut self, index: usize) {
+        let Some(object) = self.objects.get_mut(index) else {
+            return;
+        };
+        if object.kind() != Some("highlight") {
+            return;
+        }
+        let width = object.width();
+        let height = object.height();
+        let x = object.x();
+        let y = object.y();
+        for padding in [20.0, 40.0, 80.0, 160.0, 320.0, 640.0] {
+            let region = Rect::new(x, y - padding, width, height + 2.0 * padding)
+                .to_aligned_rect()
+                .intersected_rect(Rect::new(
+                    0.0,
+                    0.0,
+                    self.base.width as f64,
+                    self.base.height as f64,
+                ));
+            if region.width < 1.0 || region.height < 1.0 {
+                return;
+            }
+            let gray = grayscale(&self.base, region);
+            if gray.len() < 2 {
+                return;
+            }
+            let border = median_top_bottom(&gray);
+            let mut rows: Vec<usize> = Vec::new();
+            let threshold = 3.0f64.max(region.width * 0.015);
+            for (row, line) in gray.iter().enumerate() {
+                let ink = line
+                    .iter()
+                    .filter(|value| (f64::from(**value) - border).abs() > 45.0)
+                    .count();
+                if ink as f64 > threshold {
+                    rows.push(row);
+                }
+            }
+            if rows.len() < 3 {
+                return;
+            }
+            let groups = group_rows(&rows);
+            let center = y + height / 2.0 - region.y;
+            let group = groups
+                .into_iter()
+                .min_by(|a, b| {
+                    let ma = (a.first().unwrap() + a.last().unwrap()) as f64 / 2.0;
+                    let mb = (b.first().unwrap() + b.last().unwrap()) as f64 / 2.0;
+                    (ma - center)
+                        .abs()
+                        .partial_cmp(&(mb - center).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .expect("rows are non-empty");
+            let first = *group.first().unwrap();
+            let last = *group.last().unwrap();
+            // A group touching the search boundary may be clipped text; widen
+            // the search instead of shrinking the stroke to it.
+            if (first < 2 && region.y > 0.0)
+                || (last >= gray.len().saturating_sub(2)
+                    && region.bottom() < self.base.height as f64 - 1.0)
+            {
+                continue;
+            }
+            if last - first > 3 {
+                object
+                    .props
+                    .insert("y".to_owned(), Value::Number(region.y + first as f64 - 3.0));
+                object.props.insert(
+                    "h".to_owned(),
+                    Value::Number(last as f64 - first as f64 + 7.0),
+                );
+            }
+            return;
+        }
+    }
+
     /// Serialize the document as a `.omnishot` archive.
     // Ported from omnishot/editor.py (write_project)
     pub fn to_project(&self) -> Project {
@@ -642,6 +723,56 @@ fn object_transform(object: &Annotation) -> Transform {
         })
         .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     Transform(values)
+}
+
+/// Sample a region of the base image as grayscale rows.
+fn grayscale(image: &Image, region: Rect) -> Vec<Vec<u8>> {
+    let x0 = region.x.max(0.0) as usize;
+    let y0 = region.y.max(0.0) as usize;
+    let x1 = (region.right().max(0.0) as usize).min(image.width);
+    let y1 = (region.bottom().max(0.0) as usize).min(image.height);
+    let mut rows = Vec::with_capacity(y1.saturating_sub(y0));
+    for y in y0..y1 {
+        let mut row = Vec::with_capacity(x1.saturating_sub(x0));
+        for x in x0..x1 {
+            let pixel = image.pixel(x, y);
+            let luma = (0.299 * f64::from(pixel[0])
+                + 0.587 * f64::from(pixel[1])
+                + 0.114 * f64::from(pixel[2]))
+            .round();
+            row.push(luma.clamp(0.0, 255.0) as u8);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// The median of the first and last row, standing in for the border value.
+fn median_top_bottom(rows: &[Vec<u8>]) -> f64 {
+    let mut values: Vec<u8> = Vec::new();
+    if let Some(first) = rows.first() {
+        values.extend_from_slice(first);
+    }
+    if let Some(last) = rows.last() {
+        values.extend_from_slice(last);
+    }
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_unstable();
+    f64::from(values[values.len() / 2])
+}
+
+/// Split sorted row indices into runs no more than three apart.
+fn group_rows(rows: &[usize]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for row in rows {
+        match groups.last_mut() {
+            Some(group) if *row - *group.last().unwrap() <= 3 => group.push(*row),
+            _ => groups.push(vec![*row]),
+        }
+    }
+    groups
 }
 
 fn scale_image(image: &Image, width: usize, height: usize) -> Image {
@@ -1034,6 +1165,31 @@ mod tests {
             snap_point(Point::new(100.0, 100.0), &targets, 8.0),
             Point::new(100.0, 100.0)
         );
+    }
+
+    #[test]
+    fn smart_highlight_snaps_to_text_ink() {
+        // A dark text band surrounded by light rows.
+        let mut base = image(200, 100, [255, 255, 255, 255]);
+        for y in 40..52 {
+            for x in 20..180 {
+                let offset = (y * 200 + x) * 4;
+                base.data[offset..offset + 4].copy_from_slice(&[10, 10, 10, 255]);
+            }
+        }
+        let mut document = Document::new(base, None, false);
+        document.objects.push(Annotation::new(props(&[
+            ("kind", Value::String("highlight".into())),
+            ("x", Value::Number(20.0)),
+            ("y", Value::Number(20.0)),
+            ("w", Value::Number(160.0)),
+            ("h", Value::Number(10.0)),
+        ])));
+        document.commit();
+        document.smart_highlight(0);
+        let object = &document.objects[0];
+        assert!(object.y() >= 36.0 && object.y() <= 42.0, "{}", object.y());
+        assert!(object.height() >= 10.0, "{}", object.height());
     }
 
     #[test]

@@ -96,6 +96,16 @@ impl Rect {
     pub fn is_empty(&self) -> bool {
         self.width <= 0.0 || self.height <= 0.0
     }
+
+    /// The overlap with `other`, or an empty rectangle when they miss.
+    #[must_use]
+    pub fn intersected_rect(&self, other: Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        Rect::new(x, y, (right - x).max(0.0), (bottom - y).max(0.0))
+    }
 }
 
 /// The annotation shapes a document can contain.
