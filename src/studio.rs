@@ -927,9 +927,9 @@ pub fn export_studio<R: CommandRunner>(
     let options = request.options;
     let per_frame = width * height * 3;
 
-    // The first composed frame decides the output size, so decode its whole
-    // segment once and feed that buffer to the streaming producer rather than
-    // decoding the first segment twice.
+    // The first composed frame decides the output size, and the producer
+    // reuses it for the first emitted frame so the first segment is composed
+    // only once.
     let first_index = plan
         .segments
         .iter()
@@ -1024,6 +1024,8 @@ pub fn export_studio<R: CommandRunner>(
                 for index in 0..count {
                     let t = a + index as f64 * speed / fps;
                     let composed = if segment_index == first_index && index == 0 {
+                        // Reuse the frame composed for the output size instead
+                        // of composing the first frame twice.
                         first_composed.take().unwrap()
                     } else {
                         let local = (((t - a) * source_fps).round() as usize).min(available - 1);
@@ -1530,6 +1532,33 @@ mod tests {
             partial_path(request.destination),
             PathBuf::from("/tmp/export.partial.mp4")
         );
+    }
+
+    #[test]
+    fn click_ring_is_stroked_unless_the_filled_style_is_set() {
+        let mut frame = Image::new(40, 40, vec![0u8; 40 * 40 * 4]);
+        for pixel in frame.data.as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[10, 20, 30, 255]);
+        }
+        let metadata = Value::Object(BTreeMap::from([(
+            "events".to_owned(),
+            Value::Array(vec![click(0.0, 0.5, 0.5)]),
+        )]));
+        let common = [
+            ("cursor", Value::Bool(false)),
+            ("keys", Value::Bool(false)),
+            ("click_size", Value::Number(10.0)),
+            ("click_duration", Value::Number(1.0)),
+        ];
+        let stroked = compose_frame(&frame, 0.0, &metadata, &options(&common), None);
+        let mut filled_entries = common.to_vec();
+        filled_entries.push(("click_style", Value::String("filled".to_owned())));
+        let filled = compose_frame(&frame, 0.0, &metadata, &options(&filled_entries), None);
+        // The stroke leaves the centre clear and tints the ring.
+        assert_eq!(stroked.pixel(20, 20), [10, 20, 30, 255]);
+        assert_ne!(stroked.pixel(20, 11), [10, 20, 30, 255]);
+        // The filled style colors the whole disc, centre included.
+        assert_ne!(filled.pixel(20, 20), [10, 20, 30, 255]);
     }
 
     #[test]
