@@ -361,8 +361,6 @@ impl CommandRunner for SystemRunner {
         })
     }
 }
-    }
-}
 
 /// Wait for `child` in a helper thread; kill it if `timeout` elapses.
 fn wait_with_timeout(
