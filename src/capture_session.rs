@@ -229,9 +229,9 @@ pub struct SessionDisplays {
 
 /// Run a capture through the supplied command runner and mirror registry.
 ///
-/// `selection_runner` performs the interactive slurp step when the mode needs
-/// it; the returned bytes are a PNG encoded by grim. The step is separate so
-/// the capture itself stays testable without a display server.
+/// The runner reaches grim, slurp and hyprctl; the registry tracks the
+/// compositor mirror so a live selection can degrade cleanly. Keeping both
+/// injected lets the capture behavior be asserted without a display server.
 pub struct CaptureSession<'a, R: CommandRunner> {
     pub runner: &'a R,
     pub mirror: &'a MirrorRegistry,
