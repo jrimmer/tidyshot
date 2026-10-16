@@ -1,10 +1,10 @@
 //! Behavior for the command surface users already know, and the preview
 //! overlay, UI scale and clipboard rules behind it.
 //!
-//! `docs/USAGE.md` documents the CLI subcommands and URL parameters the
-//! desktop entries, the shell widget and existing links use. These tests read
-//! that same list and assert every entry still routes, so the port cannot
-//! quietly drop a command.
+//! The documented CLI subcommands and URL parameters are the ones the desktop
+//! entries, the shell widget and existing links use. These tests read the same
+//! list and assert every entry still routes, so the port cannot quietly drop a
+//! command.
 
 use std::fs;
 use std::path::PathBuf;
@@ -30,8 +30,8 @@ fn parse(argv: &[&str]) -> tidyshot::cli::Args {
 
 #[test]
 fn every_documented_cli_subcommand_routes() {
-    // The exact list from docs/USAGE.md plus the shortcut aliases the
-    // preferences and bar widget install.
+    // The exact documented list plus the shortcut aliases the preferences and
+    // bar widget install.
     let commands = [
         "menu",
         "all-in-one",
