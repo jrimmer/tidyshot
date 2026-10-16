@@ -480,6 +480,12 @@ impl TextResult {
         &self.status
     }
 
+    /// Whether link detection is enabled for this result.
+    #[must_use]
+    pub fn detect(&self) -> bool {
+        self.detect
+    }
+
     /// The links currently shown for the text, or none when detection is off.
     #[must_use]
     pub fn links(&self) -> Vec<Link> {
@@ -530,6 +536,61 @@ impl TextResult {
     #[must_use]
     pub fn can_open(&self) -> bool {
         !self.links().is_empty()
+    }
+}
+
+/// The label and URL lists the dialog renders for `links`.
+///
+/// The Qt view keeps the two parallel lists as flat string models; this is
+/// the one place the pair is projected so the dialog and its tests agree.
+#[must_use]
+pub fn link_projection(links: &[Link]) -> (Vec<String>, Vec<String>) {
+    let labels = links.iter().map(|link| link.label.clone()).collect();
+    let urls = links.iter().map(|link| link.url.clone()).collect();
+    (labels, urls)
+}
+
+/// The state the dialog takes when a recognition completes.
+///
+/// This is the mapping from a pipeline outcome to what the recognized-text
+/// dialog shows, so the completion path can be asserted without a Qt engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// The status line shown in the dialog.
+    pub status: String,
+    /// Whether the dialog should be visible.
+    pub shown: bool,
+    /// The reviewable result, when the dialog needs the full text.
+    pub result: Option<TextResult>,
+}
+
+/// Convert a recognition outcome into the dialog's state.
+///
+/// An ordinary result that copied cleanly stays out of the way, a result with
+/// links or a copy failure opens the dialog, and an error is surfaced rather
+/// than swallowed. Nothing recognized produces no dialog.
+pub fn complete(outcome: Result<Presentation, TextError>) -> Completion {
+    match outcome {
+        Ok(Presentation::Copied) => Completion {
+            status: TextResult::COPIED.to_owned(),
+            shown: false,
+            result: None,
+        },
+        Ok(Presentation::Dialog(result)) => Completion {
+            status: result.status().to_owned(),
+            shown: true,
+            result: Some(result),
+        },
+        Ok(Presentation::Empty) => Completion {
+            status: "No text or QR code found".to_owned(),
+            shown: false,
+            result: None,
+        },
+        Err(error) => Completion {
+            status: error.to_string(),
+            shown: true,
+            result: None,
+        },
     }
 }
 
@@ -613,15 +674,26 @@ pub mod qobject {
         #[qproperty(QString, status)]
         #[qproperty(QStringList, link_labels, cxx_name = "linkLabels")]
         #[qproperty(QStringList, link_urls, cxx_name = "linkUrls")]
+        #[qproperty(i32, link_count, cxx_name = "linkCount")]
         #[qproperty(bool, copied)]
         #[qproperty(bool, can_open, cxx_name = "canOpen")]
         #[qproperty(bool, detect)]
+        #[qproperty(bool, shown)]
         type TextOutput = super::TextResultDialogRust;
 
         /// Replace the edited text.
         #[qinvokable]
         #[cxx_name = "updateText"]
         fn update_text(self: Pin<&mut Self>, text: &QString);
+
+        /// Run the OCR/QR pipeline over `path` and present the result.
+        #[qinvokable]
+        #[cxx_name = "recognize"]
+        fn recognize_path(self: Pin<&mut Self>, path: &QString);
+
+        /// Close the review dialog and hide it.
+        #[qinvokable]
+        fn dismiss(self: Pin<&mut Self>);
 
         /// Copy the current text to the clipboard.
         #[qinvokable]
@@ -647,9 +719,11 @@ pub struct TextResultDialogRust {
     status: QString,
     link_labels: QStringList,
     link_urls: QStringList,
+    link_count: i32,
     copied: bool,
     can_open: bool,
     detect: bool,
+    shown: bool,
 }
 
 impl Default for TextResultDialogRust {
@@ -659,9 +733,11 @@ impl Default for TextResultDialogRust {
             status: QString::from(TextResult::REVIEW),
             link_labels: QStringList::default(),
             link_urls: QStringList::default(),
+            link_count: 0,
             copied: false,
             can_open: false,
             detect: true,
+            shown: false,
         }
     }
 }
@@ -678,15 +754,62 @@ impl qobject::TextOutput {
         } else {
             Vec::new()
         };
-        let mut labels = QStringList::default();
-        let mut urls = QStringList::default();
-        for link in &links {
-            labels.append(QString::from(link.label.clone()));
-            urls.append(QString::from(link.url.clone()));
+        self.as_mut().project_links(&links);
+    }
+
+    /// Run the OCR/QR pipeline over `path` and present the result.
+    ///
+    /// This is the completion end of `tidyshot ocr <path>` and the
+    /// `capture-text` URL: extraction copies an ordinary result and opens
+    /// this dialog only when there are links to act on or an error to show.
+    pub fn recognize_path(mut self: Pin<&mut Self>, path: &QString) {
+        let path = path.to_string();
+        let runner = crate::commands::SystemRunner;
+        let qr = CommandQrReader::new(runner, "zbarimg");
+        let settings = TextSettings::default();
+        let outcome = recognize(&runner, &qr, Path::new(&path), &settings, None);
+        let completion = complete(outcome);
+        self.as_mut()
+            .set_status(QString::from(completion.status.clone()));
+        match completion.result {
+            Some(result) => self.as_mut().apply_result(&result),
+            None => self.as_mut().set_shown(completion.shown),
         }
-        self.as_mut().set_link_labels(labels);
-        self.as_mut().set_link_urls(urls);
+    }
+
+    /// Load a presented result into the dialog and show it.
+    fn apply_result(mut self: Pin<&mut Self>, result: &TextResult) {
+        self.as_mut()
+            .set_text(QString::from(result.text().to_owned()));
+        self.as_mut()
+            .set_status(QString::from(result.status().to_owned()));
+        self.as_mut().set_copied(result.copied());
+        self.as_mut().set_detect(result.detect());
+        let links = result.links();
+        self.as_mut().project_links(&links);
+        self.as_mut().set_shown(true);
+    }
+
+    /// Project `links` into the dialog's parallel label and URL lists.
+    fn project_links(mut self: Pin<&mut Self>, links: &[Link]) {
+        let (labels, urls) = link_projection(links);
+        let mut label_list = QStringList::default();
+        let mut url_list = QStringList::default();
+        for label in labels {
+            label_list.append(QString::from(label));
+        }
+        for url in urls {
+            url_list.append(QString::from(url));
+        }
+        self.as_mut().set_link_labels(label_list);
+        self.as_mut().set_link_urls(url_list);
+        self.as_mut().set_link_count(links.len() as i32);
         self.as_mut().set_can_open(!links.is_empty());
+    }
+
+    /// Close the review dialog.
+    pub fn dismiss(mut self: Pin<&mut Self>) {
+        self.as_mut().set_shown(false);
     }
 
     /// Copy the current text through `wl-copy`.
@@ -729,7 +852,30 @@ mod bridge_tests {
         assert_eq!(dialog.status.to_string(), TextResult::REVIEW);
         assert!(dialog.detect);
         assert!(!dialog.can_open);
+        assert!(!dialog.shown);
         assert_eq!(dialog.link_labels.len(), 0);
+        assert_eq!(dialog.link_count, 0);
+    }
+
+    #[test]
+    fn link_projection_keeps_spelling_and_order_parallel() {
+        let links = vec![
+            Link {
+                label: "www.example.org".to_owned(),
+                url: "https://www.example.org".to_owned(),
+            },
+            Link {
+                label: "https://example.com/a".to_owned(),
+                url: "https://example.com/a".to_owned(),
+            },
+        ];
+        let (labels, urls) = link_projection(&links);
+        assert_eq!(labels, vec!["www.example.org", "https://example.com/a"]);
+        assert_eq!(
+            urls,
+            vec!["https://www.example.org", "https://example.com/a"]
+        );
+        assert_eq!(link_projection(&[]), (Vec::new(), Vec::new()));
     }
 }
 
@@ -1049,5 +1195,39 @@ mod tests {
             TextSettings::from_value(&crate::json::parse("{\"ocr_languages\":\"\"}").unwrap());
         assert_eq!(partial.ocr_languages, ocr::AUTO);
         assert!(partial.ocr_linebreaks);
+    }
+
+    #[test]
+    fn completion_opens_only_on_links_or_errors() {
+        // A clean copy stays out of the way.
+        let copied = complete(Ok(Presentation::Copied));
+        assert!(!copied.shown);
+        assert!(copied.result.is_none());
+        assert_eq!(copied.status, TextResult::COPIED);
+
+        // A reviewable result opens the dialog with its own state.
+        let dialog = complete(Ok(Presentation::Dialog(TextResult::new(
+            "see https://example.com",
+            true,
+            false,
+        ))));
+        assert!(dialog.shown);
+        let result = dialog.result.expect("the review result must carry through");
+        assert_eq!(result.text(), "see https://example.com");
+        assert!(result.can_open());
+
+        // Nothing recognized produces no dialog and no stale result.
+        let empty = complete(Ok(Presentation::Empty));
+        assert!(!empty.shown);
+        assert!(empty.result.is_none());
+        assert!(empty.status.contains("No text"));
+
+        // An error is surfaced, not swallowed.
+        let failed = complete(Err(TextError {
+            message: "OCR language unavailable".to_owned(),
+        }));
+        assert!(failed.shown);
+        assert!(failed.result.is_none());
+        assert!(failed.status.contains("language unavailable"));
     }
 }

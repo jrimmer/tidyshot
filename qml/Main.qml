@@ -59,8 +59,9 @@ ApplicationWindow {
         }
     }
 
-    // Recognized-text review shares the TextOutput singleton's state.
-    TextOutput {
+    // Recognized-text review. TextOutput is a singleton, so it is referenced
+    // by id rather than instantiated, and the dialog below binds its state.
+    TextResultDialog {
         id: textResultDialog
     }
 }
