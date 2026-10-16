@@ -9,12 +9,28 @@ use std::fmt;
 use std::path::Path;
 
 use crate::api::{UrlCommand, parse_url};
+use crate::capture_session::{CaptureMode, CaptureRequest, CaptureRequestError};
 
 /// The default command when none is given.
 pub const DEFAULT_COMMAND: &str = "menu";
 
 /// The after-capture actions the CLI accepts.
 pub const ACTIONS: &[&str] = &["overlay", "annotate", "copy", "save", "pin"];
+
+/// The command words that start a capture.
+pub const CAPTURE_COMMANDS: &[&str] = &[
+    "select",
+    "all-in-one",
+    "area",
+    "fullscreen",
+    "desktop",
+    "previous",
+    "window",
+    "timer",
+    "scroll",
+    "scroll-horizontal",
+    "ocr",
+];
 
 /// Parsed command-line arguments.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -125,7 +141,33 @@ where
     })
 }
 
-/// Convert a `file://` URL to a local path, rejecting remote hosts.
+impl Args {
+    /// Whether this command starts a capture.
+    #[must_use]
+    pub fn is_capture(&self) -> bool {
+        CAPTURE_COMMANDS.contains(&self.command.as_str())
+    }
+
+    /// Resolve this command into a capture request, when it is one.
+    ///
+    /// `default_delay` is the configured `delay` setting, used by the self
+    /// timer when the CLI supplies no `--delay`.
+    #[must_use]
+    pub fn capture_request(
+        &self,
+        default_delay: i64,
+    ) -> Option<Result<CaptureRequest, CaptureRequestError>> {
+        let mode = CaptureMode::from_command(&self.command)?;
+        Some(CaptureRequest::resolve(
+            mode.command(),
+            self.geometry.as_deref(),
+            self.delay,
+            default_delay,
+        ))
+    }
+}
+
+/// Convert `file://` URL to a local path, rejecting remote hosts.
 fn local_file_path(url: &str) -> Option<String> {
     let rest = url.strip_prefix("file://")?;
     let (authority, path) = match rest.find('/') {
@@ -214,5 +256,28 @@ mod tests {
     fn an_unsupported_action_is_rejected() {
         assert!(parse_args(["area", "--action", "upload"]).is_err());
         assert!(parse_args(["area", "--delay", "soon"]).is_err());
+    }
+
+    #[test]
+    fn capture_commands_resolve_into_requests() {
+        let args = parse_args(["timer", "--delay", "5"]).unwrap();
+        assert!(args.is_capture());
+        let request = args.capture_request(3).unwrap().unwrap();
+        assert_eq!(request.mode, CaptureMode::Timer);
+        assert_eq!(request.delay, 5);
+
+        // The configured delay is used when the CLI omits one.
+        let args = parse_args(["timer"]).unwrap();
+        assert_eq!(args.capture_request(7).unwrap().unwrap().delay, 7);
+
+        let args = parse_args(["menu"]).unwrap();
+        assert!(!args.is_capture());
+        assert!(args.capture_request(3).is_none());
+    }
+
+    #[test]
+    fn capture_request_surfaces_geometry_errors() {
+        let args = parse_args(["area", "--geometry", "nope"]).unwrap();
+        assert!(args.capture_request(0).unwrap().is_err());
     }
 }

@@ -343,6 +343,171 @@ fn solitary_locked(monitor: &Value) -> Option<bool> {
     }))
 }
 
+/// Build capture displays from the `hyprctl -j monitors` rows.
+// Ported from omnishot/backend.py (capture_monitors)
+#[must_use]
+pub fn displays_from_monitors(monitors: &[Value]) -> Vec<Display> {
+    let mut displays: Vec<Display> = monitors
+        .iter()
+        .filter_map(|monitor| {
+            let name = monitor.get("name").and_then(Value::as_str)?;
+            let geometry = crate::geometry::MonitorGeometry {
+                x: number(monitor, "x"),
+                y: number(monitor, "y"),
+                width: number(monitor, "width"),
+                height: number(monitor, "height"),
+                scale: monitor.get("scale").and_then(Value::as_f64).unwrap_or(1.0),
+                transform: number(monitor, "transform"),
+            };
+            let focused = monitor
+                .get("focused")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(Display {
+                name: name.to_owned(),
+                geometry,
+                focused,
+            })
+        })
+        .collect();
+    // A single connected output is the implicit focused one.
+    if displays.len() == 1 {
+        displays[0].focused = true;
+    }
+    displays
+}
+
+fn number(value: &Value, key: &str) -> i32 {
+    value
+        .get(key)
+        .and_then(Value::as_f64)
+        .map_or(0, |number| number as i32)
+}
+
+/// The pixels and region a completed capture produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrabbedFrame {
+    /// Absolute region the pixels cover, when the mode selected one.
+    pub rect: Option<Rect>,
+    /// PNG bytes as grim encoded them.
+    pub png: Vec<u8>,
+}
+
+/// The result of running a capture request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureOutcome {
+    /// An interactive selector is needed; the caller shows it and retries.
+    NeedsSelection,
+    /// A scrolling session should start for this region.
+    Scroll {
+        rect: Option<Rect>,
+        horizontal: bool,
+    },
+    /// The pixels were captured.
+    Grabbed(GrabbedFrame),
+}
+
+/// Run a resolved capture request against the compositor.
+///
+/// Interactive modes that need a selection return [`CaptureOutcome::NeedsSelection`]
+/// before touching grim, so the QML overlay owns the pointer. Scrolling modes
+/// return a plan for the stitcher instead of a single frame.
+// Ported from omnishot/app.py (capture)
+pub fn run_capture<R: CommandRunner>(
+    session: &CaptureSession<'_, R>,
+    monitors: &[Value],
+    request: &CaptureRequest,
+    cursor: bool,
+    freeze: bool,
+) -> Result<CaptureOutcome, CaptureRequestError> {
+    session.capture_ready(monitors)?;
+    let displays = displays_from_monitors(monitors);
+    if request.mode.is_scrolling() {
+        return Ok(CaptureOutcome::Scroll {
+            rect: request.rect,
+            horizontal: request.mode == CaptureMode::ScrollHorizontal,
+        });
+    }
+    if request.mode == CaptureMode::Previous && request.rect.is_none() {
+        return Err(CaptureRequestError::Compositor(
+            "Capture an area first".to_owned(),
+        ));
+    }
+    if request.needs_selection(freeze, false) {
+        return Ok(CaptureOutcome::NeedsSelection);
+    }
+    match request.mode {
+        CaptureMode::Fullscreen => {
+            let target = session.target(&displays, None)?;
+            let name = target.name.clone();
+            let scale = target
+                .name
+                .as_deref()
+                .and_then(|name| displays.iter().find(|d| d.name == name))
+                .map(|display| display.geometry.scale);
+            let png = session.grab(None, cursor, name.as_deref(), scale)?;
+            Ok(CaptureOutcome::Grabbed(GrabbedFrame {
+                rect: Some(target.bounds),
+                png,
+            }))
+        }
+        CaptureMode::Desktop => {
+            let mut widest: Option<Rect> = None;
+            let mut frames: Vec<(Display, Vec<u8>)> = Vec::new();
+            for display in &displays {
+                let bounds = display.geometry.bounds();
+                widest = Some(match widest {
+                    Some(current) if current.contains(&bounds) => current,
+                    Some(current) => {
+                        let right = current.right().max(bounds.right());
+                        let bottom = current.bottom().max(bounds.bottom());
+                        let left = current.x.min(bounds.x);
+                        let top = current.y.min(bounds.y);
+                        Rect::new(left, top, right - left, bottom - top)
+                    }
+                    None => bounds,
+                });
+                let png = session.grab(
+                    None,
+                    cursor,
+                    Some(&display.name),
+                    Some(display.geometry.scale),
+                )?;
+                frames.push((display.clone(), png));
+            }
+            // Composite modes hand every output frame to the stitcher.
+            if frames.len() == 1 {
+                return Ok(CaptureOutcome::Grabbed(GrabbedFrame {
+                    rect: widest,
+                    png: frames.pop().expect("one frame").1,
+                }));
+            }
+            Ok(CaptureOutcome::Scroll {
+                rect: widest,
+                horizontal: false,
+            })
+        }
+        CaptureMode::Window => {
+            // The frozen desktop frame is grabbed like a fullscreen capture;
+            // window hit-testing runs in the overlay.
+            let target = session.target(&displays, None)?;
+            let png = session.grab(None, cursor, target.name.as_deref(), None)?;
+            Ok(CaptureOutcome::Grabbed(GrabbedFrame {
+                rect: Some(target.bounds),
+                png,
+            }))
+        }
+        _ => {
+            let rect = request.rect;
+            let output = rect
+                .and_then(|rect| session.target(&displays, Some(rect)).ok())
+                .and_then(|target| target.name);
+            let png = session.grab(rect, cursor, output.as_deref(), None)?;
+            Ok(CaptureOutcome::Grabbed(GrabbedFrame { rect, png }))
+        }
+    }
+}
+
 /// Run slurp and parse its `X,Y WxH` output.
 ///
 /// An empty result or a non-zero exit is reported as a cancellation, matching
@@ -797,5 +962,143 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(outputs, ["left", "right"]);
+    }
+
+    fn monitors() -> Vec<Value> {
+        crate::json::parse(
+            r#"[
+                {"name":"left","x":0,"y":0,"width":1920,"height":1080,"scale":1.0,"transform":0,"focused":true},
+                {"name":"right","x":1920,"y":0,"width":1920,"height":1080,"scale":1.0,"transform":0,"focused":false}
+            ]"#,
+        )
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec()
+    }
+
+    #[test]
+    fn displays_are_built_from_monitor_rows() {
+        let displays = displays_from_monitors(&monitors());
+        assert_eq!(displays.len(), 2);
+        assert_eq!(displays[0].name, "left");
+        assert!(displays[0].focused);
+        assert_eq!(displays[0].geometry.bounds(), Rect::new(0, 0, 1920, 1080));
+        // A lone output is implicitly focused.
+        let single = displays_from_monitors(&monitors()[..1]);
+        assert!(single[0].focused);
+    }
+
+    #[test]
+    fn needs_selection_modes_do_not_touch_grim() {
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let request = CaptureRequest::resolve("select", None, None, 0).unwrap();
+        let outcome = run_capture(&session, &monitors(), &request, false, true).unwrap();
+        assert_eq!(outcome, CaptureOutcome::NeedsSelection);
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|spec| spec.program != "grim"),
+            "the overlay owns the pointer, grim must not run"
+        );
+    }
+
+    #[test]
+    fn frozen_area_without_geometry_needs_selection_but_unfrozen_grabs() {
+        let request = CaptureRequest::resolve("area", None, None, 0).unwrap();
+        let runner = Fake::default();
+        runner.push("PNG");
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        assert_eq!(
+            run_capture(&session, &monitors(), &request, false, true).unwrap(),
+            CaptureOutcome::NeedsSelection
+        );
+        match run_capture(&session, &monitors(), &request, false, false).unwrap() {
+            CaptureOutcome::Grabbed(frame) => {
+                assert_eq!(frame.png, b"PNG");
+                assert_eq!(frame.rect, None);
+            }
+            other => panic!("expected a grab, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fullscreen_targets_the_focused_output() {
+        let request = CaptureRequest::resolve("fullscreen", None, None, 0).unwrap();
+        let runner = Fake::default();
+        runner.push("PNG");
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        match run_capture(&session, &monitors(), &request, true, true).unwrap() {
+            CaptureOutcome::Grabbed(frame) => {
+                assert_eq!(frame.rect, Some(Rect::new(0, 0, 1920, 1080)));
+            }
+            other => panic!("expected a grab, got {other:?}"),
+        }
+        let seen = runner.seen.lock().unwrap();
+        let grim = seen.iter().find(|spec| spec.program == "grim").unwrap();
+        assert!(grim.args.contains(&"-o".to_owned()));
+        assert!(grim.args.contains(&"left".to_owned()));
+        assert!(grim.args.contains(&"-c".to_owned()));
+    }
+
+    #[test]
+    fn scrolling_modes_return_a_plan_instead_of_a_frame() {
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let request =
+            CaptureRequest::resolve("scroll-horizontal", Some("10,20 640x400"), None, 0).unwrap();
+        assert_eq!(
+            run_capture(&session, &monitors(), &request, false, true).unwrap(),
+            CaptureOutcome::Scroll {
+                rect: Some(Rect::new(10, 20, 640, 400)),
+                horizontal: true,
+            }
+        );
+    }
+
+    #[test]
+    fn previous_without_a_remembered_area_is_rejected() {
+        let request = CaptureRequest::resolve("previous", None, None, 0).unwrap();
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let error = run_capture(&session, &monitors(), &request, false, true).unwrap_err();
+        assert!(
+            error.to_string().contains("Capture an area first"),
+            "{error}"
+        );
     }
 }
