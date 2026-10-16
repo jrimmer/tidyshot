@@ -96,4 +96,13 @@ tidyshot_mirror() {
     mkdir -p -- "$task_dst/$(dirname -- "$task_rel")"
     cp -a -- "$task_file" "$task_dst/$task_rel"
   done
+  # `rsync -a` also recreates source directories that hold no owned file, such
+  # as an empty tracked tree. Git cannot track those, so enumerate them from
+  # the filesystem and skip ignored build outputs.
+  while IFS= read -r -d '' task_path; do
+    task_rel=${task_path#"$task_src"/}
+    [[ -z $task_rel ]] && continue
+    git -C "$task_src" check-ignore --no-index -q -- "$task_rel/" && continue
+    mkdir -p -- "$task_dst/$task_rel"
+  done < <(find "$task_src" -mindepth 1 \( -name .git -prune \) -o -type d -print0 2>/dev/null)
 }
