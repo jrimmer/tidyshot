@@ -179,10 +179,7 @@ pub fn smart_zooms(events: &[Value], duration: f64, scale: f64, limit: Option<f6
         {
             continue;
         }
-        let a = t
-            .max(0.0)
-            .max(t - 0.45)
-            .max(result.last().map_or(0.0, |last| last.end));
+        let a = (t - 0.45).max(result.last().map_or(0.0, |last| last.end));
         let b = limit.map_or(t + duration, |limit| (t + duration).min(limit));
         if b <= a {
             continue;
@@ -439,15 +436,17 @@ pub fn compose_screen(frame: &Image, t: f64, metadata: &Value, options: &Options
                     .unwrap_or(24.0)
                     * (1.0 + age / duration * 0.5);
                 let ring = [base[0], base[1], base[2], alpha];
-                canvas.fill_ellipse(
-                    Rect::new(
-                        x * width as f64 - radius,
-                        y * height as f64 - radius,
-                        radius * 2.0,
-                        radius * 2.0,
-                    ),
-                    ring,
+                let ellipse = Rect::new(
+                    x * width as f64 - radius,
+                    y * height as f64 - radius,
+                    radius * 2.0,
+                    radius * 2.0,
                 );
+                if options.get("click_style").and_then(Value::as_str) == Some("filled") {
+                    canvas.fill_ellipse(ellipse, ring);
+                } else {
+                    canvas.stroke_ellipse(ellipse, 3.0, ring);
+                }
             }
         }
     }
@@ -676,10 +675,7 @@ pub fn compose_scene(
                 Some(&Value::String(chip_background)),
                 [0xd7, 0x14, 0x17, 0x20],
             );
-            let foreground = color(
-                Some(&Value::String(chip_foreground)),
-                [255, 255, 255, 255],
-            );
+            let foreground = color(Some(&Value::String(chip_foreground)), [255, 255, 255, 255]);
             let label = keys[keys.len().saturating_sub(5)..].join("  ");
             let font_size = options
                 .get("key_size")
@@ -713,7 +709,14 @@ pub fn compose_scene(
             let count = label.chars().count();
             let text_left = chip_rect.center().x - count as f64 * font_size * 0.3;
             let baseline = chip_rect.center().y - font_size * 0.35;
-            draw_ui_text(&mut target, text_left, baseline, &label, font_size, foreground);
+            draw_ui_text(
+                &mut target,
+                text_left,
+                baseline,
+                &label,
+                font_size,
+                foreground,
+            );
         }
     }
 
@@ -778,14 +781,7 @@ pub fn encoder_selector_arguments(options: &Options) -> Vec<String> {
         .to_vec()
     } else {
         [
-            "-c:v",
-            "libx264",
-            "-crf",
-            "20",
-            "-preset",
-            "fast",
-            "-pix_fmt",
-            "yuv420p",
+            "-c:v", "libx264", "-crf", "20", "-preset", "fast", "-pix_fmt", "yuv420p",
         ]
         .map(str::to_owned)
         .to_vec()
@@ -817,13 +813,7 @@ pub fn audio_edit_filters(start: f64, speed: f64, cuts: &[(f64, f64)]) -> Vec<St
     let terms: Vec<String> = cuts
         .iter()
         .filter(|(_, b)| *b > start)
-        .map(|(a, b)| {
-            format!(
-                "between(t,{},{})",
-                (a - start).max(0.0),
-                b - start
-            )
-        })
+        .map(|(a, b)| format!("between(t,{},{})", (a - start).max(0.0), b - start))
         .collect();
     if !terms.is_empty() {
         filters.push(format!("aselect='not({})'", terms.join("+")));
@@ -980,7 +970,9 @@ pub fn export_studio<R: CommandRunner>(
     let partial = partial_path(request.destination);
     let mut command = CommandSpec::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(encoder_input_arguments(&options, out_width, out_height, fps))
+        .args(encoder_input_arguments(
+            &options, out_width, out_height, fps,
+        ))
         .args(["-ss"])
         .arg(request.start.to_string())
         .args(["-i"])

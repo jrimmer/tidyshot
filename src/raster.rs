@@ -254,6 +254,38 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Stroke an axis-aligned ellipse with a `width`-pixel ring.
+    pub fn stroke_ellipse(&mut self, rect: Rect, width: f64, color: [u8; 4]) {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        let cx = rect.center().x;
+        let cy = rect.center().y;
+        let rx = rect.width / 2.0;
+        let ry = rect.height / 2.0;
+        let half = (width / 2.0).max(0.5);
+        let y0 = (rect.y - half).floor().max(0.0) as usize;
+        let y1 = ((rect.bottom() + half).ceil().max(0.0) as usize).min(self.height);
+        let x0 = (rect.x - half).floor().max(0.0) as usize;
+        let x1 = ((rect.right() + half).ceil().max(0.0) as usize).min(self.width);
+        for y in y0..y1 {
+            let dy = y as f64 + 0.5 - cy;
+            for x in x0..x1 {
+                let dx = x as f64 + 0.5 - cx;
+                let fx = dx / rx;
+                let fy = dy / ry;
+                let implicit = fx * fx + fy * fy;
+                // First-order distance to the ellipse in pixel units.
+                let gradient = 2.0 * (fx * fx / rx.abs().max(1e-6) + fy * fy / ry.abs().max(1e-6));
+                let gradient = gradient.max(1e-6).sqrt();
+                let distance = (implicit - 1.0).abs() / gradient;
+                if distance <= half {
+                    self.blend(x, y, color);
+                }
+            }
+        }
+    }
+
     /// Fill a closed polygon using the even-odd rule.
     pub fn fill_polygon(&mut self, points: &[Point], color: [u8; 4]) {
         if points.len() < 3 {
@@ -435,7 +467,7 @@ fn fill_polygon_mask(mask: &mut [u8], width: usize, height: usize, points: &[Poi
 /// A 5x7 uppercase/digit glyph set for the label chips Qt would draw with a
 /// font. Each glyph is seven rows of five bits, most significant bit left.
 /// Ported from the omnishot/video_keys.py chip text boundary.
-const GLYPHS: [[u8; 7]; 58] = [
+const GLYPHS: [[u8; 7]; 50] = [
     [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E], // 0
     [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E], // 1
     [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F], // 2
@@ -486,14 +518,6 @@ const GLYPHS: [[u8; 7]; 58] = [
     [0x00, 0x00, 0x0E, 0x00, 0x0E, 0x00, 0x00], // =
     [0x00, 0x00, 0x0E, 0x00, 0x00, 0x00, 0x00], // ' (placeholder)
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // space
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
 ];
 
 /// The 5x7 glyph rows for a character, or `None` for an unknown glyph.
@@ -502,7 +526,7 @@ fn glyph_rows(character: char) -> Option<[u8; 7]> {
         '0'..='9' => character as usize - '0' as usize,
         'A'..='Z' => 10 + character as usize - 'A' as usize,
         'a'..='z' => 10 + character as usize - 'a' as usize,
-        ' ' => 50,
+        ' ' => 49,
         _ => return None,
     };
     Some(GLYPHS[index])
