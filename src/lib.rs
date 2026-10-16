@@ -22,6 +22,7 @@ pub mod menu;
 pub mod mirror;
 pub mod motion_blur;
 pub mod pngzip;
+pub mod project;
 pub mod raster;
 pub mod recording;
 pub mod scroll;
