@@ -942,7 +942,7 @@ mod command_tests {
         let seen = runner.seen.lock().unwrap();
         assert_eq!(seen[0].program, "hyprctl");
         assert!(seen[0].args[1].contains("cursor.move"));
-        assert_eq!(seen[1].program.ends_with("scroll-helper"), true);
+        assert!(seen[1].program.ends_with("scroll-helper"));
         assert_eq!(seen[1].args, ["vertical", "3"]);
     }
 
@@ -1008,5 +1008,96 @@ mod command_tests {
         let capture = SystemScrollCapture::new(&runner);
         let error = capture.grab(Rect::new(0, 0, 2, 2)).unwrap_err();
         assert!(error.contains("truncated"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<String>>>);
+
+    struct Capture {
+        log: Log,
+    }
+
+    impl ScrollCapture for Capture {
+        fn grab(&self, _rect: Rect) -> Result<FrameData, String> {
+            Err("unused".to_owned())
+        }
+        fn mirror_start(&self) -> Result<(), String> {
+            self.log.0.lock().unwrap().push("start".to_owned());
+            Ok(())
+        }
+        fn mirror_stop(&self) -> Result<(), String> {
+            self.log.0.lock().unwrap().push("stop".to_owned());
+            Ok(())
+        }
+    }
+
+    struct Input;
+
+    impl ScrollInput for Input {
+        fn cursor(&self) -> Result<(i32, i32), String> {
+            Ok((10, 10))
+        }
+        fn move_cursor(&self, _x: i32, _y: i32) -> Result<(), String> {
+            Ok(())
+        }
+        fn scroll_step(&self, _horizontal: bool, _amount: i32) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct Ui;
+
+    impl ScrollUi for Ui {
+        fn before_grab(&mut self) -> bool {
+            false
+        }
+        fn after_grab(&mut self) {}
+        fn update(&mut self, _frame: &FrameData) {}
+        fn keys_stop(&mut self) {}
+        fn visuals_close(&mut self) {}
+    }
+
+    /// A rejected frame must leave position, origin and the accumulated image
+    /// untouched, so the user can scroll back and continue.
+    #[test]
+    fn a_rejected_alignment_does_not_disturb_stitch_state() {
+        let log = Log::default();
+        let mut session = ScrollSession::new(
+            Rect::new(10, 10, 200, 100),
+            false,
+            Box::new(Capture { log }),
+            Box::new(Input),
+            Box::new(Ui),
+        );
+        session.start();
+        let source: Vec<u8> = (0..200 * 100 * 3)
+            .map(|index| ((index * 31) % 200) as u8)
+            .collect();
+        session
+            .stitcher
+            .push(FrameData::new(source.clone(), 200, 100, 3))
+            .unwrap();
+        let position = session.stitcher.position();
+        let accepted = session.stitcher.accepted();
+
+        let job = session.begin_grab().unwrap();
+        let noise: Vec<u8> = (0..200 * 100 * 3)
+            .map(|index| ((index * 97 + 13) % 255) as u8)
+            .collect();
+        let done = session.complete(job, Ok(FrameData::new(noise, 200, 100, 3)));
+        assert!(done.is_none());
+        assert!(session.status().contains("Could not align"));
+        assert_eq!(session.stitcher.position(), position);
+        assert_eq!(session.stitcher.accepted(), accepted);
+        assert_eq!(session.output().unwrap().data, source);
+        // The session keeps running so the next frame can recover.
+        assert!(session.is_running());
+        assert!(session.begin_grab().is_some());
     }
 }
