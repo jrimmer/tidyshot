@@ -884,6 +884,11 @@ impl qobject::TextOutput {
                 self.as_mut().set_shown(completion.shown);
             }
         }
+        // A copied result and an empty read stay out of the way; the source
+        // reports both through a desktop notification.
+        if !completion.shown {
+            crate::commands::notify_send("tidyshot", &completion.status);
+        }
     }
 
     /// Clear the reviewable result while keeping the current detection mode.

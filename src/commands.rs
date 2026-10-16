@@ -158,6 +158,21 @@ pub fn clipboard_spec(mime: &str, data: Vec<u8>) -> CommandSpec {
         .timeout(Duration::from_secs(10))
 }
 
+/// Fire a desktop notification and do not wait for it.
+///
+/// The recognized-text path reports a copied result and an empty read this
+/// way, matching the source's `notify`; a missing `notify-send` is silent
+/// because the dialog already carries the status.
+// Ported from omnishot/app.py (notify)
+pub fn notify_send(title: &str, message: &str) {
+    let _ = Command::new("notify-send")
+        .args(["--app-name=tidyshot", title, message])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
 /// Run a command and return its output, or a [`CommandError`] on failure.
 ///
 /// Implementations must never swallow a non-zero exit: the error text is what
