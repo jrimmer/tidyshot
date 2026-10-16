@@ -1,7 +1,9 @@
 // The library target every binary and test links.
+pub mod api;
 pub mod bridge;
 pub mod commands;
 pub mod filenames;
+pub mod geometry;
 pub mod json;
 pub mod recording;
 pub mod storage;
