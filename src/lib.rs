@@ -22,6 +22,7 @@ pub mod media_import;
 pub mod menu;
 pub mod mirror;
 pub mod motion_blur;
+pub mod pin;
 pub mod pngzip;
 pub mod project;
 pub mod raster;
@@ -30,6 +31,7 @@ pub mod render;
 pub mod scroll;
 pub mod stitch;
 pub mod storage;
+pub mod toolbar;
 
 /// Initialise the cxx-qt registrations and run the application.
 pub fn run() {
