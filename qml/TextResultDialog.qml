@@ -16,9 +16,24 @@ Dialog {
     width: 600
     height: 400
     standardButtons: Dialog.Close
-    // The completion path sets TextOutput.shown once a result is ready.
-    visible: TextOutput.shown
     onClosed: TextOutput.dismiss()
+
+    // The completion path sets TextOutput.shown once a result is ready. Open
+    // and close through methods rather than a binding on `visible`, because
+    // Dialog.close() writes `visible` and would remove a declarative binding.
+    Connections {
+        target: TextOutput
+        function onShownChanged() {
+            if (TextOutput.shown)
+                root.open()
+            else
+                root.close()
+        }
+    }
+    Component.onCompleted: {
+        if (TextOutput.shown)
+            root.open()
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -37,12 +52,20 @@ Dialog {
             TextArea {
                 id: editor
                 objectName: "recognizedText"
-                text: TextOutput.text
                 wrapMode: TextArea.Wrap
                 selectByMouse: true
                 // Only a user edit transitions to the edited state; a
                 // programmatic result must keep its own status and copy flag.
                 onTextEdited: TextOutput.updateText(text)
+            }
+
+            // The editor's text binding is replaced on the first user edit, so
+            // reload the recognized text whenever the singleton supplies a new
+            // result without disturbing an edit already in the box.
+            Binding {
+                target: editor
+                property: "text"
+                value: TextOutput.text
             }
         }
 
