@@ -465,11 +465,16 @@ pub fn match_translation(
         if anchors.len() < 2 {
             continue;
         }
-        let lo = top.max((top as i32 - shift).max(0) as usize);
-        let hi = (h - bottom).min((h as i32 - bottom as i32 - shift).max(0) as usize);
-        if hi <= lo || hi - lo < 48.max(h / 8) {
+        // The reference clamps each overlap bound toward the middle; keeping
+        // the raw difference means a large negative shift can yield a range
+        // that fails the minimum-length check and is skipped, instead of being
+        // rounded up to a spurious window.
+        let lo = (top as i32).max(top as i32 - shift);
+        let hi = ((h - bottom) as i32).min(h as i32 - bottom as i32 - shift);
+        if hi - lo < 48i32.max((h / 8) as i32) {
             continue;
         }
+        let (lo, hi) = (lo as usize, hi as usize);
         let mut detail_count = 0usize;
         let mut error_sum = 0.0f64;
         for y in lo..hi {
@@ -741,12 +746,19 @@ impl ScrollStitcher {
         self.position = new_position;
         self.previous = Some(frame);
         self.accepted += 1;
-        let output = self.image.as_ref().expect("image exists");
+        let image = self.image.as_ref().expect("image exists");
+        // A horizontal capture keeps its accumulating image transposed, so the
+        // internal dimensions are swapped against the image the user sees.
+        let (display_width, display_height) = if self.horizontal {
+            (image.height, image.width)
+        } else {
+            (image.width, image.height)
+        };
         Ok((
             extra_top > 0 || extra_bottom > 0,
             format!(
                 "{} × {} pixels · {} frames",
-                output.width, output.height, self.accepted
+                display_width, display_height, self.accepted
             ),
         ))
     }
@@ -868,6 +880,7 @@ mod tests {
             }
         }
         let mut stitch = ScrollStitcher::new(true);
+        let mut message = String::new();
         for x in [0usize, 180, 360, 540] {
             let mut frame_data = vec![0u8; 600 * 600 * 3];
             for row in 0..600 {
@@ -876,11 +889,14 @@ mod tests {
                 frame_data[target..target + 600 * 3]
                     .copy_from_slice(&wide[source..source + 600 * 3]);
             }
-            stitch.push(owned(&frame_data, 600, 600)).unwrap();
+            (_, message) = stitch.push(owned(&frame_data, 600, 600)).unwrap();
         }
         let output = stitch.output().unwrap();
         assert_eq!(output.width, 1140);
         assert_eq!(output.height, 600);
+        // The status reports the image the user sees, not the internal
+        // transposed buffer.
+        assert!(message.starts_with("1140 × 600"), "{message}");
         // The stitched image is the first 1140 columns of the wide page.
         for row in 0..600 {
             let expected = (row * wide_width) * 3;

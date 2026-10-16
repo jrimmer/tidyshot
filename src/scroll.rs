@@ -2,24 +2,34 @@
 // Ported from omnishot/widgets.py (ScrollPanel)
 //!
 //! One capture window owns a [`ScrollStitcher`] and a small state machine. The
-//! UI calls [`ScrollSession::begin_grab`] to start a frame on a worker and
-//! [`ScrollSession::complete`] when it lands. This keeps the UI thread free
-//! while making the release ordering explicit: the keyboard lease, the capture
+//! UI calls [`ScrollSession::begin_grab`] to start a frame and
+//! [`ScrollSession::run_job`] on the worker to grab the pixels, match and grow
+//! the stitch. Only the small result is handed back through
+//! [`ScrollSession::complete`], so the O(width) `grim` call and the O(image)
+//! match never run on the owning thread. This keeps the UI thread free while
+//! making the release ordering explicit: the keyboard lease, the capture
 //! surfaces and the compositor mirror are all released before a completed
 //! image is handed to the next step, so a nested modal loop cannot restart the
 //! finished capture. A finish requested while a frame is in flight is deferred
 //! until that frame lands, and no further grab starts.
 //!
+//! Matching borrows the previous frame and the incoming frame as slices; the
+//! current stitch is moved into the worker and back, never copied, so the only
+//! allocation per frame is the incoming pixels and the grown image.
+//!
 //! Auto-scroll advances the virtual pointer with the same `scroll-helper` the
-//! source uses, speaking `zwlr_virtual_pointer_v1`; the pointer is moved with
-//! `hyprctl` before every step.
+//! source uses, speaking `zwlr_virtual_pointer_v1`. The pointer is moved to the
+//! capture centre once when auto-scroll turns on; each frame only checks the
+//! pointer is still inside and injects the wheel step.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::commands::{CommandRunner, CommandSpec, hypr};
 use crate::geometry::Rect;
 use crate::json::Value;
+use crate::mirror::{MirrorLease, MirrorRegistry};
 use crate::stitch::{FrameData, FrameRef, ScrollStitcher};
 
 /// The default interval between automatic grabs, matching the source setting.
@@ -42,7 +52,10 @@ pub trait ScrollInput {
 }
 
 /// Source of frames and the compositor mirror lease.
-pub trait ScrollCapture {
+///
+/// `Send + Sync` lets the session lend the capture to the worker thread that
+/// runs the grab and the matching, so the owning (UI) thread never blocks.
+pub trait ScrollCapture: Send + Sync {
     /// Grab one frame of `rect` in RGB channel order.
     fn grab(&self, rect: Rect) -> Result<FrameData, String>;
     /// Start the cursor-excluding compositor mirror.
@@ -55,7 +68,7 @@ pub trait ScrollCapture {
 ///
 /// Production supplies an adapter over the QML windows; tests supply a
 /// recorder so the release order is observable.
-pub trait ScrollUi {
+pub trait ScrollUi: Send {
     /// Hide the capture surfaces; returns whether the grab should wait.
     fn before_grab(&mut self) -> bool;
     /// Restore the capture surfaces after a grab.
@@ -92,6 +105,38 @@ pub struct ScrollJob {
     pub wait: bool,
 }
 
+/// The `Send + Sync` half of a session: grabbing and stitching move to a worker.
+///
+/// The UI clones this handle, moves it to a `std::thread` and hands the result
+/// back through [`ScrollSession::complete`]. It deliberately excludes the UI
+/// adapter and the auto-scroll input, which stay on the owning thread; only the
+/// frame source (already `Send + Sync`) and the shared stitch cross threads.
+#[derive(Clone)]
+pub struct ScrollWorker {
+    capture: Arc<dyn ScrollCapture>,
+    stitcher: Arc<Mutex<ScrollStitcher>>,
+}
+
+impl ScrollWorker {
+    /// Grab one frame and fold it into the stitch.
+    ///
+    /// This is the reference's `work()`: the hide delay, the `grim` grab and
+    /// the O(width×height) match all run on the caller's worker thread, so a
+    /// large capture never blocks the thread that owns the session.
+    // Ported from omnishot/widgets.py (ScrollPanel.tick work)
+    pub fn run(&self, job: ScrollJob) -> Result<(bool, String), String> {
+        if job.wait {
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        let frame = self.capture.grab(job.rect)?;
+        self.stitcher
+            .lock()
+            .expect("stitcher poisoned")
+            .push(frame)
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// A running scrolling capture.
 pub struct ScrollSession {
     pub rect: Rect,
@@ -109,9 +154,9 @@ pub struct ScrollSession {
     pub status: String,
     pub start_label: String,
     pub generation: u64,
-    stitcher: ScrollStitcher,
+    stitcher: Arc<Mutex<ScrollStitcher>>,
     finish_pending: bool,
-    capture: Box<dyn ScrollCapture>,
+    capture: Arc<dyn ScrollCapture>,
     input: Box<dyn ScrollInput>,
     ui: Box<dyn ScrollUi>,
     /// Invoked with the stitched image once the controls are released.
@@ -125,7 +170,7 @@ impl ScrollSession {
     pub fn new(
         rect: Rect,
         horizontal: bool,
-        capture: Box<dyn ScrollCapture>,
+        capture: Arc<dyn ScrollCapture>,
         input: Box<dyn ScrollInput>,
         ui: Box<dyn ScrollUi>,
     ) -> Self {
@@ -149,7 +194,7 @@ impl ScrollSession {
             ),
             start_label: "Start Capture".to_owned(),
             generation: 0,
-            stitcher,
+            stitcher: Arc::new(Mutex::new(stitcher)),
             finish_pending: false,
             capture,
             input,
@@ -165,24 +210,43 @@ impl ScrollSession {
         rect: Rect,
         horizontal: bool,
         max_pixels: usize,
-        capture: Box<dyn ScrollCapture>,
+        capture: Arc<dyn ScrollCapture>,
         input: Box<dyn ScrollInput>,
         ui: Box<dyn ScrollUi>,
     ) -> Self {
         let mut session = Self::new(rect, horizontal, capture, input, ui);
-        session.stitcher = ScrollStitcher::with_limit(horizontal, max_pixels);
+        session.stitcher = Arc::new(Mutex::new(ScrollStitcher::with_limit(
+            horizontal, max_pixels,
+        )));
         session
     }
 
+    /// A cloneable handle for grabbing and stitching on a worker thread.
     #[must_use]
-    pub fn stitcher(&self) -> &ScrollStitcher {
-        &self.stitcher
+    pub fn worker(&self) -> ScrollWorker {
+        ScrollWorker {
+            capture: Arc::clone(&self.capture),
+            stitcher: Arc::clone(&self.stitcher),
+        }
+    }
+
+    /// Run one job on the calling thread, grabbing and stitching in place.
+    ///
+    /// A convenience for synchronous callers; production moves a
+    /// [`ScrollWorker`] clone to a thread instead.
+    pub fn run_job(&self, job: ScrollJob) -> Result<(bool, String), String> {
+        self.worker().run(job)
+    }
+
+    /// Lock the shared stitch, for status inspection and tests.
+    pub fn stitcher(&self) -> std::sync::MutexGuard<'_, ScrollStitcher> {
+        self.stitcher.lock().expect("stitcher poisoned")
     }
 
     /// The stitched image so far.
     #[must_use]
     pub fn output(&self) -> Option<FrameData> {
-        self.stitcher.output()
+        self.stitcher().output()
     }
 
     /// True while a grab is in flight.
@@ -225,6 +289,10 @@ impl ScrollSession {
     }
 
     /// Turn auto-scroll on or off, clearing the unchanged-frame counters.
+    ///
+    /// Enabling auto-scroll while running moves the pointer to the centre of
+    /// the capture once, matching the source; the per-frame advance only
+    /// checks that the pointer is still inside and injects the wheel step.
     // Ported from omnishot/widgets.py (ScrollPanel.set_auto)
     pub fn set_auto(&mut self, enabled: bool) {
         if self.closed {
@@ -234,6 +302,13 @@ impl ScrollSession {
         self.no_change = 0;
         self.scrolled_last = false;
         self.reached_end = false;
+        if self.auto && self.running {
+            let (x, y, w, h) = (self.rect.x, self.rect.y, self.rect.width, self.rect.height);
+            if let Err(error) = self.input.move_cursor(x + w / 2, y + h / 2) {
+                self.status = error;
+                self.auto = false;
+            }
+        }
     }
 
     /// Begin one grab if the session is due for it.
@@ -256,28 +331,18 @@ impl ScrollSession {
         })
     }
 
-    /// Run one job on the calling thread, honouring the hide delay.
+    /// Fold a completed worker grab into the session and drive auto-scroll.
     ///
-    /// The UI calls this from its worker so the compositor has a chance to
-    /// present an empty frame before the grab, matching the source's 150 ms
-    /// wait when the surfaces were visible in the frame.
-    pub fn run_job(&self, job: ScrollJob) -> Result<FrameData, String> {
-        if job.wait {
-            std::thread::sleep(Duration::from_millis(150));
-        }
-        self.capture.grab(job.rect)
-    }
-
-    /// Fold a completed grab into the stitch and drive auto-scroll.
-    ///
-    /// Returns the finished image when this completion also satisfied a
-    /// pending [`ScrollSession::finish`], or when the frame could not be
-    /// stitched and a finish was already requested.
+    /// `result` is the [`ScrollWorker::run`] outcome: the worker already
+    /// grabbed the pixels and grew the shared stitch, so this only updates the
+    /// status, preview and auto-scroll state on the owning thread. Returns the
+    /// finished image when this completion also satisfied a pending
+    /// [`ScrollSession::finish`].
     // Ported from omnishot/widgets.py (ScrollPanel.tick done/fail)
     pub fn complete(
         &mut self,
         job: ScrollJob,
-        result: Result<FrameData, String>,
+        result: Result<(bool, String), String>,
     ) -> Option<FrameData> {
         self.busy = false;
         if job.generation != self.generation {
@@ -285,54 +350,48 @@ impl ScrollSession {
         }
         self.ui.after_grab();
         match result {
-            Ok(frame) => match self.stitcher.push(frame) {
-                Ok((changed, message)) => {
-                    if changed {
-                        self.reached_end = false;
+            Ok((changed, message)) => {
+                if changed {
+                    self.reached_end = false;
+                }
+                self.status = if self.reached_end {
+                    "Reached the end. Click Done to finish.".to_owned()
+                } else {
+                    message.clone()
+                };
+                // The preview renders straight from the stored buffer for a
+                // vertical capture; only a horizontal one is transposed.
+                if self.horizontal {
+                    if let Some(output) = self.output() {
+                        self.ui.update(output.view());
                     }
-                    self.status = if self.reached_end {
-                        "Reached the end. Click Done to finish.".to_owned()
-                    } else {
-                        message.clone()
-                    };
-                    // The preview renders straight from the stored buffer for
-                    // a vertical capture; only a horizontal one is transposed.
-                    if self.horizontal {
-                        if let Some(output) = self.stitcher.output() {
-                            self.ui.update(output.view());
-                        }
-                    } else if let Some(view) = self.stitcher.image_view() {
-                        self.ui.update(view);
+                } else {
+                    let stitcher = Arc::clone(&self.stitcher);
+                    let guard = stitcher.lock().expect("stitcher poisoned");
+                    if let Some(image) = guard.image_view() {
+                        self.ui.update(image);
                     }
-                    if self.auto {
-                        if message.starts_with("Could not align") {
+                }
+                if self.auto {
+                    if message.starts_with("Could not align") {
+                        self.auto = false;
+                    } else if self.scrolled_last {
+                        self.no_change = if changed { 0 } else { self.no_change + 1 };
+                        self.scrolled_last = false;
+                        if self.no_change >= END_AFTER_UNCHANGED {
                             self.auto = false;
-                        } else if self.scrolled_last {
-                            self.no_change = if changed { 0 } else { self.no_change + 1 };
-                            self.scrolled_last = false;
-                            if self.no_change >= END_AFTER_UNCHANGED {
-                                self.auto = false;
-                                self.reached_end = true;
-                                self.status = "Reached the end. Click Done to finish.".to_owned();
-                            }
-                        } else {
-                            self.scrolled_last = false;
+                            self.reached_end = true;
+                            self.status = "Reached the end. Click Done to finish.".to_owned();
                         }
+                    } else {
+                        self.scrolled_last = false;
                     }
                 }
-                Err(error) => {
-                    // An over-limit or mismatched frame stops the session with
-                    // the reason on screen; nothing already stitched is lost.
-                    self.status = error.to_string();
-                    self.running = false;
-                    self.auto = false;
-                    self.release_mirror();
-                    self.start_label = "Retry Capture".to_owned();
-                }
-            },
+            }
             Err(message) => {
-                // A failed grab stops the capture and releases the mirror, but
-                // keeps the frames already stitched so Done still works.
+                // A failed grab or an over-limit frame stops the capture and
+                // releases the mirror, but keeps the frames already stitched
+                // so Done still works.
                 self.status = message;
                 self.running = false;
                 self.auto = false;
@@ -372,12 +431,6 @@ impl ScrollSession {
                 return;
             }
         }
-        let (cx, cy) = (x + w / 2, y + h / 2);
-        if let Err(error) = self.input.move_cursor(cx, cy) {
-            self.status = error;
-            self.auto = false;
-            return;
-        }
         match self.input.scroll_step(self.horizontal, AUTO_SCROLL_STEP) {
             Ok(()) => self.scrolled_last = true,
             Err(error) => {
@@ -410,7 +463,7 @@ impl ScrollSession {
     fn finalize(&mut self) -> Option<FrameData> {
         self.finish_pending = false;
         self.finished = true;
-        let frame = self.stitcher.output();
+        let frame = self.stitcher().output();
         self.close_surfaces();
         if let Some(frame) = frame
             && let Some(mut completed) = self.on_completed.take()
@@ -545,7 +598,7 @@ impl<R: CommandRunner> ScrollInput for SystemScrollInput<'_, R> {
     fn scroll_step(&self, horizontal: bool, amount: i32) -> Result<(), String> {
         let helper = self.native.join("scroll-helper");
         if !helper.is_file() {
-            return Err("Scrolling helper is missing. Run install.sh.".to_owned());
+            return Err("Scrolling helper is missing. Run bin/native to build it.".to_owned());
         }
         let axis = if horizontal { "horizontal" } else { "vertical" };
         let spec = CommandSpec::new(helper.to_string_lossy().into_owned())
@@ -558,18 +611,26 @@ impl<R: CommandRunner> ScrollInput for SystemScrollInput<'_, R> {
 }
 
 /// Production frame source: `grim` in binary PPM, which needs no decode crate.
+///
+/// The session holds the clean-mirror lease across the whole capture, so the
+/// cursor stays out of every frame; the lease opens the same
+/// `cursor_capture` role the source's `CursorMirror` uses.
 #[derive(Debug)]
 pub struct SystemScrollCapture<'a, R: CommandRunner> {
     pub runner: &'a R,
-    mirror_enabled: std::cell::Cell<bool>,
+    pub mirror: &'a MirrorRegistry,
+    pub native: PathBuf,
+    lease: Mutex<MirrorLease<'a>>,
 }
 
 impl<'a, R: CommandRunner> SystemScrollCapture<'a, R> {
     #[must_use]
-    pub fn new(runner: &'a R) -> Self {
+    pub fn new(runner: &'a R, mirror: &'a MirrorRegistry, native: impl Into<PathBuf>) -> Self {
         Self {
             runner,
-            mirror_enabled: std::cell::Cell::new(false),
+            mirror,
+            native: native.into(),
+            lease: Mutex::new(mirror.lease("cursor_capture")),
         }
     }
 
@@ -635,13 +696,15 @@ impl<R: CommandRunner> ScrollCapture for SystemScrollCapture<'_, R> {
     }
 
     fn mirror_start(&self) -> Result<(), String> {
-        self.mirror_enabled.set(true);
-        Ok(())
+        let mut lease = self.lease.lock().expect("mirror lease poisoned");
+        lease
+            .start(self.runner, &self.native)
+            .map_err(|error| error.to_string())
     }
 
     fn mirror_stop(&self) -> Result<(), String> {
-        self.mirror_enabled.set(false);
-        Ok(())
+        let mut lease = self.lease.lock().expect("mirror lease poisoned");
+        lease.stop(self.runner).map_err(|error| error.to_string())
     }
 }
 
@@ -668,8 +731,8 @@ mod tests {
     struct FakeCapture {
         log: Log,
         reject_first: bool,
-        started: std::cell::Cell<bool>,
-        enabled: std::cell::Cell<bool>,
+        started: std::sync::atomic::AtomicBool,
+        enabled: std::sync::atomic::AtomicBool,
     }
 
     impl FakeCapture {
@@ -677,8 +740,8 @@ mod tests {
             Self {
                 log,
                 reject_first,
-                started: std::cell::Cell::new(false),
-                enabled: std::cell::Cell::new(false),
+                started: std::sync::atomic::AtomicBool::new(false),
+                enabled: std::sync::atomic::AtomicBool::new(false),
             }
         }
     }
@@ -689,20 +752,20 @@ mod tests {
         }
 
         fn mirror_start(&self) -> Result<(), String> {
-            if self.reject_first && !self.started.get() {
-                self.started.set(true);
+            use std::sync::atomic::Ordering;
+            if self.reject_first && !self.started.swap(true, Ordering::SeqCst) {
                 self.log.push("rejected");
                 return Err("Capture components need rebuilding".to_owned());
             }
-            self.enabled.set(true);
+            self.enabled.store(true, Ordering::SeqCst);
             self.log.push("start");
             Ok(())
         }
 
         fn mirror_stop(&self) -> Result<(), String> {
-            if self.enabled.get() {
+            use std::sync::atomic::Ordering;
+            if self.enabled.swap(false, Ordering::SeqCst) {
                 self.log.push("stop");
-                self.enabled.set(false);
             }
             Ok(())
         }
@@ -767,7 +830,7 @@ mod tests {
         let log = Log::default();
         let completed = Arc::new(Mutex::new(0usize));
         let cancelled = Arc::new(Mutex::new(0usize));
-        let capture = Box::new(FakeCapture::new(log.clone(), reject_first));
+        let capture = Arc::new(FakeCapture::new(log.clone(), reject_first));
         let input = Box::new(FakeInput {
             position: std::cell::Cell::new((10, 10)),
             log: log.clone(),
@@ -801,8 +864,8 @@ mod tests {
         assert!(!session.is_running());
         assert!(session.begin_grab().is_none(), "no second grab while busy");
 
-        session.stitcher.push(frame(200, 100, 125)).unwrap();
-        let done = session.complete(job, Ok(frame(200, 100, 125)));
+        session.stitcher().push(frame(200, 100, 125)).unwrap();
+        let done = session.complete(job, Ok((true, "Ready".to_owned())));
         assert!(done.is_some());
         assert!(session.closed);
         assert_eq!(*completed.lock().unwrap(), 1);
@@ -812,10 +875,12 @@ mod tests {
     fn completion_releases_controls_before_the_image_is_delivered() {
         let (mut session, log, completed, cancelled) = session(Rect::new(10, 10, 200, 100), false);
         session.start();
-        session.stitcher.push(frame(200, 100, 125)).unwrap();
+        session.stitcher().push(frame(200, 100, 125)).unwrap();
         let job = session.begin_grab().expect("grab");
         assert!(session.finish().is_none());
-        let done = session.complete(job, Ok(frame(200, 100, 125))).unwrap();
+        let done = session
+            .complete(job, Ok((true, "Ready".to_owned())))
+            .unwrap();
         // The image is the stitched one, and release happened before delivery.
         assert_eq!(done.data, frame(200, 100, 125).data);
         assert_eq!(
@@ -839,11 +904,11 @@ mod tests {
             session(Rect::new(10, 10, 200, 100), false);
         session.running = true;
         session.set_auto(true);
-        session.stitcher.push(frame(200, 100, 125)).unwrap();
+        session.stitcher().push(frame(200, 100, 125)).unwrap();
         session.scrolled_last = true;
         session.no_change = 3;
         let job = session.begin_grab().expect("grab");
-        session.complete(job, Ok(frame(200, 100, 125)));
+        session.complete(job, Ok((false, "No new content.".to_owned())));
         assert!(session.reached_end);
         assert!(!session.auto);
         assert!(session.status().contains("Reached the end"));
@@ -852,7 +917,7 @@ mod tests {
         // it with "No new content".
         session.scrolled_last = false;
         let job = session.begin_grab().expect("grab");
-        session.complete(job, Ok(frame(200, 100, 125)));
+        session.complete(job, Ok((false, "No new content.".to_owned())));
         assert!(session.status().contains("Reached the end"));
     }
 
@@ -893,7 +958,11 @@ mod tests {
             rect: session.rect,
             wait: false,
         };
-        assert!(session.complete(stale, Ok(frame(200, 100, 0))).is_none());
+        assert!(
+            session
+                .complete(stale, Ok((true, "Ready".to_owned())))
+                .is_none()
+        );
     }
 
     #[test]
@@ -907,16 +976,69 @@ mod tests {
             .map(|index| ((index * 31) % 200) as u8)
             .collect();
         session
-            .stitcher
+            .stitcher()
             .push(FrameData::new(source.clone(), 200, 100, 3))
             .unwrap();
         let job = session.begin_grab().expect("grab");
         let noise: Vec<u8> = (0..200 * 100 * 3)
             .map(|index| ((index * 97 + 13) % 255) as u8)
             .collect();
-        session.complete(job, Ok(FrameData::new(noise, 200, 100, 3)));
+        // The worker pushes the frame; the unalignable result reaches the
+        // session through complete exactly as the real worker would.
+        let result = session
+            .stitcher()
+            .push(FrameData::new(noise, 200, 100, 3))
+            .map_err(|error| error.to_string());
+        let done = session.complete(job, result);
+        assert!(done.is_none());
         assert!(!session.auto, "auto pauses on an unalignable frame");
         assert!(session.output().is_some(), "stitched image is preserved");
+    }
+
+    /// A `ScrollWorker` clone must be `Send`, so the grab and the stitch can
+    /// run on another thread while the UI keeps the session.
+    #[test]
+    fn a_worker_clone_stitches_from_another_thread() {
+        struct FrameCapture;
+        impl ScrollCapture for FrameCapture {
+            fn grab(&self, _rect: Rect) -> Result<FrameData, String> {
+                Ok(frame(200, 100, 125))
+            }
+            fn mirror_start(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn mirror_stop(&self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let mut session = ScrollSession::new(
+            Rect::new(10, 10, 200, 100),
+            false,
+            Arc::new(FrameCapture),
+            Box::new(FakeInput {
+                position: std::cell::Cell::new((10, 10)),
+                log: Log::default(),
+            }),
+            Box::new(NoUi),
+        );
+        session.running = true;
+        let worker = session.worker();
+        let handle = std::thread::spawn(move || {
+            worker.run(ScrollJob {
+                generation: 0,
+                rect: Rect::new(10, 10, 200, 100),
+                wait: false,
+            })
+        });
+        let result = handle.join().expect("worker thread finishes");
+        assert!(result.is_ok(), "{result:?}");
+        // The frame the worker stitched is visible to the session.
+        assert!(session.output().is_some());
+        // Completing the job keeps the session consistent.
+        let job = session.begin_grab().expect("grab");
+        session.complete(job, result);
+        assert!(session.is_running());
     }
 }
 
@@ -948,6 +1070,125 @@ mod command_tests {
             self.seen.lock().unwrap().push(spec.clone());
             self.results.lock().unwrap().remove(0)
         }
+    }
+
+    /// A runner that emulates the mirror plugin endpoints and records evals.
+    struct MirrorRunner {
+        plugins: Mutex<Vec<String>>,
+        evals: Mutex<Vec<String>>,
+    }
+
+    impl MirrorRunner {
+        fn new() -> Self {
+            Self {
+                plugins: Mutex::new(Vec::new()),
+                evals: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandRunner for MirrorRunner {
+        fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+            let args = &spec.args;
+            if args == &["-j", "plugin list"] {
+                let names = self.plugins.lock().unwrap().clone();
+                let rows: Vec<String> = names
+                    .iter()
+                    .map(|name| format!("{{\"name\":\"{name}\"}}"))
+                    .collect();
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: format!("[{}]", rows.join(",")).into_bytes(),
+                    stderr: Vec::new(),
+                });
+            }
+            if args.first().map(String::as_str) == Some("plugin")
+                && args.get(1).map(String::as_str) == Some("load")
+            {
+                self.plugins
+                    .lock()
+                    .unwrap()
+                    .push(crate::mirror::PLUGIN_NAME.to_owned());
+            }
+            if args.first().map(String::as_str) == Some("repl") {
+                self.plugins.lock().unwrap().clear();
+            }
+            if args.first().map(String::as_str) == Some("eval") {
+                self.evals.lock().unwrap().push(args[1].clone());
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"ok".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    /// A native directory holding both mirror plugin files.
+    struct NativePluginDir(std::path::PathBuf);
+
+    impl NativePluginDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "tidyshot-scroll-native-{}-{tag}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            for name in [crate::mirror::MIRROR_PLUGIN, crate::mirror::CAPTURE_PLUGIN] {
+                std::fs::write(path.join(name), b"plugin").unwrap();
+            }
+            Self(path)
+        }
+    }
+
+    impl Drop for NativePluginDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The session's mirror lease must drive the real plugin: it loads the
+    /// shared mirror and registers the `cursor_capture` role, then releases it.
+    #[test]
+    fn the_system_capture_leases_the_real_cursor_mirror() {
+        let runner = MirrorRunner::new();
+        let registry = crate::mirror::MirrorRegistry::new();
+        let native = NativePluginDir::new("lease");
+        let capture = SystemScrollCapture::new(&runner, &registry, native.0.clone());
+        capture.mirror_start().unwrap();
+        assert_eq!(
+            runner.plugins.lock().unwrap().as_slice(),
+            [crate::mirror::PLUGIN_NAME],
+            "the shared plugin is loaded"
+        );
+        let evals = runner.evals.lock().unwrap().clone();
+        assert_eq!(evals.len(), 1, "{evals:?}");
+        assert!(evals[0].contains("cursor_capture"), "{evals:?}");
+        assert!(
+            evals[0].contains(&std::process::id().to_string()),
+            "{evals:?}"
+        );
+
+        capture.mirror_stop().unwrap();
+        let evals = runner.evals.lock().unwrap().clone();
+        assert!(evals[1].contains("cursor_capture(0)"), "{evals:?}");
+    }
+
+    /// Without the plugin, a scrolling capture must report the rebuild
+    /// instruction rather than pretend the mirror is leased.
+    #[test]
+    fn a_missing_mirror_plugin_is_reported() {
+        let runner = MirrorRunner::new();
+        let registry = crate::mirror::MirrorRegistry::new();
+        let empty = std::env::temp_dir().join(format!(
+            "tidyshot-scroll-native-empty-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&empty).unwrap();
+        let capture = SystemScrollCapture::new(&runner, &registry, empty.clone());
+        let error = capture.mirror_start().unwrap_err();
+        assert!(error.contains("rebuilding"), "{error}");
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     #[test]
@@ -997,7 +1238,7 @@ mod command_tests {
             native,
         };
         let error = input.scroll_step(false, 3).unwrap_err();
-        assert!(error.contains("install.sh"), "{error}");
+        assert!(error.contains("bin/native"), "{error}");
         assert!(runner.seen.lock().unwrap().is_empty(), "helper never ran");
     }
 
@@ -1019,7 +1260,8 @@ mod command_tests {
         let mut ppm = b"P6\n2 2\n255\n".to_vec();
         ppm.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         runner.push(0, &ppm);
-        let capture = SystemScrollCapture::new(&runner);
+        let capture =
+            SystemScrollCapture::new(&runner, MirrorRegistry::global(), std::env::temp_dir());
         let frame = capture.grab(Rect::new(0, 0, 2, 2)).unwrap();
         assert_eq!(frame.data, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         let seen = runner.seen.lock().unwrap();
@@ -1031,7 +1273,8 @@ mod command_tests {
     fn a_truncated_ppm_is_an_error() {
         let runner = FakeRunner::default();
         runner.push(0, b"P6\n2 2\n255\n\x01\x02");
-        let capture = SystemScrollCapture::new(&runner);
+        let capture =
+            SystemScrollCapture::new(&runner, MirrorRegistry::global(), std::env::temp_dir());
         let error = capture.grab(Rect::new(0, 0, 2, 2)).unwrap_err();
         assert!(error.contains("truncated"), "{error}");
     }
@@ -1047,11 +1290,15 @@ mod recovery_tests {
 
     struct Capture {
         log: Log,
+        frame: Option<Vec<u8>>,
     }
 
     impl ScrollCapture for Capture {
         fn grab(&self, _rect: Rect) -> Result<FrameData, String> {
-            Err("unused".to_owned())
+            self.frame.clone().map_or_else(
+                || Err("unused".to_owned()),
+                |data| Ok(FrameData::new(data, 200, 100, 3)),
+            )
         }
         fn mirror_start(&self) -> Result<(), String> {
             self.log.0.lock().unwrap().push("start".to_owned());
@@ -1097,7 +1344,7 @@ mod recovery_tests {
         let mut session = ScrollSession::new(
             Rect::new(10, 10, 200, 100),
             false,
-            Box::new(Capture { log }),
+            Arc::new(Capture { log, frame: None }),
             Box::new(Input),
             Box::new(Ui),
         );
@@ -1106,21 +1353,25 @@ mod recovery_tests {
             .map(|index| ((index * 31) % 200) as u8)
             .collect();
         session
-            .stitcher
+            .stitcher()
             .push(FrameData::new(source.clone(), 200, 100, 3))
             .unwrap();
-        let position = session.stitcher.position();
-        let accepted = session.stitcher.accepted();
+        let position = session.stitcher().position();
+        let accepted = session.stitcher().accepted();
 
         let job = session.begin_grab().unwrap();
         let noise: Vec<u8> = (0..200 * 100 * 3)
             .map(|index| ((index * 97 + 13) % 255) as u8)
             .collect();
-        let done = session.complete(job, Ok(FrameData::new(noise, 200, 100, 3)));
+        let result = session
+            .stitcher()
+            .push(FrameData::new(noise, 200, 100, 3))
+            .map_err(|error| error.to_string());
+        let done = session.complete(job, result);
         assert!(done.is_none());
         assert!(session.status().contains("Could not align"));
-        assert_eq!(session.stitcher.position(), position);
-        assert_eq!(session.stitcher.accepted(), accepted);
+        assert_eq!(session.stitcher().position(), position);
+        assert_eq!(session.stitcher().accepted(), accepted);
         assert_eq!(session.output().unwrap().data, source);
         // The session keeps running so the next frame can recover.
         assert!(session.is_running());
@@ -1201,12 +1452,12 @@ mod limit_tests {
             Rect::new(0, 0, width as i32, 600),
             false,
             width * 700,
-            Box::new(Capture),
+            Arc::new(Capture),
             Box::new(Input),
             Box::new(Ui),
         );
         session.start();
-        session.stitcher.push(first).unwrap();
+        session.stitcher().push(first).unwrap();
         // Jumping forward 200 rows needs an 800-row image, over the cap.
         let second = FrameData::new(
             page[200 * width * 3..800 * width * 3].to_vec(),
@@ -1215,7 +1466,11 @@ mod limit_tests {
             3,
         );
         let job = session.begin_grab().unwrap();
-        session.complete(job, Ok(second));
+        let result = session
+            .stitcher()
+            .push(second)
+            .map_err(|error| error.to_string());
+        session.complete(job, result);
         assert!(!session.is_running(), "status={:?}", session.status());
         assert!(
             session.status().contains("120 megapixel"),

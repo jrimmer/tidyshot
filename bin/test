@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # bin/test — unit tests plus the offscreen QML load, offscreen-safe.
+#
+# The standalone scroll helper is built first so the auto-scroll path is
+# exercised against a real binary on a machine that has the Wayland toolchain;
+# bin/native stays a no-op warning when that toolchain is absent.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export QT_QPA_PLATFORM=offscreen
+bin/native || echo "scroll helper not built; auto-scroll tests run without it" >&2
 cargo test --offline
 echo "TIDYSHOT TESTS OK"

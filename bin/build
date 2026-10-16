@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 # bin/build — build tidyshot into build/tidyshot.
+#
+# The auto-scroll helper is a standalone Wayland program, not part of the
+# cargo crate. build.rs builds it during `cargo build` when the toolchain is
+# present; this script re-runs bin/native so a release always carries a working
+# helper instead of erroring at the first automatic scroll.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-mkdir -p build
+mkdir -p build/native
 cargo build --release --offline
+bin/native
+if [ ! -x native/scroll-helper ]; then
+    echo "build/tidyshot would have no auto-scroll helper; install wayland-scanner and wayland-client headers" >&2
+    exit 1
+fi
 cp target/release/tidyshot build/tidyshot
+cp native/scroll-helper build/native/scroll-helper
 echo "built build/tidyshot"
