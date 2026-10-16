@@ -206,6 +206,20 @@ fn same_rows(previous: FrameRef<'_>, current: FrameRef<'_>) -> Vec<bool> {
         .collect()
 }
 
+/// The same stationary-row test on the width-reduced grayscale frames the
+/// matcher already holds, so the anchor pass does not re-read full RGB rows.
+fn same_gray_rows(previous: &Gray, current: &Gray) -> Vec<bool> {
+    (0..previous.height)
+        .map(|y| {
+            let base = y * previous.width;
+            let sum: f64 = (0..previous.width)
+                .map(|x| f64::from((previous.data[base + x] - current.data[base + x]).abs()))
+                .sum();
+            (sum / previous.width as f64) < 1.2
+        })
+        .collect()
+}
+
 /// Transpose a frame through an owned copy of its pixels.
 ///
 /// Used only at the horizontal boundary: once per incoming frame and once for
@@ -439,7 +453,7 @@ pub fn match_translation(
         });
     }
 
-    let rows = same_rows(previous, current);
+    let rows = same_gray_rows(&old, &new);
     let mut top = 0usize;
     for value in rows.iter() {
         if !value || top >= h / 5 {

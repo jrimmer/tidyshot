@@ -361,44 +361,38 @@ fn clip(buffer: &RgbaBuffer<'_>, region: Region) -> Option<Region> {
 }
 
 fn box_blur_rows(source: &[u8], out: &mut [u8], width: usize, height: usize, radius: usize) {
+    // A prefix sum per row turns each window mean into two reads instead of a
+    // rescan, which is what the radius-sized blur would otherwise pay per pixel.
+    let mut prefix = vec![0u32; width + 1];
     for y in 0..height {
-        for x in 0..width {
-            let mut sums = [0u32; 4];
-            let mut count = 0u32;
-            let start = x.saturating_sub(radius);
-            let end = (x + radius).min(width - 1);
-            for sx in start..=end {
-                let offset = (y * width + sx) * 4;
-                for channel in 0..4 {
-                    sums[channel] += u32::from(source[offset + channel]);
-                }
-                count += 1;
+        for channel in 0..4 {
+            prefix[0] = 0;
+            for x in 0..width {
+                prefix[x + 1] = prefix[x] + u32::from(source[(y * width + x) * 4 + channel]);
             }
-            let offset = (y * width + x) * 4;
-            for channel in 0..4 {
-                out[offset + channel] = (sums[channel] / count) as u8;
+            for x in 0..width {
+                let start = x.saturating_sub(radius);
+                let end = (x + radius).min(width - 1);
+                let sum = prefix[end + 1] - prefix[start];
+                out[(y * width + x) * 4 + channel] = (sum / (end - start + 1) as u32) as u8;
             }
         }
     }
 }
 
 fn box_blur_columns(source: &[u8], out: &mut [u8], width: usize, height: usize, radius: usize) {
+    let mut prefix = vec![0u32; height + 1];
     for x in 0..width {
-        for y in 0..height {
-            let mut sums = [0u32; 4];
-            let mut count = 0u32;
-            let start = y.saturating_sub(radius);
-            let end = (y + radius).min(height - 1);
-            for sy in start..=end {
-                let offset = (sy * width + x) * 4;
-                for channel in 0..4 {
-                    sums[channel] += u32::from(source[offset + channel]);
-                }
-                count += 1;
+        for channel in 0..4 {
+            prefix[0] = 0;
+            for y in 0..height {
+                prefix[y + 1] = prefix[y] + u32::from(source[(y * width + x) * 4 + channel]);
             }
-            let offset = (y * width + x) * 4;
-            for channel in 0..4 {
-                out[offset + channel] = (sums[channel] / count) as u8;
+            for y in 0..height {
+                let start = y.saturating_sub(radius);
+                let end = (y + radius).min(height - 1);
+                let sum = prefix[end + 1] - prefix[start];
+                out[(y * width + x) * 4 + channel] = (sum / (end - start + 1) as u32) as u8;
             }
         }
     }
