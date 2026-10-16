@@ -583,6 +583,10 @@ pub fn compose_scene(
         } else {
             0.0
         };
+        let content_rect = Rect::new(x, y, output_width, content_height);
+        if padding > 0.0 && options.get("shadow").is_none_or(Value::is_truthy) {
+            paint_content_shadow(&mut target, content_rect, radius);
+        }
         if radius > 0.0 {
             let mask = crate::raster::rounded_mask(
                 out_width,
@@ -623,8 +627,23 @@ pub fn compose_scene(
         let fullscreen = options
             .get("camera_fullscreen")
             .is_some_and(Value::is_truthy);
-        let fitted = cover_fit(camera, rect);
+        let mut fitted = cover_fit(camera, rect);
+        if options.get("camera_mirror").is_some_and(Value::is_truthy) {
+            fitted = mirror_horizontal(&fitted);
+        }
         let mut target = Canvas::new(&mut data, out_width, out_height);
+        if options.get("camera_shadow").is_none_or(Value::is_truthy) && !fullscreen {
+            let camera_radius = options
+                .get("camera_radius")
+                .and_then(Value::as_f64)
+                .unwrap_or(18.0);
+            let shadow_radius = if matches!(shape, "Rounded" | "Square") {
+                camera_radius
+            } else {
+                0.0
+            };
+            paint_camera_shadow(&mut target, rect, shadow_radius, shape == "Circle");
+        }
         let mask = if shape == "Circle" && !fullscreen {
             ellipse_mask(out_width, out_height, rect)
         } else {
@@ -652,10 +671,14 @@ pub fn compose_scene(
     if options.get("keys").is_none_or(Value::is_truthy) {
         let keys = visible_keys(&edited_events(metadata, &options), t, &options, metadata);
         if !keys.is_empty() {
-            let (chip_background, _) = key_colors(&options);
+            let (chip_background, chip_foreground) = key_colors(&options);
             let chip = color(
                 Some(&Value::String(chip_background)),
                 [0xd7, 0x14, 0x17, 0x20],
+            );
+            let foreground = color(
+                Some(&Value::String(chip_foreground)),
+                [255, 255, 255, 255],
             );
             let label = keys[keys.len().saturating_sub(5)..].join("  ");
             let font_size = options
@@ -684,8 +707,13 @@ pub fn compose_scene(
             } else {
                 (out_height as f64 - chip_height) / 2.0
             };
+            let chip_rect = Rect::new(cx, cy, chip_width, chip_height);
             let mut target = Canvas::new(&mut data, out_width, out_height);
-            target.fill_rounded_rect(Rect::new(cx, cy, chip_width, chip_height), 12.0, chip);
+            target.fill_rounded_rect(chip_rect, 12.0, chip);
+            let count = label.chars().count();
+            let text_left = chip_rect.center().x - count as f64 * font_size * 0.3;
+            let baseline = chip_rect.center().y - font_size * 0.35;
+            draw_ui_text(&mut target, text_left, baseline, &label, font_size, foreground);
         }
     }
 
@@ -699,17 +727,18 @@ pub fn compose_motion(frame: &Image, t: f64, metadata: &Value, options: &Options
     compose_frame(frame, t, metadata, options, None)
 }
 
-/// Build the `ffmpeg` encoder arguments for an export.
-///
-/// Software x264 is the default; hardware encoding is opt-in and uses VAAPI
-/// only when the caller asks and supplies a render device.
+/// The ffmpeg input options that accept raw RGB frames on stdin, including
+/// the VAAPI device when hardware encoding is requested. The device option is
+/// global and must precede the input.
 // Ported from omnishot/studio.py (export_studio encoder selection)
 #[must_use]
-pub fn encoder_arguments(options: &Options, width: usize, height: usize, fps: f64) -> Vec<String> {
+pub fn encoder_input_arguments(
+    options: &Options,
+    width: usize,
+    height: usize,
+    fps: f64,
+) -> Vec<String> {
     let mut args = Vec::new();
-    // `-vaapi_device` is a device option and must come before the rawvideo
-    // input; splicing it into the input option list would split a flag from
-    // its value.
     if options.get("hardware").is_some_and(Value::is_truthy) {
         let device = options
             .get("render_device")
@@ -729,30 +758,81 @@ pub fn encoder_arguments(options: &Options, width: usize, height: usize, fps: f6
         "-i".to_owned(),
         "pipe:0".to_owned(),
     ]);
+    args
+}
+
+/// The ffmpeg output options that choose the video encoder.
+// Ported from omnishot/studio.py (export_studio encoder selection)
+#[must_use]
+pub fn encoder_selector_arguments(options: &Options) -> Vec<String> {
     if options.get("hardware").is_some_and(Value::is_truthy) {
-        args.extend([
-            "-vf".to_owned(),
-            "format=nv12,hwupload".to_owned(),
-            "-c:v".to_owned(),
-            "h264_vaapi".to_owned(),
-            "-qp".to_owned(),
-            "22".to_owned(),
-        ]);
+        [
+            "-vf",
+            "format=nv12,hwupload",
+            "-c:v",
+            "h264_vaapi",
+            "-qp",
+            "22",
+        ]
+        .map(str::to_owned)
+        .to_vec()
     } else {
-        args.extend([
-            "-c:v".to_owned(),
-            "libx264".to_owned(),
-            "-crf".to_owned(),
-            "20".to_owned(),
-            "-preset".to_owned(),
-            "fast".to_owned(),
-            "-pix_fmt".to_owned(),
-            "yuv420p".to_owned(),
-        ]);
+        [
+            "-c:v",
+            "libx264",
+            "-crf",
+            "20",
+            "-preset",
+            "fast",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        .map(str::to_owned)
+        .to_vec()
     }
+}
+
+/// Build the standalone `ffmpeg` encoder arguments for a stdin-only export.
+///
+/// Software x264 is the default; hardware encoding is opt-in and uses VAAPI
+/// only when the caller asks and supplies a render device.
+// Ported from omnishot/studio.py (export_studio encoder selection)
+#[must_use]
+pub fn encoder_arguments(options: &Options, width: usize, height: usize, fps: f64) -> Vec<String> {
+    let mut args = encoder_input_arguments(options, width, height, fps);
+    args.extend(encoder_selector_arguments(options));
     args.push("-movflags".to_owned());
     args.push("+faststart".to_owned());
     args
+}
+
+/// The audio filters that follow a selected/trimmed source stream.
+///
+/// Cut intervals are removed on the post-seek source clock and a non-unit
+/// speed is compressed with `atempo`, matching the recorded edit.
+// Ported from omnishot/studio.py (export_studio audio arguments)
+#[must_use]
+pub fn audio_edit_filters(start: f64, speed: f64, cuts: &[(f64, f64)]) -> Vec<String> {
+    let mut filters = Vec::new();
+    let terms: Vec<String> = cuts
+        .iter()
+        .filter(|(_, b)| *b > start)
+        .map(|(a, b)| {
+            format!(
+                "between(t,{},{})",
+                (a - start).max(0.0),
+                b - start
+            )
+        })
+        .collect();
+    if !terms.is_empty() {
+        filters.push(format!("aselect='not({})'", terms.join("+")));
+        filters.push("asetpts=N/SR/TB".to_owned());
+    }
+    if (speed - 1.0).abs() > f64::EPSILON {
+        filters.push(format!("atempo={speed}"));
+    }
+    filters
 }
 
 /// Export an edited recording through the ffmpeg CLI.
@@ -856,73 +936,256 @@ pub fn export_studio<R: CommandRunner>(
     let metadata = request.metadata;
     let options = request.options;
     let per_frame = width * height * 3;
-    let mut raw = Vec::new();
-    let mut output_size: Option<(usize, usize)> = None;
-    for (a, b) in &plan.segments {
-        let count = segment_frame_counts(&[(*a, *b)], request.fps, request.speed)[0].2;
-        if count == 0 {
-            continue;
-        }
-        // Decode one retained interval on its own, so a cut never pulls frames
-        // from the other side of the gap and memory stays bounded per segment.
-        let decoded = runner
-            .run(
-                &CommandSpec::new("ffmpeg")
-                    .args(["-hide_banner", "-loglevel", "error"])
-                    .args(["-ss"])
-                    .arg(a.to_string())
-                    .args(["-t"])
-                    .arg((b - a).to_string())
-                    .args(["-i"])
-                    .arg(request.source.to_string_lossy().into_owned())
-                    .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
-                    .timeout(std::time::Duration::from_secs(30)),
-            )
-            .map_err(|error| error.to_string())?;
-        let available = decoded.stdout.len() / per_frame;
-        for index in 0..count {
-            let time = a + index as f64 * request.speed / request.fps;
-            let local =
-                (((time - a) * source_fps).round() as usize).min(available.saturating_sub(1));
-            let offset = local * per_frame;
-            let Some(bytes) = decoded.stdout.get(offset..offset + per_frame) else {
-                return Err("Could not decode recording".to_owned());
-            };
-            let image = rgb_to_image(bytes, width, height);
-            let composed = compose_frame(&image, time, metadata, options, None);
-            // Padding, aspect and zoom decide the final size; the encoder must
-            // be told that size, not the source's.
-            output_size.get_or_insert((composed.width, composed.height));
-            raw.extend(pixels_to_rgb(&composed));
-        }
-    }
-    let Some((out_width, out_height)) = output_size else {
-        return Err("The edit contains no frames".to_owned());
-    };
-    let expected = out_width * out_height * 3;
-    if raw.len() % expected != 0 {
-        return Err("The composition changed size mid-export".to_owned());
-    }
 
+    // The first composed frame decides the output size, so decode its whole
+    // segment once and feed that buffer to the streaming producer rather than
+    // decoding the first segment twice.
+    let first_index = plan
+        .segments
+        .iter()
+        .position(|(a, b)| segment_frame_counts(&[(*a, *b)], request.fps, request.speed)[0].2 > 0)
+        .ok_or_else(|| "The edit contains no frames".to_owned())?;
+    let (first_start, first_end) = plan.segments[first_index];
+    let first_decoded = decode_segment(runner, request.source, first_start, first_end)?;
+    let first_available = first_decoded.len() / per_frame;
+    if first_available == 0 {
+        return Err("Could not decode recording".to_owned());
+    }
+    let first_time = first_start;
+    let first_image = rgb_to_image(&first_decoded[..per_frame], width, height);
+    let first_composed = compose_frame(&first_image, first_time, metadata, options, None);
+    let (out_width, out_height) = (first_composed.width, first_composed.height);
+
+    let camera_path = metadata
+        .get("camera_path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
+    let camera_offset = metadata
+        .get("camera_offset")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let camera_size = camera_path
+        .as_deref()
+        .and_then(|path| probe_video_size(runner, path));
+
+    let segments = plan.segments.clone();
+    let source = request.source.to_path_buf();
+    let metadata = metadata.clone();
+    let options = options.clone();
+    let fps = request.fps;
+    let speed = request.speed;
+    let error_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let (sender, reader) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
+
+    let partial = partial_path(request.destination);
     let mut command = CommandSpec::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(encoder_arguments(
-            options,
-            out_width,
-            out_height,
-            request.fps,
-        ));
-    let partial = partial_path(request.destination);
-    command = command.arg(partial.to_string_lossy().into_owned());
-    command = command.stdin(raw);
+        .args(encoder_input_arguments(&options, out_width, out_height, fps))
+        .args(["-ss"])
+        .arg(request.start.to_string())
+        .args(["-i"])
+        .arg(source.to_string_lossy().into_owned())
+        .args(["-map", "0:v"])
+        .args(encoder_selector_arguments(&options));
+    let audio_filters = audio_edit_filters(request.start, speed, request.cuts);
+    command = command.args(crate::video_audio_tracks::export_audio_args(
+        &options,
+        1,
+        &audio_filters,
+    ));
+    command = command
+        .args(["-c:a", "aac", "-shortest", "-movflags", "+faststart"])
+        .arg(partial.to_string_lossy().into_owned());
     command.timeout = Some(std::time::Duration::from_secs(3600));
-    let result = runner.run(&command);
-    match result {
+
+    let result = std::thread::scope(|scope| {
+        let runner_ref = runner;
+        let error = std::sync::Arc::clone(&error_slot);
+        let sender = sender.clone();
+        let first_decoded = first_decoded;
+        let camera_path = camera_path.clone();
+        scope.spawn(move || {
+            let emit = |bytes: &[u8]| sender.send(bytes.to_vec()).is_ok();
+            // Compose the retained intervals in order and stream each frame.
+            for (segment_index, (a, b)) in segments.iter().enumerate() {
+                let count = segment_frame_counts(&[(*a, *b)], fps, speed)[0].2;
+                if count == 0 {
+                    continue;
+                }
+                let decoded = if segment_index == first_index {
+                    first_decoded.clone()
+                } else {
+                    match decode_segment(runner_ref, &source, *a, *b) {
+                        Ok(bytes) => bytes,
+                        Err(message) => {
+                            *error.lock().unwrap() = Some(message);
+                            return;
+                        }
+                    }
+                };
+                let available = decoded.len() / per_frame;
+                if available == 0 {
+                    *error.lock().unwrap() = Some("Could not decode recording".to_owned());
+                    return;
+                }
+                for index in 0..count {
+                    let t = a + index as f64 * speed / fps;
+                    let local =
+                        (((t - a) * source_fps).round() as usize).min(available - 1);
+                    let offset = local * per_frame;
+                    let image = rgb_to_image(&decoded[offset..offset + per_frame], width, height);
+                    let camera = camera_path.as_deref().and_then(|path| {
+                        let size = camera_size?;
+                        decode_camera_frame(
+                            runner_ref,
+                            path,
+                            (t - camera_offset).max(0.0),
+                            size,
+                        )
+                    });
+                    let composed = compose_frame(&image, t, &metadata, &options, camera.as_ref());
+                    if composed.width != out_width || composed.height != out_height {
+                        *error.lock().unwrap() =
+                            Some("The composition changed size mid-export".to_owned());
+                        return;
+                    }
+                    if !emit(&pixels_to_rgb(&composed)) {
+                        // The encoder closed its stdin; stop producing.
+                        return;
+                    }
+                }
+            }
+        });
+        let mut reader = ChannelReader::new(reader);
+        let streaming = runner_ref.run_streaming(&command, &mut reader);
+        (streaming, ())
+    });
+    let (streaming, ()) = result;
+    if let Some(message) = error_slot.lock().unwrap().take() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(message);
+    }
+    match streaming {
         Ok(_) => std::fs::rename(&partial, request.destination).map_err(|error| error.to_string()),
         Err(error) => {
             let _ = std::fs::remove_file(&partial);
             Err(error.to_string())
         }
+    }
+}
+
+/// Decode one retained interval to raw RGB24 bytes.
+fn decode_segment<R: CommandRunner>(
+    runner: &R,
+    source: &Path,
+    start: f64,
+    end: f64,
+) -> Result<Vec<u8>, String> {
+    let decoded = runner
+        .run(
+            &CommandSpec::new("ffmpeg")
+                .args(["-hide_banner", "-loglevel", "error"])
+                .args(["-ss"])
+                .arg(start.to_string())
+                .args(["-t"])
+                .arg((end - start).to_string())
+                .args(["-i"])
+                .arg(source.to_string_lossy().into_owned())
+                .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                .timeout(std::time::Duration::from_secs(30)),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(decoded.stdout)
+}
+
+/// Probe a video file's frame size, or `None` when it is unreadable.
+fn probe_video_size<R: CommandRunner>(runner: &R, path: &Path) -> Option<(usize, usize)> {
+    let output = runner
+        .run(
+            &CommandSpec::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height",
+                    "-of",
+                    "json",
+                ])
+                .arg(path.to_string_lossy().into_owned())
+                .timeout(std::time::Duration::from_secs(15)),
+        )
+        .ok()?;
+    let probe = crate::json::parse(&output.stdout_string()).ok()?;
+    let stream = probe
+        .get("streams")
+        .and_then(Value::as_array)
+        .and_then(|streams| streams.first())?;
+    let width = stream.get("width").and_then(Value::as_f64)? as usize;
+    let height = stream.get("height").and_then(Value::as_f64)? as usize;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Decode a single camera frame at `time`, or `None` when it is unavailable.
+fn decode_camera_frame<R: CommandRunner>(
+    runner: &R,
+    path: &Path,
+    time: f64,
+    size: (usize, usize),
+) -> Option<Image> {
+    let (width, height) = size;
+    let decoded = runner
+        .run(
+            &CommandSpec::new("ffmpeg")
+                .args(["-hide_banner", "-loglevel", "error"])
+                .args(["-ss"])
+                .arg(time.to_string())
+                .args(["-i"])
+                .arg(path.to_string_lossy().into_owned())
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                .timeout(std::time::Duration::from_secs(15)),
+        )
+        .ok()?;
+    if decoded.stdout.len() < width * height * 3 {
+        return None;
+    }
+    Some(rgb_to_image(&decoded.stdout, width, height))
+}
+
+/// A `Read` adapter over framed byte chunks, for streaming encoder input.
+struct ChannelReader {
+    receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+    current: Vec<u8>,
+    offset: usize,
+}
+
+impl ChannelReader {
+    fn new(receiver: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+        Self {
+            receiver,
+            current: Vec::new(),
+            offset: 0,
+        }
+    }
+}
+
+impl std::io::Read for ChannelReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        while self.offset >= self.current.len() {
+            match self.receiver.recv() {
+                Ok(next) => {
+                    self.current = next;
+                    self.offset = 0;
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+        let available = self.current.len() - self.offset;
+        let count = available.min(buffer.len());
+        buffer[..count].copy_from_slice(&self.current[self.offset..self.offset + count]);
+        self.offset += count;
+        Ok(count)
     }
 }
 
@@ -1011,6 +1274,69 @@ fn cover_fit(source: &Image, dest: Rect) -> Image {
     let width = dest.width.max(1.0) as usize;
     let height = dest.height.max(1.0) as usize;
     scale_to(source, width, height)
+}
+
+/// Mirror an image left-to-right, as the camera's `camera_mirror` option asks.
+// Ported from omnishot/studio.py (compose_scene camera flip)
+fn mirror_horizontal(image: &Image) -> Image {
+    let width = image.width;
+    let height = image.height;
+    let mut data = vec![0u8; width * height * 4];
+    for y in 0..height {
+        for x in 0..width {
+            let source = (y * width + x) * 4;
+            let target = (y * width + (width - 1 - x)) * 4;
+            data[target..target + 4].copy_from_slice(&image.data[source..source + 4]);
+        }
+    }
+    Image::new(width, height, data)
+}
+
+/// The soft drop shadow the source camera draws under a framed picture.
+// Ported from omnishot/studio.py (compose_scene shadow loop)
+fn paint_content_shadow(canvas: &mut Canvas<'_>, rect: Rect, radius: f64) {
+    for step in (1..=15).rev() {
+        let spread = step as f64;
+        let shadow = Rect::new(
+            rect.x - spread,
+            rect.y - spread * 0.4,
+            rect.width + 2.0 * spread,
+            rect.height + 1.4 * spread,
+        );
+        canvas.fill_rounded_rect(shadow, radius + spread, [0, 0, 0, 3]);
+    }
+}
+
+/// The soft shadow behind the camera bubble or card.
+// Ported from omnishot/studio.py (compose_scene camera shadow loop)
+fn paint_camera_shadow(canvas: &mut Canvas<'_>, rect: Rect, shape_radius: f64, circular: bool) {
+    for step in (1..=12).rev() {
+        let spread = step as f64;
+        let shadow = Rect::new(
+            rect.x - spread,
+            rect.y - spread / 2.0,
+            rect.width + 2.0 * spread,
+            rect.height + 1.5 * spread,
+        );
+        if circular {
+            canvas.fill_ellipse(shadow, [0, 0, 0, 4]);
+        } else {
+            canvas.fill_rounded_rect(shadow, shape_radius + spread, [0, 0, 0, 4]);
+        }
+    }
+}
+
+/// Draw chip text through the raster bitmap face.
+// Ported from the omnishot/studio.py key-chip text boundary
+fn draw_ui_text(
+    canvas: &mut Canvas<'_>,
+    x: f64,
+    y: f64,
+    text: &str,
+    font_size: f64,
+    color: [u8; 4],
+) {
+    crate::raster::draw_bitmap_text(canvas, x, y, text, font_size, color);
 }
 
 fn blend_masked(

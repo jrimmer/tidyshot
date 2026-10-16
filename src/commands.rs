@@ -180,6 +180,24 @@ pub fn notify_send(title: &str, message: &str) {
 pub trait CommandRunner: Send + Sync {
     fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError>;
 
+    /// Run a command, streaming `input` to its stdin instead of buffering the
+    /// whole payload into the command spec. The export path uses this so a
+    /// long recording is never held in memory all at once.
+    fn run_streaming(
+        &self,
+        spec: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput, CommandError> {
+        let mut data = Vec::new();
+        input
+            .read_to_end(&mut data)
+            .map_err(|source| CommandError::Spawn {
+                program: spec.program.clone(),
+                source,
+            })?;
+        self.run(&spec.clone().stdin(data))
+    }
+
     /// Convenience wrapper that requires success and returns stdout.
     fn run_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, CommandError> {
         Ok(self.run(spec)?.stdout)
@@ -268,6 +286,81 @@ impl CommandRunner for SystemRunner {
                 output: captured,
             })
         }
+    }
+
+    fn run_streaming(
+        &self,
+        spec: &CommandSpec,
+        input: &mut (dyn std::io::Read + Send),
+    ) -> Result<CommandOutput, CommandError> {
+        let mut command = Command::new(&spec.program);
+        command.args(&spec.args);
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        for (key, value) in &spec.env {
+            command.env(key, value);
+        }
+        // Give every child its own process group so a timeout can reap the
+        // encoder it spawned as well as the child itself.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+
+        let mut child = command.spawn().map_err(|source| CommandError::Spawn {
+            program: spec.program.clone(),
+            source,
+        })?;
+        let mut stdin = child.stdin.take().ok_or_else(|| CommandError::Spawn {
+            program: spec.program.clone(),
+            source: io::Error::other("stdin pipe unavailable"),
+        })?;
+        let timeout = spec.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let program = spec.program.clone();
+        std::thread::scope(|scope| {
+            // A writer thread drains the frames into the encoder while the
+            // main thread reads its stdout/stderr, so neither side deadlocks.
+            let writer = scope.spawn(move || {
+                let result = std::io::copy(input, &mut stdin);
+                drop(stdin);
+                result
+            });
+            let output = wait_with_timeout(child, timeout, &program);
+            let write = writer.join();
+            match output {
+                // A failing encoder reports its own stderr; only surface a
+                // write error when the encoder itself succeeded.
+                Err(error) => Err(error),
+                Ok(output) => {
+                    let write = write.map_err(|_| CommandError::Spawn {
+                        program: program.clone(),
+                        source: io::Error::other("stdin writer panicked"),
+                    })?;
+                    write.map_err(|source| CommandError::Spawn {
+                        program: program.clone(),
+                        source,
+                    })?;
+                    let status = output.status.code().unwrap_or(-1);
+                    let captured = CommandOutput {
+                        status,
+                        stdout: output.stdout,
+                        stderr: output.stderr,
+                    };
+                    if captured.success() {
+                        Ok(captured)
+                    } else {
+                        Err(CommandError::Failure {
+                            program: program.clone(),
+                            output: captured,
+                        })
+                    }
+                }
+            }
+        })
+    }
+}
     }
 }
 
