@@ -40,10 +40,18 @@ recording requires a working `gpu-screen-recorder` setup.
 
 ## Install
 
-Run this inside a running Omarchy desktop session, **without sudo**.
-`omarchy pkg add` handles elevation for system packages.
+Run these commands as your normal desktop user in a terminal inside an
+unlocked, supported Omarchy session. `omarchy pkg add` handles elevation for
+system packages; run `bash install.sh` **without sudo**.
 
 ```sh
+# Install missing build and runtime dependencies.
+omarchy pkg add git rust qt6-base qt6-declarative python gcc pkgconf \
+  wayland wayland-protocols cairo libxkbcommon libglvnd lua54 grim slurp \
+  wl-clipboard ffmpeg tesseract tesseract-data-eng tesseract-data-osd zbar \
+  gpu-screen-recorder libpulse desktop-file-utils shared-mime-info xdg-utils \
+  libnotify
+
 mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}"
 git clone ssh://git@git.lacy.casa/jrimmer/tidyshot.git "${XDG_DATA_HOME:-$HOME/.local/share}/tidyshot-app"
 cd "${XDG_DATA_HOME:-$HOME/.local/share}/tidyshot-app"
@@ -51,17 +59,15 @@ bash install.sh
 tidyshot menu
 ```
 
-Install the build and runtime dependencies through `omarchy pkg add` (`rust`,
-`qt6-base`, `qt6-declarative`, `grim`, `slurp`, `wl-clipboard`, `ffmpeg`,
-`tesseract`, `zbar`, `gpu-screen-recorder`, and the Omarchy shell packages) if
-they are missing. `install.sh` validates them, builds the app with `bin/build`,
-and installs its launcher, desktop and MIME entries, Hyprland bindings and
-window rules, and bar widget. It backs up existing files under
-`backups/<timestamp>/` and does not edit `/usr/share/omarchy/`.
+`install.sh` refuses to run as root or outside a Hyprland session, validates the
+toolchain, builds the app with `bin/build`, and installs its launcher, desktop
+and MIME entries, Hyprland bindings and window rules, and bar widget. It backs
+up existing files under `backups/<timestamp>/` and does not edit
+`/usr/share/omarchy/`.
 
-A development checkout uses `bash install.sh` directly. The one-line installer
-and update path for a plugin checkout are described under
-[Omarchy plugin](#omarchy-plugin).
+A development checkout uses `bash install.sh` directly. A plugin checkout
+installed with `omarchy plugin add` is built and updated from the bar widget;
+see [Omarchy plugin](#omarchy-plugin).
 
 The launcher is `~/.local/bin/tidyshot`. Capture history, projects and settings
 live under `$XDG_DATA_HOME/tidyshot` (normally `~/.local/share/tidyshot`) and
