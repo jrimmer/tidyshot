@@ -269,7 +269,7 @@ impl ScrollSession {
         }
         self.ui.after_grab();
         match result {
-            Ok(frame) => match self.stitcher.push(frame.view()) {
+            Ok(frame) => match self.stitcher.push(frame) {
                 Ok((changed, message)) => {
                     if changed {
                         self.reached_end = false;
@@ -606,7 +606,6 @@ pub fn stitch_message(error: &StitchError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stitch::FrameRef;
     use std::sync::{Arc, Mutex};
 
     /// Shared event log so the test can assert the release ordering.
@@ -760,7 +759,7 @@ mod tests {
         assert!(!session.is_running());
         assert!(session.begin_grab().is_none(), "no second grab while busy");
 
-        session.stitcher.push(frame(200, 100, 125).view()).unwrap();
+        session.stitcher.push(frame(200, 100, 125)).unwrap();
         let done = session.complete(job, Ok(frame(200, 100, 125)));
         assert!(done.is_some());
         assert!(session.closed);
@@ -771,7 +770,7 @@ mod tests {
     fn completion_releases_controls_before_the_image_is_delivered() {
         let (mut session, log, completed, cancelled) = session(Rect::new(10, 10, 200, 100), false);
         session.start();
-        session.stitcher.push(frame(200, 100, 125).view()).unwrap();
+        session.stitcher.push(frame(200, 100, 125)).unwrap();
         let job = session.begin_grab().expect("grab");
         assert!(session.finish().is_none());
         let done = session.complete(job, Ok(frame(200, 100, 125))).unwrap();
@@ -798,7 +797,7 @@ mod tests {
             session(Rect::new(10, 10, 200, 100), false);
         session.running = true;
         session.set_auto(true);
-        session.stitcher.push(frame(200, 100, 125).view()).unwrap();
+        session.stitcher.push(frame(200, 100, 125)).unwrap();
         session.scrolled_last = true;
         session.no_change = 3;
         let job = session.begin_grab().expect("grab");
@@ -866,7 +865,7 @@ mod tests {
             .collect();
         session
             .stitcher
-            .push(FrameRef::new(&source, 200, 100, 3))
+            .push(FrameData::new(source.clone(), 200, 100, 3))
             .unwrap();
         let job = session.begin_grab().expect("grab");
         let noise: Vec<u8> = (0..200 * 100 * 3)

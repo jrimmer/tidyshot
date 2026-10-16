@@ -114,6 +114,18 @@ impl FrameData {
         }
     }
 
+    /// Copy a borrowed view into an owned frame. The one copy is the frame the
+    /// stitcher must retain; matching never copies.
+    #[must_use]
+    pub fn from_view(frame: FrameRef<'_>) -> Self {
+        Self::new(
+            frame.data.to_vec(),
+            frame.width,
+            frame.height,
+            frame.channels,
+        )
+    }
+
     #[must_use]
     pub fn view(&self) -> FrameRef<'_> {
         FrameRef::new(&self.data, self.width, self.height, self.channels)
@@ -607,36 +619,34 @@ impl ScrollStitcher {
     /// Place a frame into the internal output orientation.
     ///
     /// Horizontal captures are transposed once here, at the boundary, so the
-    /// growing image and every later match work in output orientation and
-    /// `output` can return a borrowed slice.
-    fn orient(&self, frame: FrameRef<'_>) -> FrameData {
+    /// growing image and every later match work in output orientation. A
+    /// vertical frame is taken by value, with no copy at all.
+    fn orient(&self, frame: FrameData) -> FrameData {
         if !self.horizontal {
-            return FrameData::new(
-                frame.data.to_vec(),
-                frame.width,
-                frame.height,
-                frame.channels,
-            );
+            return frame;
         }
-        let (width, height) = (frame.height, frame.width);
-        let mut data = vec![0u8; width * height * frame.channels];
-        for y in 0..frame.height {
+        let data = frame.data;
+        let (width, height, channels) = (frame.height, frame.width, frame.channels);
+        let mut transposed = vec![0u8; data.len()];
+        for y in 0..height {
             for x in 0..frame.width {
-                let source = (y * frame.width + x) * frame.channels;
-                let target = (x * width + y) * frame.channels;
-                data[target..target + frame.channels]
-                    .copy_from_slice(&frame.data[source..source + frame.channels]);
+                let source = (y * frame.width + x) * channels;
+                let target = (x * width + y) * channels;
+                transposed[target..target + channels]
+                    .copy_from_slice(&data[source..source + channels]);
             }
         }
-        FrameData::new(data, width, height, frame.channels)
+        FrameData::new(transposed, width, height, channels)
     }
 
     /// Append the rows a frame reveals.
     ///
-    /// Returns whether the image grew and the status message for the UI. A
-    /// frame that cannot be aligned is rejected without changing state.
+    /// Takes the frame by value so a vertical capture never copies it. Matching
+    /// reads borrowed slices of the two frames; only the growing image is
+    /// replaced. Returns whether the image grew and the status message for the
+    /// UI. A frame that cannot be aligned is rejected without changing state.
     // Ported from omnishot/stitch.py (ScrollStitcher.push)
-    pub fn push(&mut self, frame: FrameRef<'_>) -> Result<(bool, String), StitchError> {
+    pub fn push(&mut self, frame: FrameData) -> Result<(bool, String), StitchError> {
         let frame = self.orient(frame);
         let Some(previous) = self.previous.as_ref() else {
             if frame.width * frame.height > self.max_pixels {
@@ -792,6 +802,10 @@ mod tests {
         FrameRef::new(data, width, height, 3)
     }
 
+    fn owned(data: &[u8], width: usize, height: usize) -> FrameData {
+        FrameData::from_view(frame(data, width, height))
+    }
+
     fn transpose_square(data: &[u8], side: usize) -> Vec<u8> {
         let mut out = vec![0u8; side * side * 3];
         for y in 0..side {
@@ -831,7 +845,7 @@ mod tests {
         for y in [0usize, 180, 360, 180, 360, 540, 720, 900, 1000] {
             let start = y * 600 * 3;
             stitch
-                .push(frame(&source[start..start + 600 * 600 * 3], 600, 600))
+                .push(owned(&source[start..start + 600 * 600 * 3], 600, 600))
                 .unwrap();
         }
         let output = stitch.output().unwrap();
@@ -863,7 +877,7 @@ mod tests {
                 frame_data[target..target + 600 * 3]
                     .copy_from_slice(&wide[source..source + 600 * 3]);
             }
-            stitch.push(frame(&frame_data, 600, 600)).unwrap();
+            stitch.push(owned(&frame_data, 600, 600)).unwrap();
         }
         let output = stitch.output().unwrap();
         assert_eq!(output.width, 1140);
@@ -884,9 +898,9 @@ mod tests {
     fn repeated_identical_frames_do_not_grow() {
         let source = page(600, 600);
         let mut stitch = ScrollStitcher::new(false);
-        stitch.push(frame(&source, 600, 600)).unwrap();
+        stitch.push(owned(&source, 600, 600)).unwrap();
         for _ in 0..10 {
-            let (changed, _) = stitch.push(frame(&source, 600, 600)).unwrap();
+            let (changed, _) = stitch.push(owned(&source, 600, 600)).unwrap();
             assert!(!changed);
         }
         assert!(stitch.output().unwrap().as_bytes() == source.as_slice());
@@ -896,13 +910,13 @@ mod tests {
     fn unrelated_frame_is_rejected_and_keeps_state() {
         let source = page(600, 600);
         let mut stitch = ScrollStitcher::new(false);
-        stitch.push(frame(&source, 600, 600)).unwrap();
+        stitch.push(owned(&source, 600, 600)).unwrap();
         let mut rng = Rng(44);
         let mut noise = vec![0u8; 600 * 600 * 3];
         for byte in &mut noise {
             *byte = rng.below(255) as u8;
         }
-        let (changed, message) = stitch.push(frame(&noise, 600, 600)).unwrap();
+        let (changed, message) = stitch.push(owned(&noise, 600, 600)).unwrap();
         assert!(!changed, "{message}");
         assert_eq!(stitch.position(), 0);
         assert_eq!(stitch.accepted(), 1);
@@ -917,7 +931,7 @@ mod tests {
             let start = y * 600 * 3;
             let mut frame_data = source[start..start + 600 * 600 * 3].to_vec();
             with_sticky(&mut frame_data, 600, 45, 30);
-            stitch.push(frame(&frame_data, 600, 600)).unwrap();
+            stitch.push(owned(&frame_data, 600, 600)).unwrap();
         }
         let output = stitch.output().unwrap();
         assert_eq!(output.height, 1110);
@@ -942,9 +956,9 @@ mod tests {
                 with_sticky(&mut frame_data, 600, 45, 30);
                 if horizontal {
                     let transposed = transpose_square(&frame_data, 600);
-                    stitch.push(frame(&transposed, 600, 600)).unwrap();
+                    stitch.push(owned(&transposed, 600, 600)).unwrap();
                 } else {
-                    stitch.push(frame(&frame_data, 600, 600)).unwrap();
+                    stitch.push(owned(&frame_data, 600, 600)).unwrap();
                 }
             }
             // Expected: the first 1110 rows of the page with one fixed header
@@ -974,10 +988,10 @@ mod tests {
     fn limits_reject_oversize_and_resize() {
         let source = page(1000, 600);
         let mut stitch = ScrollStitcher::with_limit(false, 600 * 700);
-        stitch.push(frame(&source, 600, 600)).unwrap();
-        let grown = frame(&source[200 * 600 * 3..], 600, 600);
+        stitch.push(owned(&source, 600, 600)).unwrap();
+        let grown = owned(&source[200 * 600 * 3..], 600, 600);
         assert_eq!(stitch.push(grown), Err(StitchError::TooLarge));
-        let resized = frame(&source[..500 * 600 * 3], 600, 500);
+        let resized = owned(&source[..500 * 600 * 3], 600, 500);
         assert_eq!(stitch.push(resized), Err(StitchError::DimensionsChanged));
     }
 
@@ -1015,8 +1029,8 @@ mod tests {
                 })
                 .collect();
             let mut stitch = ScrollStitcher::new(false);
-            stitch.push(frame(before, 600, 600)).unwrap();
-            let (changed, message) = stitch.push(frame(&after, 600, 600)).unwrap();
+            stitch.push(owned(before, 600, 600)).unwrap();
+            let (changed, message) = stitch.push(owned(&after, 600, 600)).unwrap();
             assert!(changed, "{change}: {message}");
             assert_eq!(stitch.position(), 170, "{change}");
         }
