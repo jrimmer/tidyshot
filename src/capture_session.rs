@@ -403,6 +403,8 @@ pub enum CaptureOutcome {
         rect: Option<Rect>,
         horizontal: bool,
     },
+    /// Every visible output, for a composite desktop capture.
+    Frames(Vec<GrabbedFrame>),
     /// The pixels were captured.
     Grabbed(GrabbedFrame),
 }
@@ -475,17 +477,23 @@ pub fn run_capture<R: CommandRunner>(
                 )?;
                 frames.push((display.clone(), png));
             }
-            // Composite modes hand every output frame to the stitcher.
+            // A single output is a plain frame; several outputs are returned
+            // separately for the caller to composite into the desktop region.
             if frames.len() == 1 {
                 return Ok(CaptureOutcome::Grabbed(GrabbedFrame {
                     rect: widest,
                     png: frames.pop().expect("one frame").1,
                 }));
             }
-            Ok(CaptureOutcome::Scroll {
-                rect: widest,
-                horizontal: false,
-            })
+            Ok(CaptureOutcome::Frames(
+                frames
+                    .into_iter()
+                    .map(|(display, png)| GrabbedFrame {
+                        rect: Some(display.geometry.bounds()),
+                        png,
+                    })
+                    .collect(),
+            ))
         }
         CaptureMode::Window => {
             // The frozen desktop frame is grabbed like a fullscreen capture;
@@ -1147,6 +1155,29 @@ mod tests {
             error.to_string().contains("Capture an area first"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn desktop_grabs_every_output() {
+        let request = CaptureRequest::resolve("desktop", None, None, 0).unwrap();
+        let runner = Fake::default();
+        runner.push("LEFT");
+        runner.push("RIGHT");
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        match run_capture(&session, &monitors(), &request, false, false).unwrap() {
+            CaptureOutcome::Frames(frames) => {
+                assert_eq!(frames.len(), 2);
+                assert_eq!(frames[0].png, b"LEFT");
+                assert_eq!(frames[1].rect, Some(Rect::new(1920, 0, 1920, 1080)));
+            }
+            other => panic!("expected per-output frames, got {other:?}"),
+        }
     }
 
     #[test]
