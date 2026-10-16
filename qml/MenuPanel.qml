@@ -4,8 +4,9 @@
 //
 // The rows arrive as parallel `ids`, `labels`, and `shortcuts` lists and the
 // keyboard cursor as `selectedIndex`. Main.qml binds those from the Rust
-// `Menu` singleton and forwards navigation back to it, so this file renders
-// the single action table without keeping an action list of its own.
+// `Menu` singleton and routes `keyPressed` back to it, so this file renders
+// the single action table without keeping an action list or key map of its
+// own.
 pragma ComponentBehavior: Bound
 import QtQuick
 
@@ -21,8 +22,8 @@ KeyboardPanel {
     /// The highlighted row index, owned by the Rust action table.
     property int selectedIndex: 0
 
-    /// A keyboard move, in rows and columns.
-    signal moved(int dx, int dy)
+    /// A key was pressed; Main.qml forwards it to Menu.handleKey.
+    signal keyPressed(int key)
     /// A row was activated by index.
     signal activated(int index)
     /// The menu should close.
@@ -35,29 +36,10 @@ KeyboardPanel {
     focusTarget: menuPanel
 
     Keys.onPressed: function (event) {
-        if (event.key === Qt.Key_J) {
-            menuPanel.moved(0, 1)
-            event.accepted = true
-        } else if (event.key === Qt.Key_K) {
-            menuPanel.moved(0, -1)
-            event.accepted = true
-        } else if (event.key === Qt.Key_H) {
-            menuPanel.moved(-1, 0)
-            event.accepted = true
-        } else if (event.key === Qt.Key_L) {
-            menuPanel.moved(1, 0)
-            event.accepted = true
-        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            menuPanel.activated(menuPanel.selectedIndex)
-            event.accepted = true
-        } else if (event.key === Qt.Key_Escape) {
-            menuPanel.dismissed()
-            event.accepted = true
-        } else if (event.key === Qt.Key_Tab) {
-            menuPanel.tabbed(1)
-            event.accepted = true
-        } else if (event.key === Qt.Key_Backtab) {
-            menuPanel.tabbed(-1)
+        if (event.key === Qt.Key_H || event.key === Qt.Key_J || event.key === Qt.Key_K
+                || event.key === Qt.Key_L || event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                || event.key === Qt.Key_Escape || event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+            menuPanel.keyPressed(event.key)
             event.accepted = true
         }
     }

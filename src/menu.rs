@@ -432,6 +432,27 @@ pub enum MenuKey {
     Backtab,
 }
 
+impl MenuKey {
+    /// Map a Qt key code, as delivered to `Keys.onPressed`, to a menu key.
+    #[must_use]
+    pub const fn from_qt(key: i32) -> Option<Self> {
+        match key {
+            0x48 => Some(MenuKey::H),
+            0x4a => Some(MenuKey::J),
+            0x4b => Some(MenuKey::K),
+            0x4c => Some(MenuKey::L),
+            // Qt.Key_Return and Qt.Key_Enter
+            0x0100_0004 | 0x0100_0005 => Some(MenuKey::Enter),
+            // Qt.Key_Escape
+            0x0100_0000 => Some(MenuKey::Escape),
+            // Qt.Key_Tab and Qt.Key_Backtab
+            0x0100_0001 => Some(MenuKey::Tab),
+            0x0100_0002 => Some(MenuKey::Backtab),
+            _ => None,
+        }
+    }
+}
+
 /// What handling a key did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuEvent {
@@ -440,6 +461,21 @@ pub enum MenuEvent {
     Dismissed,
     Tabbed(i32),
     Ignored,
+}
+
+impl MenuEvent {
+    /// A stable name the QML panel switches on.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            MenuEvent::SelectionChanged(_) => "selection",
+            MenuEvent::Activated(_) => "activated",
+            MenuEvent::Dismissed => "dismissed",
+            MenuEvent::Tabbed(1) => "tab-forward",
+            MenuEvent::Tabbed(_) => "tab-back",
+            MenuEvent::Ignored => "ignored",
+        }
+    }
 }
 
 /// The keyboard cursor over the action table.
@@ -546,6 +582,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "activateId"]
         fn activate_id(self: Pin<&mut Self>, id: &QString) -> bool;
+
+        /// Handle a Qt key code from `Keys.onPressed`, returning the event
+        /// name the panel switches on.
+        #[qinvokable]
+        #[cxx_name = "handleKey"]
+        fn handle_key(self: Pin<&mut Self>, key: i32) -> QString;
     }
 }
 
@@ -626,6 +668,19 @@ impl qobject::Menu {
     pub fn activate_id(self: Pin<&mut Self>, id: &QString) -> bool {
         let id = id.to_string();
         matches!(find(&id).map(invoke), Some(Invocation::Capture(_)))
+    }
+
+    /// Apply a Qt key code, moving the cursor and naming the resulting event.
+    pub fn handle_key(self: Pin<&mut Self>, key: i32) -> QString {
+        let Some(key) = MenuKey::from_qt(key) else {
+            return QString::from("ignored");
+        };
+        let mut state = MenuState {
+            selected: *self.selected_index() as usize,
+        };
+        let event = state.handle_key(key);
+        self.set_selected_index(state.selected() as i32);
+        QString::from(event.name())
     }
 }
 

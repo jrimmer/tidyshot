@@ -25,8 +25,16 @@ ApplicationWindow {
         labels: Menu.labels
         shortcuts: Menu.shortcuts
         selectedIndex: Menu.selectedIndex
-        onMoved: function (dx, dy) {
-            Menu.moveSelection(dx, dy)
+        onKeyPressed: function (key) {
+            var event = Menu.handleKey(key)
+            if (event === "dismissed")
+                menuPanel.dismissed()
+            else if (event === "activated")
+                Menu.activate()
+            else if (event === "tab-forward")
+                menuPanel.tabbed(1)
+            else if (event === "tab-back")
+                menuPanel.tabbed(-1)
         }
         onActivated: function (index) {
             Menu.activateIndex(index)
