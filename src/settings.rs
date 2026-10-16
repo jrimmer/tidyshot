@@ -6,22 +6,18 @@
 
 use std::path::PathBuf;
 
+use crate::ocr;
 use crate::text_result::TextSettings;
 
-/// The tidyshot data directory, honouring `XDG_DATA_HOME`.
+/// The tidyshot data directory that holds the OCR models.
+///
+/// The settings file lives beside that root, so the OCR model installer and
+/// the preferences always agree on one data home.
 #[must_use]
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("TIDYSHOT_DATA_DIR")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-        .or_else(|| {
-            std::env::var_os("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .filter(|path| !path.as_os_str().is_empty())
-        })
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from(".local/share"));
-    base.join("tidyshot")
+    ocr::model_dir()
+        .parent()
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
 /// The path of the JSON settings file.
