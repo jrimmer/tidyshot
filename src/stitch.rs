@@ -229,7 +229,8 @@ fn transpose(frame: FrameRef<'_>) -> FrameData {
 fn correlate(image: &Gray, template: &[f32], left: usize, right: usize, top: usize) -> Vec<f32> {
     let template_w = right - left;
     let template_h = template.len() / template_w;
-    let template_mean = template.iter().sum::<f32>() / template.len() as f32;
+    let template_sum = template.iter().sum::<f32>();
+    let template_mean = template_sum / template.len() as f32;
     let template_norm = template
         .iter()
         .map(|v| (v - template_mean) * (v - template_mean))
@@ -270,7 +271,7 @@ fn correlate(image: &Gray, template: &[f32], left: usize, right: usize, top: usi
                     dot += image.value(x, location + y) * template[y * template_w + (x - left)];
                 }
             }
-            (dot - mean * template.iter().sum::<f32>()) / (template_norm * norm)
+            (dot - mean * template_sum) / (template_norm * norm)
         };
         scores.push(score);
         if location < max_location {
@@ -303,24 +304,29 @@ fn block_std(image: &Gray, left: usize, right: usize, top: usize, bottom: usize)
 
 /// A 5×5 box blur approximating the reference Gaussian, used to isolate fine
 /// detail for the overlap error.
+///
+/// The box is separable, so a horizontal and a vertical pass reproduce the
+/// 25-sample average with four samples per pixel; the truncated edge windows
+/// divide by the number of in-bounds samples, matching the direct loop.
 fn blur(value: &Gray) -> Vec<f32> {
+    let (width, height) = (value.width, value.height);
+    let mut rows = vec![0.0f32; value.data.len()];
+    for y in 0..height {
+        let base = y * width;
+        for x in 0..width {
+            let start = x.saturating_sub(2);
+            let end = (x + 2).min(width - 1);
+            let sum: f32 = (start..=end).map(|sx| value.data[base + sx]).sum();
+            rows[base + x] = sum / (end - start + 1) as f32;
+        }
+    }
     let mut out = vec![0.0f32; value.data.len()];
-    for y in 0..value.height {
-        for x in 0..value.width {
-            let mut sum = 0.0f32;
-            let mut count = 0.0f32;
-            for dy in -2i32..=2 {
-                for dx in -2i32..=2 {
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx < 0 || ny < 0 || nx >= value.width as i32 || ny >= value.height as i32 {
-                        continue;
-                    }
-                    sum += value.value(nx as usize, ny as usize);
-                    count += 1.0;
-                }
-            }
-            out[y * value.width + x] = sum / count;
+    for x in 0..width {
+        for y in 0..height {
+            let start = y.saturating_sub(2);
+            let end = (y + 2).min(height - 1);
+            let sum: f32 = (start..=end).map(|sy| rows[sy * width + x]).sum();
+            out[y * width + x] = sum / (end - start + 1) as f32;
         }
     }
     out
