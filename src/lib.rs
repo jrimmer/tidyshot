@@ -28,6 +28,7 @@ pub mod ocr;
 pub mod pin;
 pub mod pngzip;
 pub mod project;
+pub mod qml_load;
 pub mod raster;
 pub mod recording;
 pub mod render;

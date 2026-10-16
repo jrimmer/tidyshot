@@ -2,8 +2,8 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
-    cxx_qt_build::CxxQtBuilder::new_qml_module(cxx_qt_build::QmlModule::new("tidyshot").qml_files(
-        [
+    let mut builder = cxx_qt_build::CxxQtBuilder::new_qml_module(
+        cxx_qt_build::QmlModule::new("tidyshot").qml_files([
             "qml/Main.qml",
             "qml/Panel.qml",
             "qml/KeyboardPanel.qml",
@@ -11,13 +11,26 @@ fn main() {
             "qml/MenuPanel.qml",
             "qml/TrayMenu.qml",
             "qml/TextResultDialog.qml",
-        ],
-    ))
+        ]),
+    )
     .qt_module("Quick")
     .qt_module("QuickControls2")
     .qt_module("QuickTest")
-    .files(["src/bridge.rs", "src/menu.rs", "src/text_result.rs"])
-    .build();
+    .cpp_file("src/cpp/qml_load.cpp")
+    .files([
+        "src/bridge.rs",
+        "src/menu.rs",
+        "src/qml_load.rs",
+        "src/text_result.rs",
+    ]);
+    // The load probe's header is local to src/cpp; cxx generates the binding
+    // that includes it, so that directory must be on the include path.
+    unsafe {
+        builder = builder.cc_builder(|cc| {
+            cc.include("src/cpp");
+        });
+    }
+    builder.build();
 
     build_scroll_helper();
 }
