@@ -6,6 +6,7 @@ fn main() {
             "qml/KeyboardPanel.qml",
             "qml/MenuButton.qml",
             "qml/MenuPanel.qml",
+            "qml/TrayMenu.qml",
         ],
     ))
     .qt_module("Quick")

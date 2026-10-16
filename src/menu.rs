@@ -337,6 +337,44 @@ pub fn tray_entries_from(rows: &[ActionRow]) -> Vec<TrayEntry<'_>> {
     entries
 }
 
+/// The tray projection the QML `TrayMenu` renders: one label per entry, with
+/// an empty string marking a separator between groups.
+#[must_use]
+pub fn tray_labels() -> Vec<String> {
+    tray_labels_from(ACTIONS)
+}
+
+/// Project an arbitrary table into tray labels, so tests can add a row.
+#[must_use]
+pub fn tray_labels_from(rows: &[ActionRow]) -> Vec<String> {
+    tray_entries_from(rows)
+        .into_iter()
+        .map(|entry| match entry {
+            TrayEntry::Action(row) => row.label.to_owned(),
+            TrayEntry::Separator => String::new(),
+        })
+        .collect()
+}
+
+/// The tray projection's target ids, parallel to [`tray_labels`]. A
+/// separator carries an empty id.
+#[must_use]
+pub fn tray_ids() -> Vec<&'static str> {
+    tray_ids_from(ACTIONS)
+}
+
+/// Project an arbitrary table into tray ids, so tests can add a row.
+#[must_use]
+pub fn tray_ids_from(rows: &[ActionRow]) -> Vec<&'static str> {
+    tray_entries_from(rows)
+        .into_iter()
+        .map(|entry| match entry {
+            TrayEntry::Action(row) => row.id,
+            TrayEntry::Separator => "",
+        })
+        .collect()
+}
+
 // --- Renderer 3: the `tidyshot menu` CLI listing -------------------------
 
 /// One formatted line per table row, for the CLI listing.
@@ -479,6 +517,8 @@ pub mod qobject {
         #[qproperty(QStringList, ids)]
         #[qproperty(QStringList, labels)]
         #[qproperty(QStringList, shortcuts)]
+        #[qproperty(QStringList, tray_labels, cxx_name = "trayLabels")]
+        #[qproperty(QStringList, tray_ids, cxx_name = "trayIds")]
         #[qproperty(i32, selected_index, cxx_name = "selectedIndex")]
         type Menu = super::MenuRust;
 
@@ -501,6 +541,11 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "activateIndex"]
         fn activate_index(self: Pin<&mut Self>, index: i32) -> bool;
+
+        /// Activate a row by its stable id.
+        #[qinvokable]
+        #[cxx_name = "activateId"]
+        fn activate_id(self: Pin<&mut Self>, id: &QString) -> bool;
     }
 }
 
@@ -511,6 +556,8 @@ pub struct MenuRust {
     ids: QStringList,
     labels: QStringList,
     shortcuts: QStringList,
+    tray_labels: QStringList,
+    tray_ids: QStringList,
     selected_index: i32,
 }
 
@@ -525,10 +572,20 @@ impl Default for MenuRust {
             labels.append(QString::from(row.label));
             shortcuts.append(QString::from(row.shortcut));
         }
+        let mut tray_labels = QStringList::default();
+        for label in crate::menu::tray_labels() {
+            tray_labels.append(QString::from(label));
+        }
+        let mut tray_ids = QStringList::default();
+        for id in crate::menu::tray_ids() {
+            tray_ids.append(QString::from(id));
+        }
         Self {
             ids,
             labels,
             shortcuts,
+            tray_labels,
+            tray_ids,
             selected_index: 0,
         }
     }
@@ -563,6 +620,12 @@ impl qobject::Menu {
     pub fn activate_index(self: Pin<&mut Self>, index: i32) -> bool {
         let index = index.max(0) as usize;
         matches!(ACTIONS.get(index).map(invoke), Some(Invocation::Capture(_)))
+    }
+
+    /// Activate a row by id; true when the row routed to capture.
+    pub fn activate_id(self: Pin<&mut Self>, id: &QString) -> bool {
+        let id = id.to_string();
+        matches!(find(&id).map(invoke), Some(Invocation::Capture(_)))
     }
 }
 
@@ -649,6 +712,8 @@ mod tests {
         let panel = panel_rows_from(&extended);
         let cli = cli_lines_from(&extended);
         let tray = tray_entries_from(&extended);
+        let tray_labels = tray_labels_from(&extended);
+        let tray_ids = tray_ids_from(&extended);
         assert_eq!(panel.len(), 2);
         assert_eq!(panel[1].id, "new-action");
         assert_eq!(cli.len(), 2);
@@ -661,6 +726,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(tray_actions, vec!["all-in-one", "new-action"]);
+        assert_eq!(tray_labels.len(), tray_ids.len());
+        assert!(tray_labels.iter().any(|label| label == "New action"));
+        assert!(tray_ids.contains(&"new-action"));
     }
 
     #[test]
@@ -719,6 +787,26 @@ mod tests {
     }
 
     #[test]
+    fn tray_projection_covers_every_row_and_groups_with_separators() {
+        let labels = tray_labels();
+        let ids = tray_ids();
+        assert_eq!(labels.len(), ids.len());
+        assert_eq!(
+            ids.iter().filter(|id| !id.is_empty()).count(),
+            ACTIONS.len()
+        );
+        let mut rows = ids.into_iter().filter(|id| !id.is_empty());
+        for row in ACTIONS {
+            assert_eq!(rows.next(), Some(row.id));
+        }
+        assert!(rows.next().is_none());
+        assert!(
+            labels.iter().any(String::is_empty),
+            "groups must be separated"
+        );
+    }
+
+    #[test]
     fn qml_singleton_lists_every_row() {
         let menu = MenuRust::default();
         assert_eq!(menu.ids.len(), ACTIONS.len() as isize);
@@ -733,5 +821,7 @@ mod tests {
             menu.ids.get(0).map(ToString::to_string).as_deref(),
             Some(ACTIONS[0].id)
         );
+        assert_eq!(menu.tray_labels.len(), tray_labels().len() as isize);
+        assert_eq!(menu.tray_ids.len(), tray_ids().len() as isize);
     }
 }

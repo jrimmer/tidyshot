@@ -40,4 +40,14 @@ ApplicationWindow {
         text: Args.label
         color: "#9a9a9a"
     }
+
+    // The tray fallback menu reads the same table through Menu.trayLabels.
+    TrayMenu {
+        id: trayMenu
+        trayLabels: Menu.trayLabels
+        trayIds: Menu.trayIds
+        onActionTriggered: function (id) {
+            Menu.activateId(id)
+        }
+    }
 }
