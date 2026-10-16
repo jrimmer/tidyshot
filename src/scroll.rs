@@ -1101,3 +1101,103 @@ mod recovery_tests {
         assert!(session.begin_grab().is_some());
     }
 }
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    struct Capture;
+    impl ScrollCapture for Capture {
+        fn grab(&self, _rect: Rect) -> Result<FrameData, String> {
+            Err("unused".to_owned())
+        }
+        fn mirror_start(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn mirror_stop(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct Input;
+    impl ScrollInput for Input {
+        fn cursor(&self) -> Result<(i32, i32), String> {
+            Ok((10, 10))
+        }
+        fn move_cursor(&self, _x: i32, _y: i32) -> Result<(), String> {
+            Ok(())
+        }
+        fn scroll_step(&self, _horizontal: bool, _amount: i32) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct Ui;
+    impl ScrollUi for Ui {
+        fn before_grab(&mut self) -> bool {
+            false
+        }
+        fn after_grab(&mut self) {}
+        fn update(&mut self, _frame: &FrameData) {}
+        fn keys_stop(&mut self) {}
+        fn visuals_close(&mut self) {}
+    }
+
+    /// A tall page with a unique pseudo-random texture in every row.
+    fn textured_page(height: usize, width: usize) -> Vec<u8> {
+        let mut state: u64 = 12;
+        let mut data = vec![0u8; height * width * 3];
+        for row in data.chunks_mut(width * 3) {
+            for pixel in row.chunks_mut(3) {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let value = (state >> 33) as u8;
+                pixel[0] = value;
+                pixel[1] = value.wrapping_add(37);
+                pixel[2] = value.wrapping_mul(3);
+            }
+        }
+        data
+    }
+
+    /// A frame that would exceed the 120 MP budget stops the session with the
+    /// reason on screen and keeps the rows already stitched.
+    #[test]
+    fn exceeding_the_megapixel_cap_stops_with_the_reason_and_keeps_the_image() {
+        // A tall page whose every row carries unique high-frequency detail, so
+        // a 180-row jump aligns and then crosses the cap.
+        let width = 200usize;
+        let page = textured_page(1200, width);
+        let first = FrameData::new(page[..600 * width * 3].to_vec(), width, 600, 3);
+        let first_image = first.clone();
+        let mut session = ScrollSession::with_limit(
+            Rect::new(0, 0, width as i32, 600),
+            false,
+            width * 700,
+            Box::new(Capture),
+            Box::new(Input),
+            Box::new(Ui),
+        );
+        session.start();
+        session.stitcher.push(first).unwrap();
+        // Jumping forward 200 rows needs an 800-row image, over the cap.
+        let second = FrameData::new(
+            page[200 * width * 3..800 * width * 3].to_vec(),
+            width,
+            600,
+            3,
+        );
+        let job = session.begin_grab().unwrap();
+        session.complete(job, Ok(second));
+        assert!(!session.is_running(), "status={:?}", session.status());
+        assert!(
+            session.status().contains("120 megapixel"),
+            "{}",
+            session.status()
+        );
+        assert_eq!(session.output().unwrap().data, first_image.data);
+        // A retry is offered and a fresh start is possible.
+        assert!(session.start_label.contains("Retry"));
+    }
+}
