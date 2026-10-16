@@ -258,7 +258,12 @@ fn is_executable(path: &Path) -> bool {
 /// Parse `hyprctl -j version` into the version and ABI hash.
 fn parse_hyprland_info(text: Option<String>) -> Option<HyprlandInfo> {
     let value = crate::json::parse(text.as_deref()?).ok()?;
-    let info = HyprlandInfo {
+    // Python treats `json.loads(...) or {}` truthiness as reachability: an
+    // empty object means the compositor did not answer.
+    if !value.is_truthy() {
+        return None;
+    }
+    Some(HyprlandInfo {
         version: value
             .get("version")
             .and_then(Value::as_str)
@@ -269,14 +274,7 @@ fn parse_hyprland_info(text: Option<String>) -> Option<HyprlandInfo> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
-    };
-    // `or {}` in the reference: a compositor that answers with an empty object
-    // still counts as unreachable.
-    if info.version.is_empty() && info.abi_hash.is_empty() {
-        None
-    } else {
-        Some(info)
-    }
+    })
 }
 
 fn installer(system: &dyn System) -> String {
