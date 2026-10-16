@@ -7,6 +7,7 @@
 //! read or delete a take while its encoder still holds the lease, and a full
 //! disk must not cost the user a playable recording.
 
+pub mod audio;
 pub mod checkpoint;
 pub mod display;
 pub mod encoder;
