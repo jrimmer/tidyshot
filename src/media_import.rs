@@ -123,6 +123,55 @@ pub fn validate_video<R: CommandRunner>(
     }
 }
 
+/// Decode the first frame of `path` into RGBA8.
+///
+/// The overlay uses this as a recording thumbnail without loading a media
+/// player. Failures carry the ffmpeg error text so the UI can show it.
+// Ported from omnishot/widgets.py (QuickOverlay.refresh_content)
+pub fn first_frame<R: CommandRunner>(
+    runner: &R,
+    path: &Path,
+) -> Result<crate::pngzip::Image, ImportError> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("recording");
+    let (width, height) = validate_video(runner, path)?;
+    let decode = CommandSpec::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path.to_string_lossy().into_owned())
+        .args([
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-an",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-",
+        ])
+        .timeout(Duration::from_secs(30));
+    let output = runner.run(&decode).map_err(|error| {
+        failure(format!(
+            "Could not open recording {name}: {}",
+            characterise(&error)
+        ))
+    })?;
+    let expected = width as usize * height as usize * 4;
+    if output.stdout.len() < expected {
+        return Err(failure(format!(
+            "Could not open recording {name}: no decodable first frame"
+        )));
+    }
+    Ok(crate::pngzip::Image::new(
+        width as usize,
+        height as usize,
+        output.stdout[..expected].to_vec(),
+    ))
+}
+
 /// A framehash stream has at least one non-comment data line.
 fn has_frame(stdout: &[u8]) -> bool {
     String::from_utf8_lossy(stdout).lines().any(|line| {

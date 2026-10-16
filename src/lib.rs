@@ -14,6 +14,7 @@ pub mod compat;
 pub mod compress;
 pub mod crop;
 pub mod doctor;
+pub mod drag;
 pub mod editor;
 pub mod effects;
 pub mod filenames;
@@ -25,6 +26,7 @@ pub mod menu;
 pub mod mirror;
 pub mod motion_blur;
 pub mod ocr;
+pub mod overlay;
 pub mod pin;
 pub mod pngzip;
 pub mod project;
@@ -40,6 +42,7 @@ pub mod storage;
 pub mod text_result;
 pub mod text_styles;
 pub mod toolbar;
+pub mod ui_scale;
 
 /// Initialise the cxx-qt registrations and run the application.
 pub fn run() {
