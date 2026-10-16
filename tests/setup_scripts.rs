@@ -641,6 +641,26 @@ fn uninstall_needs_confirmation_and_keeps_development_checkouts() {
     assert!(fixture.runtime.join(".git").exists());
 }
 
+/// The mirror recreates a source directory that holds no file, matching
+/// `rsync -a` rather than losing empty tracked trees.
+#[test]
+fn mirror_recreates_empty_source_directories() {
+    let fixture = Fixture::new("emptydir");
+    assert!(fixture.run("setup.sh", &[]).status.success());
+    fs::create_dir_all(fixture.source.join("assets/icons")).unwrap();
+    fixture.own(&fixture.source.join("assets"));
+    let result = fixture.run("setup.sh", &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        fixture.runtime.join("assets/icons").is_dir(),
+        "an empty source directory is mirrored"
+    );
+}
+
 #[test]
 fn update_removes_files_and_empty_directories_the_source_dropped() {
     let fixture = Fixture::new("prune");
@@ -702,9 +722,19 @@ fn mirror_preserves_symlinks_without_following_them() {
     );
     let good = fixture.runtime.join("good-link");
     let broken = fixture.runtime.join("broken-link");
-    assert!(fs::symlink_metadata(&good).unwrap().file_type().is_symlink());
+    assert!(
+        fs::symlink_metadata(&good)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert_eq!(fs::read_link(&good).unwrap(), Path::new("manifest.json"));
-    assert!(fs::symlink_metadata(&broken).unwrap().file_type().is_symlink());
+    assert!(
+        fs::symlink_metadata(&broken)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert_eq!(fs::read_link(&broken).unwrap(), Path::new("does-not-exist"));
 }
 
