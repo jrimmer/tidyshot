@@ -66,7 +66,9 @@ tidyshot_mirror() {
     task_rel=${task_path#"$task_dst"/}
     [[ -z $task_rel ]] && continue
     git -C "$task_src" check-ignore --no-index -q -- "$task_rel/" && continue
-    printf '%s\n' "$task_list" | grep -q "^$task_rel/" && continue
+    # Keep a directory that still owns a source file. A fixed substring match
+    # avoids regex metacharacters in plugin paths.
+    printf '%s\n' "$task_list" | grep -qF -- "$task_rel/" && continue
     rmdir -- "$task_path" 2>/dev/null || true
   done < <(find "$task_dst" -mindepth 1 -depth -type d -print0 2>/dev/null)
   # Copy every owned file, preserving content and mode.

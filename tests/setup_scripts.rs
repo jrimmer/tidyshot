@@ -598,6 +598,28 @@ fn uninstall_needs_confirmation_and_keeps_development_checkouts() {
 }
 
 #[test]
+fn update_removes_files_and_empty_directories_the_source_dropped() {
+    let fixture = Fixture::new("prune");
+    assert!(fixture.run("setup.sh", &[]).status.success());
+    // A tracked directory the next revision removes must disappear from the
+    // runtime, not just its files.
+    fs::create_dir_all(fixture.source.join("stale/deep")).unwrap();
+    fs::write(fixture.source.join("stale/deep/keep.txt"), "gone").unwrap();
+    fixture.commit("add stale");
+    assert!(fixture.run("setup.sh", &[]).status.success());
+    assert!(fixture.runtime.join("stale/deep/keep.txt").is_file());
+    fs::remove_dir_all(fixture.source.join("stale")).unwrap();
+    fixture.commit("drop stale");
+    assert!(fixture.run("setup.sh", &[]).status.success());
+    assert!(
+        !fixture.runtime.join("stale").exists(),
+        "stale tree is pruned"
+    );
+    // The build outputs the source never tracked still survive.
+    assert!(fixture.runtime.join("native/helper.so").exists());
+}
+
+#[test]
 fn install_round_trip_is_byte_exact() {
     let fixture = Fixture::new("roundtrip");
     assert!(fixture.run("setup.sh", &[]).status.success());
