@@ -136,12 +136,6 @@ impl std::error::Error for RouteError {}
 pub fn route(args: &Args) -> Result<Command, RouteError> {
     let command = args.command.as_str();
 
-    if let Some((_, linebreaks)) = OCR_SHORTCUTS.iter().find(|(name, _)| *name == command) {
-        return Ok(Command::Ocr {
-            path: PathBuf::from(args.path.clone().unwrap_or_default()),
-            linebreaks: Some(*linebreaks),
-        });
-    }
     if let Some((_, action)) = AREA_SHORTCUTS.iter().find(|(name, _)| *name == command) {
         return Ok(Command::Capture {
             command: "area".to_owned(),
@@ -155,13 +149,19 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
         });
     }
 
+    // `ocr-lines` / `ocr-single-line` rewrite to `ocr` with their line-break
+    // override, exactly as the source dispatch does, before the path decides
+    // between recognizing a file and an interactive capture.
+    let ocr_shortcut = OCR_SHORTCUTS.iter().find(|(name, _)| *name == command);
+    let linebreaks = ocr_shortcut.map(|(_, value)| *value).or(args.linebreaks);
+
     let capture = |name: &str, action: Option<String>| Command::Capture {
         command: name.to_owned(),
         geometry: args.geometry.clone(),
         coordinates: args.url.as_ref().and_then(|url| url.coordinates),
         action,
         delay: args.delay,
-        linebreaks: args.url.as_ref().and_then(|url| url.linebreaks),
+        linebreaks,
         start: args.url.as_ref().and_then(|url| url.start),
         autoscroll: args.url.as_ref().and_then(|url| url.autoscroll),
     };
@@ -183,14 +183,13 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
         }
         "select" | "area" | "window" | "fullscreen" | "desktop" | "previous" | "scroll"
         | "scroll-horizontal" | "timer" => Ok(capture(command, action.clone())),
-        "ocr" => Ok(Command::Ocr {
-            path: PathBuf::from(args.path.clone().unwrap_or_default()),
-            linebreaks: args
-                .url
-                .as_ref()
-                .and_then(|url| url.linebreaks)
-                .or(args.linebreaks),
-        }),
+        "ocr" => match &args.path {
+            Some(path) if !path.is_empty() => Ok(Command::Ocr {
+                path: PathBuf::from(path),
+                linebreaks,
+            }),
+            _ => Ok(capture("ocr", action.clone())),
+        },
         "open" => match &args.path {
             Some(path) if !path.is_empty() => Ok(Command::Edit(PathBuf::from(path))),
             _ => Ok(Command::EditChooser),
@@ -620,18 +619,40 @@ mod tests {
                 autoscroll: None,
             }
         );
+        // A shortcut with no file is an interactive OCR capture, exactly as
+        // the source dispatch falls through to `capture("ocr", args)`.
         assert_eq!(
             routed(&["ocr-lines"]),
-            Command::Ocr {
-                path: PathBuf::new(),
+            Command::Capture {
+                command: "ocr".into(),
+                geometry: None,
+                coordinates: None,
+                action: None,
+                delay: None,
                 linebreaks: Some(true),
+                start: None,
+                autoscroll: None,
             }
         );
         assert_eq!(
             routed(&["ocr-single-line"]),
-            Command::Ocr {
-                path: PathBuf::new(),
+            Command::Capture {
+                command: "ocr".into(),
+                geometry: None,
+                coordinates: None,
+                action: None,
+                delay: None,
                 linebreaks: Some(false),
+                start: None,
+                autoscroll: None,
+            }
+        );
+        // A shortcut with a file recognizes that file with the override.
+        assert_eq!(
+            routed(&["ocr-lines", "/tmp/a.png"]),
+            Command::Ocr {
+                path: PathBuf::from("/tmp/a.png"),
+                linebreaks: Some(true),
             }
         );
     }
