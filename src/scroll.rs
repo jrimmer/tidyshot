@@ -20,7 +20,7 @@ use std::time::Duration;
 use crate::commands::{CommandRunner, CommandSpec, hypr};
 use crate::geometry::Rect;
 use crate::json::Value;
-use crate::stitch::{FrameData, ScrollStitcher};
+use crate::stitch::{FrameData, FrameRef, ScrollStitcher};
 
 /// The default interval between automatic grabs, matching the source setting.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(550);
@@ -61,7 +61,7 @@ pub trait ScrollUi {
     /// Restore the capture surfaces after a grab.
     fn after_grab(&mut self);
     /// Show a growing preview of the stitched image.
-    fn update(&mut self, frame: &FrameData);
+    fn update(&mut self, frame: FrameRef<'_>);
     /// Stop the keyboard shortcut lease.
     fn keys_stop(&mut self);
     /// Close the guide and selection surfaces.
@@ -77,7 +77,7 @@ impl ScrollUi for NoUi {
         false
     }
     fn after_grab(&mut self) {}
-    fn update(&mut self, _frame: &FrameData) {}
+    fn update(&mut self, _frame: FrameRef<'_>) {}
     fn keys_stop(&mut self) {}
     fn visuals_close(&mut self) {}
 }
@@ -295,8 +295,14 @@ impl ScrollSession {
                     } else {
                         message.clone()
                     };
-                    if let Some(output) = self.stitcher.output() {
-                        self.ui.update(&output);
+                    // The preview renders straight from the stored buffer for
+                    // a vertical capture; only a horizontal one is transposed.
+                    if self.horizontal {
+                        if let Some(output) = self.stitcher.output() {
+                            self.ui.update(output.view());
+                        }
+                    } else if let Some(view) = self.stitcher.image_view() {
+                        self.ui.update(view);
                     }
                     if self.auto {
                         if message.starts_with("Could not align") {
@@ -739,7 +745,7 @@ mod tests {
             false
         }
         fn after_grab(&mut self) {}
-        fn update(&mut self, _frame: &FrameData) {
+        fn update(&mut self, _frame: FrameRef<'_>) {
             self.previews += 1;
         }
         fn keys_stop(&mut self) {
@@ -1078,7 +1084,7 @@ mod recovery_tests {
             false
         }
         fn after_grab(&mut self) {}
-        fn update(&mut self, _frame: &FrameData) {}
+        fn update(&mut self, _frame: FrameRef<'_>) {}
         fn keys_stop(&mut self) {}
         fn visuals_close(&mut self) {}
     }
@@ -1158,7 +1164,7 @@ mod limit_tests {
             false
         }
         fn after_grab(&mut self) {}
-        fn update(&mut self, _frame: &FrameData) {}
+        fn update(&mut self, _frame: FrameRef<'_>) {}
         fn keys_stop(&mut self) {}
         fn visuals_close(&mut self) {}
     }

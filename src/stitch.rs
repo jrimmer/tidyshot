@@ -206,6 +206,23 @@ fn same_rows(previous: FrameRef<'_>, current: FrameRef<'_>) -> Vec<bool> {
         .collect()
 }
 
+/// Transpose a frame through an owned copy of its pixels.
+///
+/// Used only at the horizontal boundary: once per incoming frame and once for
+/// the finished output, never inside the matching loop.
+fn transpose(frame: FrameRef<'_>) -> FrameData {
+    let (width, height, channels) = (frame.height, frame.width, frame.channels);
+    let mut data = vec![0u8; frame.data.len()];
+    for y in 0..frame.height {
+        for x in 0..frame.width {
+            let source = (y * frame.width + x) * channels;
+            let target = (x * width + y) * channels;
+            data[target..target + channels].copy_from_slice(&frame.data[source..source + channels]);
+        }
+    }
+    FrameData::new(data, width, height, channels)
+}
+
 /// `matchTemplate` with `TM_CCOEFF_NORMED`, sliding only vertically because
 /// the anchor already spans the bordered width. `template` is indexed
 /// `[relative_row * width + x]`.
@@ -597,17 +614,16 @@ impl ScrollStitcher {
         if !self.horizontal {
             return Some(image.clone());
         }
-        let (width, height) = (image.height, image.width);
-        let mut data = vec![0u8; width * height * image.channels];
-        for y in 0..image.height {
-            for x in 0..image.width {
-                let source = (y * image.width + x) * image.channels;
-                let target = (x * width + y) * image.channels;
-                data[target..target + image.channels]
-                    .copy_from_slice(&image.data[source..source + image.channels]);
-            }
-        }
-        Some(FrameData::new(data, width, height, image.channels))
+        Some(transpose(image.view()))
+    }
+
+    /// A borrowed view of the stitched image in internal orientation.
+    ///
+    /// A vertical capture's internal orientation is already the output one, so
+    /// the preview can render straight from this borrow with no copy.
+    #[must_use]
+    pub fn image_view(&self) -> Option<FrameRef<'_>> {
+        self.image.as_ref().map(FrameData::view)
     }
 
     /// Place a frame into the internal output orientation.
@@ -619,18 +635,7 @@ impl ScrollStitcher {
         if !self.horizontal {
             return frame;
         }
-        let data = frame.data;
-        let (width, height, channels) = (frame.height, frame.width, frame.channels);
-        let mut transposed = vec![0u8; data.len()];
-        for y in 0..height {
-            for x in 0..frame.width {
-                let source = (y * frame.width + x) * channels;
-                let target = (x * width + y) * channels;
-                transposed[target..target + channels]
-                    .copy_from_slice(&data[source..source + channels]);
-            }
-        }
-        FrameData::new(transposed, width, height, channels)
+        transpose(frame.view())
     }
 
     /// Append the rows a frame reveals.
