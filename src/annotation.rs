@@ -67,6 +67,15 @@ impl Rect {
         Self::new(self.x + dx, self.y + dy, self.width, self.height)
     }
 
+    /// Whether `point` lies inside the rectangle.
+    #[must_use]
+    pub fn contains(&self, point: Point) -> bool {
+        self.x <= point.x
+            && point.x <= self.right()
+            && self.y <= point.y
+            && point.y <= self.bottom()
+    }
+
     /// The smallest rectangle covering both this and `other`.
     #[must_use]
     pub fn united(&self, other: &Rect) -> Self {

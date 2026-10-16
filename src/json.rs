@@ -73,6 +73,14 @@ impl Value {
         }
     }
 
+    #[must_use]
+    pub fn as_object_mut(&mut self) -> Option<&mut BTreeMap<String, Value>> {
+        match self {
+            Value::Object(o) => Some(o),
+            _ => None,
+        }
+    }
+
     /// Look up a single object key, as Python's `dict.get` does. A key that
     /// contains a literal `.` is matched exactly rather than split as a path.
     #[must_use]

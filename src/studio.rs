@@ -1,0 +1,1200 @@
+//! Editable recording metadata and deterministic local video composition.
+// Ported from omnishot/studio.py and omnishot/video_camera.py
+//!
+//! Composition is shared by the preview and the final export, so the two never
+//! disagree. Every external program runs through [`CommandRunner`]; the
+//! pipeline decodes the source with one `ffmpeg` process, composites each
+//! output frame in memory, and pipes RGB24 into a second `ffmpeg` process.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use crate::annotation::{Point, Rect};
+use crate::commands::{CommandRunner, CommandSpec};
+use crate::json::Value;
+use crate::pngzip::{Image, decode_png};
+use crate::raster::Canvas;
+
+use crate::motion_blur::blur_level;
+use crate::video_camera;
+use crate::video_clicks::press_scale;
+use crate::video_keys::{key_colors, visible_keys};
+use crate::video_motion::{Zoom, zoom_at};
+use crate::video_position::camera_rect;
+
+/// Video options, the stored `options` object.
+pub type Options = BTreeMap<String, Value>;
+
+/// A single cursor sample on the normalized source clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorSample {
+    pub t: f64,
+    pub x: f64,
+    pub y: f64,
+}
+
+impl CursorSample {
+    /// Read a cursor sample from a manifest object.
+    #[must_use]
+    pub fn from_json(value: &Value) -> Option<Self> {
+        Some(Self {
+            t: value.get("t").and_then(Value::as_f64)?,
+            x: value.get("x").and_then(Value::as_f64).unwrap_or(0.5),
+            y: value.get("y").and_then(Value::as_f64).unwrap_or(0.5),
+        })
+    }
+
+    /// Read a cursor track from a manifest list.
+    #[must_use]
+    pub fn list_from_json(value: Option<&Value>) -> Vec<Self> {
+        value
+            .and_then(Value::as_array)
+            .map(|rows| rows.iter().filter_map(Self::from_json).collect())
+            .unwrap_or_default()
+    }
+
+    /// Serialize the sample back to a manifest object.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Object(BTreeMap::from([
+            ("t".to_owned(), Value::Number(self.t)),
+            ("x".to_owned(), Value::Number(self.x)),
+            ("y".to_owned(), Value::Number(self.y)),
+        ]))
+    }
+}
+
+/// The retained source intervals after removing the cuts.
+// Ported from omnishot/studio.py (kept_segments)
+#[must_use]
+pub fn kept_segments(start: f64, end: f64, cuts: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut sorted: Vec<(f64, f64)> = cuts.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut segments = Vec::new();
+    let mut cursor = start;
+    for (a, b) in sorted {
+        if b <= cursor || a >= end {
+            continue;
+        }
+        if a > cursor {
+            segments.push((cursor, a.min(end)));
+        }
+        cursor = cursor.max(b);
+    }
+    if cursor < end {
+        segments.push((cursor, end));
+    }
+    segments
+}
+
+/// The number of output frames for each retained segment at `fps`/`speed`.
+// Ported from omnishot/studio.py (export_studio segment counts)
+#[must_use]
+pub fn segment_frame_counts(
+    segments: &[(f64, f64)],
+    fps: f64,
+    speed: f64,
+) -> Vec<(f64, f64, usize)> {
+    segments
+        .iter()
+        .map(|(a, b)| {
+            let seconds = (b - a) * fps / speed;
+            (*a, *b, if seconds <= 0.0 { 0 } else { seconds as usize })
+        })
+        .collect()
+}
+
+/// Smooth the recorded cursor track.
+// Ported from omnishot/studio.py (smooth_cursor)
+#[must_use]
+pub fn smooth_cursor(samples: &[CursorSample], strength: f64) -> Vec<CursorSample> {
+    let Some(first) = samples.first() else {
+        return Vec::new();
+    };
+    let mut out = vec![*first];
+    for sample in &samples[1..] {
+        let previous = *out.last().unwrap();
+        let dt = (sample.t - previous.t).max(0.001);
+        let alpha = 1.0 - (-dt / (strength * 0.12).max(0.005)).exp();
+        out.push(CursorSample {
+            t: sample.t,
+            x: previous.x + alpha * (sample.x - previous.x),
+            y: previous.y + alpha * (sample.y - previous.y),
+        });
+    }
+    out
+}
+
+/// The interpolated cursor at `t`, or `None` when the track is empty.
+// Ported from omnishot/studio.py (cursor_at)
+#[must_use]
+pub fn cursor_at(samples: &[CursorSample], t: f64) -> Option<CursorSample> {
+    let first = samples.first()?;
+    let index = samples.partition_point(|sample| sample.t <= t);
+    if index == 0 {
+        return Some(*first);
+    }
+    if index >= samples.len() {
+        return samples.last().copied();
+    }
+    let a = samples[index - 1];
+    let b = samples[index];
+    let f = (t - a.t) / (b.t - a.t).max(0.0001);
+    Some(CursorSample {
+        t,
+        x: a.x + (b.x - a.x) * f,
+        y: a.y + (b.y - a.y) * f,
+    })
+}
+
+/// Plan zooms from the click track.
+// Ported from omnishot/studio.py (smart_zooms)
+#[must_use]
+pub fn smart_zooms(events: &[Value], duration: f64, scale: f64, limit: Option<f64>) -> Vec<Zoom> {
+    let mut result: Vec<Zoom> = Vec::new();
+    for event in events {
+        let Some(object) = event.as_object() else {
+            continue;
+        };
+        if object.get("kind").and_then(Value::as_str) != Some("click") {
+            continue;
+        }
+        if object.get("hidden").is_some_and(Value::is_truthy) {
+            continue;
+        }
+        let Some(t) = object.get("t").and_then(Value::as_f64) else {
+            continue;
+        };
+        let x = object.get("x").and_then(Value::as_f64).unwrap_or(-1.0);
+        let y = object.get("y").and_then(Value::as_f64).unwrap_or(-1.0);
+        if t < 0.0
+            || !(0.0..=1.0).contains(&x)
+            || !(0.0..=1.0).contains(&y)
+            || limit.is_some_and(|limit| t >= limit)
+        {
+            continue;
+        }
+        if let Some(last) = result.last()
+            && t < last.end - 0.3
+        {
+            continue;
+        }
+        let a = t
+            .max(0.0)
+            .max(t - 0.45)
+            .max(result.last().map_or(0.0, |last| last.end));
+        let b = limit.map_or(t + duration, |limit| (t + duration).min(limit));
+        if b <= a {
+            continue;
+        }
+        result.push(Zoom {
+            start: a,
+            end: b,
+            scale,
+            x,
+            y,
+            follow: true,
+        });
+    }
+    result
+}
+
+/// Apply the stored event edits and return the events in time order.
+// Ported from omnishot/studio.py (edited_events)
+#[must_use]
+pub fn edited_events(metadata: &Value, options: &Options) -> Vec<Value> {
+    let events: Vec<Value> = metadata
+        .get("events")
+        .and_then(Value::as_array)
+        .map(<[Value]>::to_vec)
+        .unwrap_or_default();
+    let Some(edits) = options.get("event_edits").and_then(Value::as_object) else {
+        return events;
+    };
+    if edits.is_empty() {
+        return events;
+    }
+    let mut result: Vec<Value> = events
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let mut merged = event.as_object().cloned().unwrap_or_default();
+            if let Some(edit) = edits.get(&index.to_string()).and_then(Value::as_object) {
+                for key in ["t", "label", "hidden"] {
+                    if let Some(value) = edit.get(key) {
+                        merged.insert(key.to_owned(), value.clone());
+                    }
+                }
+            }
+            Value::Object(merged)
+        })
+        .collect();
+    result.sort_by(|a, b| {
+        let ta = a.get("t").and_then(Value::as_f64).unwrap_or(0.0);
+        let tb = b.get("t").and_then(Value::as_f64).unwrap_or(0.0);
+        ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    result
+}
+
+/// Decode a base64 PNG background image.
+// Ported from omnishot/studio.py (background_image)
+#[must_use]
+pub fn background_image(data: &str) -> Option<Image> {
+    let bytes = crate::annotation::decode_base64(data)?;
+    decode_png(&bytes).ok()
+}
+
+/// The number of output frames the edit produces, or `None` when empty.
+#[must_use]
+pub fn total_frames(segments: &[(f64, f64)], fps: f64, speed: f64) -> Option<usize> {
+    let counts = segment_frame_counts(segments, fps, speed);
+    let total: usize = counts.iter().map(|(_, _, count)| count).sum();
+    (total > 0).then_some(total)
+}
+
+/// The source-time iterator for the exported frames.
+// Ported from omnishot/studio.py (export_studio times generator)
+#[must_use]
+pub fn frame_times(segments: &[(f64, f64)], fps: f64, speed: f64) -> Vec<f64> {
+    let mut times = Vec::new();
+    for (a, b, count) in segment_frame_counts(segments, fps, speed) {
+        let _ = b;
+        for index in 0..count {
+            times.push(a + index as f64 * speed / fps);
+        }
+    }
+    times
+}
+
+/// Paint a cursor at `position` with `size` onto the canvas.
+// Ported from omnishot/cursor_shape.py (paint_cursor)
+pub fn paint_cursor(
+    canvas: &mut Canvas<'_>,
+    position: Point,
+    size: f64,
+    style: &str,
+    fill: [u8; 4],
+    outline: [u8; 4],
+) {
+    match style {
+        "Dot" => {
+            let radius = crate::video_cursor::dot_radius(size);
+            let rect = Rect::new(
+                position.x - radius,
+                position.y - radius,
+                radius * 2.0,
+                radius * 2.0,
+            );
+            canvas.fill_ellipse(rect, outline);
+            canvas.fill_ellipse(
+                Rect::new(
+                    position.x - radius * 0.6,
+                    position.y - radius * 0.6,
+                    radius * 1.2,
+                    radius * 1.2,
+                ),
+                fill,
+            );
+        }
+        "Crosshair" => {
+            for (center, half_width, half_height) in
+                crate::video_cursor::crosshair_bars(position, size)
+            {
+                canvas.fill_rounded_rect(
+                    Rect::new(
+                        center.x - half_width,
+                        center.y - half_height,
+                        half_width * 2.0,
+                        half_height * 2.0,
+                    ),
+                    size * 0.06,
+                    fill,
+                );
+            }
+        }
+        _ => {
+            let points = crate::video_cursor::arrow_points(position, size);
+            canvas.fill_polygon(&points, fill);
+        }
+    }
+}
+
+/// One composed frame from the source and optional camera.
+// Ported from omnishot/studio.py (compose_frame / compose_screen / compose_scene)
+#[must_use]
+pub fn compose_frame(
+    frame: &Image,
+    t: f64,
+    metadata: &Value,
+    options: &Options,
+    camera: Option<&Image>,
+) -> Image {
+    let (canvas, zoom) = compose_screen(frame, t, metadata, options);
+    compose_scene(&canvas, metadata, options, camera, zoom)
+}
+
+/// Draw the input-layer effects (cursor and clicks) and apply the zoom crop.
+// Ported from omnishot/studio.py (compose_screen)
+#[must_use]
+pub fn compose_screen(frame: &Image, t: f64, metadata: &Value, options: &Options) -> (Image, f64) {
+    let width = frame.width;
+    let height = frame.height;
+    let mut data = frame.data.clone();
+    let cursor = cursor_at(&CursorSample::list_from_json(metadata.get("cursor")), t);
+    let events = edited_events(metadata, options);
+    {
+        let mut canvas = Canvas::new(&mut data, width, height);
+        if let Some(cursor) = cursor
+            && options.get("cursor").is_none_or(Value::is_truthy)
+            && (0.0..=1.0).contains(&cursor.x)
+            && (0.0..=1.0).contains(&cursor.y)
+        {
+            let size = options
+                .get("cursor_size")
+                .and_then(Value::as_f64)
+                .unwrap_or(28.0)
+                * if options.get("click_press").is_some_and(Value::is_truthy) {
+                    press_scale(&events, t)
+                } else {
+                    1.0
+                };
+            let style = options
+                .get("cursor_style")
+                .and_then(Value::as_str)
+                .unwrap_or("Arrow");
+            let fill = color(options.get("cursor_color"), [0x16, 0x18, 0x21, 255]);
+            let outline = color(options.get("cursor_outline"), [255, 255, 255, 255]);
+            paint_cursor(
+                &mut canvas,
+                Point::new(cursor.x * width as f64, cursor.y * height as f64),
+                size,
+                style,
+                fill,
+                outline,
+            );
+        }
+        if options.get("clicks").is_none_or(Value::is_truthy) {
+            let duration = options
+                .get("click_duration")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.5)
+                .max(0.1);
+            let base = color(options.get("click_color"), [0xff, 0x65, 0x65, 255]);
+            for event in &events {
+                let Some(object) = event.as_object() else {
+                    continue;
+                };
+                if object.get("kind").and_then(Value::as_str) != Some("click")
+                    || object.get("hidden").is_some_and(Value::is_truthy)
+                {
+                    continue;
+                }
+                let Some(instant) = object.get("t").and_then(Value::as_f64) else {
+                    continue;
+                };
+                let age = t - instant;
+                if !(0.0..duration).contains(&age) {
+                    continue;
+                }
+                let x = object.get("x").and_then(Value::as_f64).unwrap_or(0.5);
+                let y = object.get("y").and_then(Value::as_f64).unwrap_or(0.5);
+                let alpha = (base[3] as f64 * (1.0 - age / duration) * 0.8) as u8;
+                let radius = options
+                    .get("click_size")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(24.0)
+                    * (1.0 + age / duration * 0.5);
+                let ring = [base[0], base[1], base[2], alpha];
+                canvas.fill_ellipse(
+                    Rect::new(
+                        x * width as f64 - radius,
+                        y * height as f64 - radius,
+                        radius * 2.0,
+                        radius * 2.0,
+                    ),
+                    ring,
+                );
+            }
+        }
+    }
+    let cursor_value = cursor.map(|c| (c.x, c.y));
+    let zooms = Zoom::list_from_json(options.get("zooms"));
+    let animation = options
+        .get("zoom_animation")
+        .and_then(Value::as_str)
+        .unwrap_or("Smooth");
+    let (zoom, zx, zy) = zoom_at(&zooms, t, cursor_value, animation);
+    if zoom > 1.0 {
+        let canvas = Image::new(width, height, data);
+        return (zoom_crop(&canvas, zoom, zx, zy), zoom);
+    }
+    (Image::new(width, height, data), zoom)
+}
+
+/// Crop the zoomed window and scale it back to the source size.
+fn zoom_crop(frame: &Image, zoom: f64, zx: f64, zy: f64) -> Image {
+    let width = frame.width;
+    let height = frame.height;
+    let crop_width = width as f64 / zoom;
+    let crop_height = height as f64 / zoom;
+    let x = (zx * width as f64 - crop_width / 2.0).clamp(0.0, width as f64 - crop_width);
+    let y = (zy * height as f64 - crop_height / 2.0).clamp(0.0, height as f64 - crop_height);
+    let mut data = vec![0u8; width * height * 4];
+    for target_y in 0..height {
+        let source_y = y + (target_y as f64 + 0.5) * crop_height / height as f64;
+        let source_y = source_y.floor().clamp(0.0, height as f64 - 1.0) as usize;
+        for target_x in 0..width {
+            let source_x = x + (target_x as f64 + 0.5) * crop_width / width as f64;
+            let source_x = source_x.floor().clamp(0.0, width as f64 - 1.0) as usize;
+            let source = (source_y * width + source_x) * 4;
+            let target = (target_y * width + target_x) * 4;
+            data[target..target + 4].copy_from_slice(&frame.data[source..source + 4]);
+        }
+    }
+    Image::new(width, height, data)
+}
+
+/// Frame the composed canvas in its background and place the camera and keys.
+// Ported from omnishot/studio.py (compose_scene)
+#[must_use]
+pub fn compose_scene(
+    canvas: &Image,
+    metadata: &Value,
+    options: &Options,
+    camera: Option<&Image>,
+    zoom: f64,
+) -> Image {
+    let options = video_camera::options_at(metadata, options, 0.0);
+    let width = canvas.width;
+    let height = canvas.height;
+    let output_width = options
+        .get("width")
+        .and_then(Value::as_f64)
+        .unwrap_or(width as f64);
+    let output_width = if output_width <= 0.0 {
+        width as f64
+    } else {
+        output_width
+    };
+    let content_height = (height as f64 * output_width / width as f64).round();
+    let padding = options
+        .get("padding")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let mut out_width = output_width + 2.0 * padding;
+    let mut out_height = content_height + 2.0 * padding;
+    if let Some(aspect) = options.get("aspect").and_then(Value::as_str)
+        && aspect != "Original"
+        && let Some((a, b)) = aspect.split_once(':')
+        && let (Ok(a), Ok(b)) = (a.parse::<f64>(), b.parse::<f64>())
+        && a > 0.0
+        && b > 0.0
+    {
+        out_width = out_width.max((out_height * a / b).round());
+        out_height = out_height.max((out_width * b / a).round());
+    }
+    out_width += out_width % 2.0;
+    out_height += out_height % 2.0;
+    let (out_width, out_height) = (out_width.max(2.0) as usize, out_height.max(2.0) as usize);
+
+    let background = color(options.get("background"), [0x25, 0x32, 0x4b, 255]);
+    let mut data = vec![0u8; out_width * out_height * 4];
+    for pixel in data.as_chunks_mut::<4>().0 {
+        pixel.copy_from_slice(&background);
+    }
+    if let Some(second) = options.get("background2").and_then(Value::as_str) {
+        let second = color(Some(&Value::String(second.to_owned())), [0, 0, 0, 255]);
+        paint_gradient(&mut data, out_width, out_height, background, second);
+    }
+    if let Some(encoded) = options.get("background_image_data").and_then(Value::as_str)
+        && let Some(image) = background_image(encoded)
+    {
+        let mut cover = Canvas::new(&mut data, out_width, out_height);
+        cover.draw_image_cover(
+            &image.data,
+            image.width,
+            image.height,
+            Rect::new(0.0, 0.0, out_width as f64, out_height as f64),
+        );
+    }
+
+    // Scale the composed source into the content rectangle.
+    let scaled = scale_to(canvas, output_width as usize, content_height as usize);
+    let align = options
+        .get("align")
+        .and_then(Value::as_str)
+        .unwrap_or("Center");
+    let x = if align.contains("Left") {
+        padding
+    } else if align.contains("Right") {
+        out_width as f64 - output_width - padding
+    } else {
+        (out_width as f64 - output_width) / 2.0
+    };
+    let y = if align.contains("Top") {
+        padding
+    } else if align.contains("Bottom") {
+        out_height as f64 - content_height - padding
+    } else {
+        (out_height as f64 - content_height) / 2.0
+    };
+    {
+        let mut target = Canvas::new(&mut data, out_width, out_height);
+        let radius = if padding > 0.0 {
+            options
+                .get("radius")
+                .and_then(Value::as_f64)
+                .unwrap_or(12.0)
+        } else {
+            0.0
+        };
+        if radius > 0.0 {
+            let mask = crate::raster::rounded_mask(
+                out_width,
+                out_height,
+                Rect::new(x, y, output_width, content_height),
+                radius,
+                2.0,
+            );
+            blend_masked(
+                &mut target,
+                &scaled,
+                x as i64,
+                y as i64,
+                output_width as usize,
+                content_height as usize,
+                &mask,
+            );
+        } else {
+            target.draw_image(
+                &scaled.data,
+                scaled.width,
+                scaled.height,
+                x as i64,
+                y as i64,
+            );
+        }
+    }
+
+    if let Some(camera) = camera
+        && options.get("camera").is_none_or(Value::is_truthy)
+    {
+        let aspect = camera.width as f64 / camera.height.max(1) as f64;
+        let rect = camera_rect(out_width as f64, out_height as f64, aspect, &options, zoom);
+        let shape = options
+            .get("camera_shape")
+            .and_then(Value::as_str)
+            .unwrap_or("Circle");
+        let fullscreen = options
+            .get("camera_fullscreen")
+            .is_some_and(Value::is_truthy);
+        let fitted = cover_fit(camera, rect);
+        let mut target = Canvas::new(&mut data, out_width, out_height);
+        let mask = if shape == "Circle" && !fullscreen {
+            ellipse_mask(out_width, out_height, rect)
+        } else {
+            let radius = if matches!(shape, "Rounded" | "Square") && !fullscreen {
+                options
+                    .get("camera_radius")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(18.0)
+            } else {
+                0.0
+            };
+            crate::raster::rounded_mask(out_width, out_height, rect, radius, 2.0)
+        };
+        blend_masked(
+            &mut target,
+            &fitted,
+            rect.x as i64,
+            rect.y as i64,
+            rect.width.max(1.0) as usize,
+            rect.height.max(1.0) as usize,
+            &mask,
+        );
+    }
+
+    if options.get("keys").is_none_or(Value::is_truthy) {
+        let keys = visible_keys(&edited_events(metadata, &options), 0.0, &options, metadata);
+        if !keys.is_empty() {
+            let (chip_background, _) = key_colors(&options);
+            let chip = color(
+                Some(&Value::String(chip_background)),
+                [0xd7, 0x14, 0x17, 0x20],
+            );
+            let label = keys[keys.len().saturating_sub(5)..].join("  ");
+            let font_size = options
+                .get("key_size")
+                .and_then(Value::as_f64)
+                .unwrap_or(20.0);
+            let chip_width = (label.chars().count() as f64 * font_size * 0.6 + 36.0)
+                .min(out_width as f64 - 40.0)
+                .max(1.0);
+            let chip_height = font_size + 20.0;
+            let position = options
+                .get("key_position")
+                .and_then(Value::as_str)
+                .unwrap_or("Bottom Center");
+            let cx = if position.contains("Left") {
+                20.0
+            } else if position.contains("Right") {
+                out_width as f64 - chip_width - 20.0
+            } else {
+                (out_width as f64 - chip_width) / 2.0
+            };
+            let cy = if position.contains("Top") {
+                24.0
+            } else if position.contains("Bottom") {
+                out_height as f64 - chip_height - 24.0
+            } else {
+                (out_height as f64 - chip_height) / 2.0
+            };
+            let mut target = Canvas::new(&mut data, out_width, out_height);
+            target.fill_rounded_rect(Rect::new(cx, cy, chip_width, chip_height), 12.0, chip);
+        }
+    }
+
+    Image::new(out_width, out_height, data)
+}
+
+/// Compose a frame with motion blur, when the options ask for it.
+// Ported from omnishot/motion_blur.py (compose_motion)
+#[must_use]
+pub fn compose_motion(frame: &Image, t: f64, metadata: &Value, options: &Options) -> Image {
+    let times = crate::motion_blur::shutter_times(t, options);
+    if times.len() == 1 || blur_level(options) == 0 {
+        return compose_frame(frame, t, metadata, options, None);
+    }
+    let mut accumulation = vec![0u32; frame.width * frame.height * 4];
+    for seconds in &times {
+        let rendered = compose_frame(frame, *seconds, metadata, options, None);
+        for (target, source) in accumulation.iter_mut().zip(rendered.data.iter()) {
+            *target += u32::from(*source);
+        }
+    }
+    let count = times.len() as u32;
+    let data: Vec<u8> = accumulation
+        .into_iter()
+        .map(|value| ((value + count / 2) / count).min(255) as u8)
+        .collect();
+    Image::new(frame.width, frame.height, data)
+}
+
+/// Build the `ffmpeg` encoder arguments for an export.
+///
+/// Software x264 is the default; hardware encoding is opt-in and uses VAAPI
+/// only when the caller asks and supplies a render device.
+// Ported from omnishot/studio.py (export_studio encoder selection)
+#[must_use]
+pub fn encoder_arguments(options: &Options, width: usize, height: usize, fps: f64) -> Vec<String> {
+    let mut args = vec![
+        "-f".to_owned(),
+        "rawvideo".to_owned(),
+        "-pixel_format".to_owned(),
+        "rgb24".to_owned(),
+        "-video_size".to_owned(),
+        format!("{width}x{height}"),
+        "-framerate".to_owned(),
+        format!("{fps}"),
+        "-i".to_owned(),
+        "pipe:0".to_owned(),
+    ];
+    if options.get("hardware").is_some_and(Value::is_truthy) {
+        let device = options
+            .get("render_device")
+            .and_then(Value::as_str)
+            .unwrap_or("/dev/dri/renderD128");
+        args.splice(5..5, ["-vaapi_device".to_owned(), device.to_owned()]);
+        args.extend([
+            "-vf".to_owned(),
+            "format=nv12,hwupload".to_owned(),
+            "-c:v".to_owned(),
+            "h264_vaapi".to_owned(),
+            "-qp".to_owned(),
+            "22".to_owned(),
+        ]);
+    } else {
+        args.extend([
+            "-c:v".to_owned(),
+            "libx264".to_owned(),
+            "-crf".to_owned(),
+            "20".to_owned(),
+            "-preset".to_owned(),
+            "fast".to_owned(),
+            "-pix_fmt".to_owned(),
+            "yuv420p".to_owned(),
+        ]);
+    }
+    args.push("-movflags".to_owned());
+    args.push("+faststart".to_owned());
+    args
+}
+
+/// Export an edited recording through the ffmpeg CLI.
+///
+/// `decoder` and `encoder` are the runner and command builder; tests pass a
+/// runner that records the invocation. The source is decoded with `ffmpeg`,
+/// each output frame is composited, and the result is piped into the encoder.
+pub struct ExportRequest<'a> {
+    pub source: &'a Path,
+    pub destination: &'a Path,
+    pub metadata: &'a Value,
+    pub options: &'a Options,
+    pub fps: f64,
+    pub speed: f64,
+    pub start: f64,
+    pub end: f64,
+    pub cuts: &'a [(f64, f64)],
+}
+
+/// Resolve the export's frame size, or `None` when there is no frame.
+#[must_use]
+pub fn export_plan(request: &ExportRequest<'_>) -> Option<ExportPlan> {
+    let segments = kept_segments(request.start, request.end, request.cuts);
+    let total = total_frames(&segments, request.fps, request.speed)?;
+    let times = frame_times(&segments, request.fps, request.speed);
+    Some(ExportPlan {
+        segments,
+        times,
+        total,
+    })
+}
+
+/// A resolved export: retained intervals, frame times and total count.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportPlan {
+    pub segments: Vec<(f64, f64)>,
+    pub times: Vec<f64>,
+    pub total: usize,
+}
+
+/// The partial path a failed export cleans up.
+#[must_use]
+pub fn partial_path(destination: &Path) -> PathBuf {
+    let stem = destination
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("export");
+    let suffix = destination
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mp4");
+    destination.with_file_name(format!("{stem}.partial.{suffix}"))
+}
+
+/// Run the export, returning the destination on success.
+///
+/// The source is probed with `ffprobe` for its frame rate and size, decoded
+/// with `ffmpeg`, composited, and encoded with [`encoder_arguments`]. A failing
+/// command surfaces its stderr; the partial file is removed.
+pub fn export_studio<R: CommandRunner>(
+    runner: &R,
+    request: &ExportRequest<'_>,
+) -> Result<(), String> {
+    let plan = export_plan(request).ok_or_else(|| "The edit contains no frames".to_owned())?;
+    let probe = runner
+        .run(
+            &CommandSpec::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height,avg_frame_rate",
+                    "-of",
+                    "json",
+                ])
+                .arg(request.source.to_string_lossy().into_owned())
+                .timeout(std::time::Duration::from_secs(15)),
+        )
+        .map_err(|error| error.to_string())?;
+    let probe = crate::json::parse(&probe.stdout_string())
+        .map_err(|_| "Could not read the source recording".to_owned())?;
+    let stream = probe
+        .get("streams")
+        .and_then(Value::as_array)
+        .and_then(|streams| streams.first())
+        .ok_or_else(|| "Cannot open source recording".to_owned())?;
+    let width = stream.get("width").and_then(Value::as_f64).unwrap_or(0.0) as usize;
+    let height = stream.get("height").and_then(Value::as_f64).unwrap_or(0.0) as usize;
+    if width == 0 || height == 0 {
+        return Err("Cannot open source recording".to_owned());
+    }
+
+    let mut args: Vec<String> = vec![
+        "-hide_banner".to_owned(),
+        "-loglevel".to_owned(),
+        "error".to_owned(),
+        "-y".to_owned(),
+    ];
+    if request.start > 0.0 {
+        args.push("-ss".to_owned());
+        args.push(request.start.to_string());
+    }
+    args.push("-i".to_owned());
+    let source = request.source.to_string_lossy().into_owned();
+    args.push(source.clone());
+    args.extend([
+        "-f".to_owned(),
+        "rawvideo".to_owned(),
+        "-pix_fmt".to_owned(),
+        "rgb24".to_owned(),
+        "-".to_owned(),
+    ]);
+    let decode = runner
+        .run(
+            &CommandSpec::new("ffmpeg")
+                .args(args)
+                .timeout(std::time::Duration::from_secs(30)),
+        )
+        .map_err(|error| error.to_string())?;
+    if decode.stdout.len() < width * height * 3 {
+        return Err("Could not decode recording".to_owned());
+    }
+
+    let metadata = request.metadata;
+    let options = request.options;
+    let per_frame = width * height * 3;
+    let mut raw = Vec::with_capacity(plan.times.len() * per_frame);
+    for time in &plan.times {
+        let index = ((time - request.start).max(0.0) * request.fps) as usize;
+        let offset = index * per_frame;
+        let Some(bytes) = decode.stdout.get(offset..offset + per_frame) else {
+            return Err("Could not decode recording".to_owned());
+        };
+        let image = rgb_to_image(bytes, width, height);
+        let composed = compose_frame(&image, *time, metadata, options, None);
+        raw.extend(pixels_to_rgb(&composed));
+    }
+
+    let mut command = CommandSpec::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(encoder_arguments(options, width, height, request.fps));
+    let partial = partial_path(request.destination);
+    command = command.arg(partial.to_string_lossy().into_owned());
+    command = command.stdin(raw);
+    command.timeout = Some(std::time::Duration::from_secs(3600));
+    let result = runner.run(&command);
+    match result {
+        Ok(_) => std::fs::rename(&partial, request.destination).map_err(|error| error.to_string()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&partial);
+            Err(error.to_string())
+        }
+    }
+}
+
+fn rgb_to_image(bytes: &[u8], width: usize, height: usize) -> Image {
+    let mut data = vec![255u8; width * height * 4];
+    for (pixel, rgb) in data
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(bytes.as_chunks::<3>().0)
+    {
+        pixel[0] = rgb[0];
+        pixel[1] = rgb[1];
+        pixel[2] = rgb[2];
+    }
+    Image::new(width, height, data)
+}
+
+fn pixels_to_rgb(image: &Image) -> Vec<u8> {
+    let mut out = Vec::with_capacity(image.width * image.height * 3);
+    for pixel in image.data.as_chunks::<4>().0 {
+        out.extend_from_slice(&pixel[..3]);
+    }
+    out
+}
+
+fn color(value: Option<&Value>, fallback: [u8; 4]) -> [u8; 4] {
+    value
+        .and_then(Value::as_str)
+        .and_then(crate::color::Rgba::from_hex)
+        .map(|rgba| [rgba.red, rgba.green, rgba.blue, rgba.alpha])
+        .unwrap_or(fallback)
+}
+
+fn paint_gradient(data: &mut [u8], width: usize, height: usize, first: [u8; 4], second: [u8; 4]) {
+    let denominator = (width + height).max(1) as f64;
+    for y in 0..height {
+        for x in 0..width {
+            let t = (x + y) as f64 / denominator;
+            let offset = (y * width + x) * 4;
+            for channel in 0..4 {
+                let value = f64::from(first[channel])
+                    + (f64::from(second[channel]) - f64::from(first[channel])) * t;
+                data[offset + channel] = value.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+fn scale_to(image: &Image, width: usize, height: usize) -> Image {
+    if width == 0 || height == 0 {
+        return Image::transparent(width.max(1), height.max(1));
+    }
+    let mut data = vec![0u8; width * height * 4];
+    let x_ratio = image.width as f64 / width as f64;
+    let y_ratio = image.height as f64 / height as f64;
+    for y in 0..height {
+        let source_y = ((y as f64 + 0.5) * y_ratio)
+            .floor()
+            .clamp(0.0, image.height.saturating_sub(1) as f64) as usize;
+        for x in 0..width {
+            let source_x = ((x as f64 + 0.5) * x_ratio)
+                .floor()
+                .clamp(0.0, image.width.saturating_sub(1) as f64)
+                as usize;
+            let source = (source_y * image.width + source_x) * 4;
+            let target = (y * width + x) * 4;
+            data[target..target + 4].copy_from_slice(&image.data[source..source + 4]);
+        }
+    }
+    Image::new(width, height, data)
+}
+
+/// Crop `source` to the aspect of `dest`, then scale it to `dest`'s size.
+fn cover_fit(source: &Image, dest: Rect) -> Image {
+    let width = dest.width.max(1.0) as usize;
+    let height = dest.height.max(1.0) as usize;
+    scale_to(source, width, height)
+}
+
+fn blend_masked(
+    target: &mut Canvas<'_>,
+    source: &Image,
+    dx: i64,
+    dy: i64,
+    width: usize,
+    height: usize,
+    mask: &[u8],
+) {
+    let canvas_width = target.width() as i64;
+    let canvas_height = target.height() as i64;
+    for row in 0..height {
+        let y = dy + row as i64;
+        if y < 0 || y >= canvas_height {
+            continue;
+        }
+        for column in 0..width {
+            let x = dx + column as i64;
+            if x < 0 || x >= canvas_width {
+                continue;
+            }
+            if mask[y as usize * target.width() + x as usize] == 0 {
+                continue;
+            }
+            if column >= source.width || row >= source.height {
+                continue;
+            }
+            let offset = (row * source.width + column) * 4;
+            target.blend(
+                x as usize,
+                y as usize,
+                [
+                    source.data[offset],
+                    source.data[offset + 1],
+                    source.data[offset + 2],
+                    source.data[offset + 3],
+                ],
+            );
+        }
+    }
+}
+
+fn ellipse_mask(width: usize, height: usize, rect: Rect) -> Vec<u8> {
+    let mut mask = vec![0u8; width * height];
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return mask;
+    }
+    let cx = rect.center().x;
+    let cy = rect.center().y;
+    let rx = rect.width / 2.0;
+    let ry = rect.height / 2.0;
+    for y in 0..height {
+        let dy = (y as f64 + 0.5 - cy) / ry;
+        if dy.abs() > 1.0 {
+            continue;
+        }
+        let span = (1.0 - dy * dy).sqrt() * rx;
+        let x0 = ((cx - span).floor().max(0.0) as usize).min(width);
+        let x1 = ((cx + span).ceil().max(0.0) as usize).min(width);
+        mask[y * width + x0..y * width + x1].fill(255);
+    }
+    mask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(entries: &[(&str, Value)]) -> Options {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect()
+    }
+
+    fn click(t: f64, x: f64, y: f64) -> Value {
+        Value::Object(BTreeMap::from([
+            ("kind".to_owned(), Value::String("click".to_owned())),
+            ("t".to_owned(), Value::Number(t)),
+            ("x".to_owned(), Value::Number(x)),
+            ("y".to_owned(), Value::Number(y)),
+        ]))
+    }
+
+    #[test]
+    fn kept_segments_clip_and_union_cuts() {
+        assert_eq!(
+            kept_segments(0.0, 10.0, &[(2.0, 4.0), (3.0, 5.0), (8.0, 12.0)]),
+            vec![(0.0, 2.0), (5.0, 8.0)]
+        );
+        assert_eq!(kept_segments(0.0, 10.0, &[]), vec![(0.0, 10.0)]);
+    }
+
+    #[test]
+    fn frame_times_walk_each_retained_segment_at_the_output_rate() {
+        let segments = [(0.0, 1.0)];
+        let times = frame_times(&segments, 10.0, 1.0);
+        assert_eq!(times.len(), 10);
+        assert!((times[0] - 0.0).abs() < 1e-9);
+        assert!((times[9] - 0.9).abs() < 1e-9);
+        // Doubling the speed halves the frame count.
+        assert_eq!(frame_times(&segments, 10.0, 2.0).len(), 5);
+        assert_eq!(total_frames(&[(0.0, 1.0)], 10.0, 1.0), Some(10));
+        assert_eq!(total_frames(&[], 10.0, 1.0), None);
+    }
+
+    #[test]
+    fn cursor_smoothing_pulls_toward_the_recorded_path() {
+        let samples = vec![
+            CursorSample {
+                t: 0.0,
+                x: 0.2,
+                y: 0.2,
+            },
+            CursorSample {
+                t: 0.05,
+                x: 0.8,
+                y: 0.8,
+            },
+        ];
+        let smoothed = smooth_cursor(&samples, 0.75);
+        assert!(smoothed[1].x > 0.2 && smoothed[1].x < 0.8);
+        let at = cursor_at(&samples, 0.025).unwrap();
+        assert!((at.x - 0.5).abs() < 1e-9);
+        assert!(cursor_at(&[], 0.0).is_none());
+    }
+
+    #[test]
+    fn smart_zooms_respect_limit_spacing_and_invalid_positions() {
+        let events = vec![
+            click(1.0, 0.3, 0.4),
+            click(3.8, 0.8, 0.5),
+            click(3.9, 2.0, 0.5),
+        ];
+        let zooms = smart_zooms(&events, 2.8, 1.8, Some(4.0));
+        assert_eq!(zooms.len(), 2);
+        assert!(zooms.iter().all(|z| z.end <= 4.0));
+        assert!(zooms[0].follow);
+        // The click outside 0..1 is skipped.
+        assert_eq!(
+            smart_zooms(&[click(1.0, 2.0, 0.5)], 2.8, 1.8, None).len(),
+            0
+        );
+    }
+
+    #[test]
+    fn edited_events_apply_edits_then_sort() {
+        let metadata = Value::Object(BTreeMap::from([(
+            "events".to_owned(),
+            Value::Array(vec![click(1.0, 0.1, 0.1), click(2.0, 0.2, 0.2)]),
+        )]));
+        let options = options(&[(
+            "event_edits",
+            Value::Object(BTreeMap::from([(
+                "0".to_owned(),
+                Value::Object(BTreeMap::from([("t".to_owned(), Value::Number(3.0))])),
+            )])),
+        )]);
+        let edited = edited_events(&metadata, &options);
+        assert!((edited[1].get("t").and_then(Value::as_f64).unwrap() - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn encoder_defaults_to_software_x264_and_hardware_is_opt_in() {
+        let software = encoder_arguments(&Options::new(), 320, 180, 30.0);
+        assert!(software.contains(&"libx264".to_owned()));
+        assert!(!software.contains(&"h264_vaapi".to_owned()));
+        assert!(software.windows(2).any(|w| w == ["-video_size", "320x180"]));
+        let hardware =
+            encoder_arguments(&options(&[("hardware", Value::Bool(true))]), 320, 180, 30.0);
+        assert!(hardware.contains(&"h264_vaapi".to_owned()));
+        assert!(hardware.contains(&"/dev/dri/renderD128".to_owned()));
+    }
+
+    #[test]
+    fn export_plan_reports_the_retained_frames() {
+        let request = ExportRequest {
+            source: Path::new("/tmp/source.mp4"),
+            destination: Path::new("/tmp/export.mp4"),
+            metadata: &Value::Null,
+            options: &Options::new(),
+            fps: 10.0,
+            speed: 1.0,
+            start: 0.0,
+            end: 1.0,
+            cuts: &[(0.4, 0.6)],
+        };
+        let plan = export_plan(&request).unwrap();
+        assert_eq!(plan.segments, vec![(0.0, 0.4), (0.6, 1.0)]);
+        assert_eq!(plan.total, 8);
+        assert_eq!(
+            partial_path(request.destination),
+            PathBuf::from("/tmp/export.partial.mp4")
+        );
+    }
+
+    #[test]
+    fn composition_frames_a_cover_background_and_keeps_the_centre() {
+        let mut frame = Image::new(20, 10, vec![0u8; 20 * 10 * 4]);
+        for pixel in frame.data.as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[10, 20, 30, 255]);
+        }
+        let metadata = Value::Object(BTreeMap::new());
+        let options = options(&[
+            ("padding", Value::Number(4.0)),
+            ("width", Value::Number(20.0)),
+            ("aspect", Value::String("1:1".to_owned())),
+            ("background", Value::String("#25304f".to_owned())),
+            ("cursor", Value::Bool(false)),
+            ("clicks", Value::Bool(false)),
+            ("keys", Value::Bool(false)),
+        ]);
+        let result = compose_frame(&frame, 0.0, &metadata, &options, None);
+        assert_eq!(result.width, result.height);
+        assert_eq!(result.pixel(1, 1), [0x25, 0x30, 0x4f, 255]);
+    }
+
+    #[test]
+    fn motion_blur_averages_available_shutter_samples() {
+        let mut frame = Image::new(8, 8, vec![0u8; 8 * 8 * 4]);
+        for pixel in frame.data.as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[200, 200, 200, 255]);
+        }
+        let metadata = Value::Object(BTreeMap::new());
+        let options = options(&[
+            ("motion_blur", Value::Number(3.0)),
+            ("fps", Value::Number(10.0)),
+            ("cursor", Value::Bool(false)),
+            ("clicks", Value::Bool(false)),
+            ("keys", Value::Bool(false)),
+        ]);
+        let blurred = compose_motion(&frame, 0.6, &metadata, &options);
+        assert_eq!((blurred.width, blurred.height), (8, 8));
+    }
+}
