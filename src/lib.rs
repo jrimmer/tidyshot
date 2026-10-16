@@ -20,6 +20,7 @@ pub mod media_import;
 pub mod menu;
 pub mod mirror;
 pub mod motion_blur;
+pub mod pngzip;
 pub mod recording;
 pub mod scroll;
 pub mod stitch;

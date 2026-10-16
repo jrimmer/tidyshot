@@ -323,10 +323,19 @@ fn inflate_block(
 /// Wrap `data` in a zlib stream using stored DEFLATE blocks.
 #[must_use]
 pub fn zlib_store(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + data.len() / 65_535 * 5 + 16);
+    let mut out = Vec::with_capacity(deflate_store_len(data) + 6);
     // 0x78 0x01: deflate, 32 KiB window, no preset dictionary, fastest level.
     out.push(0x78);
     out.push(0x01);
+    out.extend_from_slice(&deflate_store(data));
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    out
+}
+
+/// Encode `data` as a raw DEFLATE stream of stored blocks, as ZIP entries use.
+#[must_use]
+pub fn deflate_store(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(deflate_store_len(data));
     let mut offset = 0;
     loop {
         let remaining = data.len() - offset;
@@ -342,8 +351,12 @@ pub fn zlib_store(data: &[u8]) -> Vec<u8> {
             break;
         }
     }
-    out.extend_from_slice(&adler32(data).to_be_bytes());
     out
+}
+
+fn deflate_store_len(data: &[u8]) -> usize {
+    let blocks = data.len().div_ceil(65_535).max(1);
+    data.len() + blocks * 5
 }
 
 /// Inflate a zlib-framed stream and verify its Adler-32 trailer.
