@@ -60,13 +60,16 @@ ApplicationWindow {
     }
 
     // Recognized-text review. TextOutput is a singleton, so it is referenced
-    // by id rather than instantiated. When the command line opened the app for
-    // a file, run the completion path so the dialog can present its links.
+    // by id rather than instantiated. When the command line asked for OCR, run
+    // the completion path: a file goes straight to recognition, while a bare
+    // `tidyshot ocr` or `capture-text` URL first runs the interactive capture.
     TextResultDialog {
         id: textResultDialog
         Component.onCompleted: {
             if (Args.ocrPath !== "")
                 TextOutput.recognize(Args.ocrPath, Args.linebreaks)
+            else if (Args.captureOcr)
+                TextOutput.captureAndRecognize(Args.linebreaks)
         }
     }
 }

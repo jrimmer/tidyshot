@@ -85,6 +85,7 @@ pub const RUNTIME_COMMANDS: &[(&str, &str)] = &[
     ("ffmpeg", "ffmpeg"),
     ("ffprobe", "ffmpeg"),
     ("tesseract", "tesseract"),
+    ("zbarimg", "zbar"),
     ("gpu-screen-recorder", "gpu-screen-recorder"),
     ("parec", "libpulse"),
     ("notify-send", "libnotify"),

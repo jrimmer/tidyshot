@@ -28,6 +28,7 @@ pub mod qobject {
         #[qproperty(QString, label)]
         #[qproperty(QString, ocr_path, cxx_name = "ocrPath")]
         #[qproperty(i32, linebreaks)]
+        #[qproperty(bool, capture_ocr, cxx_name = "captureOcr")]
         type Args = super::ArgsRust;
     }
 }
@@ -57,6 +58,8 @@ impl qobject::Counter {
 struct Startup {
     /// A file for the recognized-text dialog to run OCR over, when any.
     ocr_path: Option<String>,
+    /// Whether `ocr` was asked for with no file, so a selection runs first.
+    capture_ocr: bool,
     /// The `ocr-lines` / `ocr-single-line` override: -1 unset, 0 false, 1 true.
     linebreaks: i32,
 }
@@ -65,11 +68,14 @@ static STARTUP: OnceLock<Startup> = OnceLock::new();
 
 /// Record the command-line OCR request before QML loads.
 ///
-/// The `Args` singleton reads this when it is first touched, so QML can start
-/// the recognized-text completion for a file or `capture-text` URL.
+/// The `Args` singleton reads this when it is first touched, so QML can run a
+/// capture first or start the recognized-text completion for a file or
+/// `capture-text` URL.
 pub fn set_startup_ocr(path: Option<String>, linebreaks: Option<bool>) {
+    let capture_ocr = path.is_none();
     let _ = STARTUP.set(Startup {
         ocr_path: path,
+        capture_ocr,
         linebreaks: match linebreaks {
             None => -1,
             Some(false) => 0,
@@ -86,6 +92,7 @@ pub struct ArgsRust {
     label: QString,
     ocr_path: QString,
     linebreaks: i32,
+    capture_ocr: bool,
 }
 
 impl Default for ArgsRust {
@@ -95,6 +102,7 @@ impl Default for ArgsRust {
             label: QString::from("tidyshot"),
             ocr_path: QString::from(startup.ocr_path.clone().unwrap_or_default()),
             linebreaks: startup.linebreaks,
+            capture_ocr: startup.capture_ocr,
         }
     }
 }

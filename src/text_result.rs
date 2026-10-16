@@ -655,6 +655,96 @@ pub fn recognize<R: CommandRunner, Q: QrReader>(
     Ok(present(runner, &value, settings, false))
 }
 
+/// Extract an image's text and present it, capturing first when `path` is empty.
+///
+/// This is the worker body behind the QML completion path: a saved file goes
+/// straight to [`recognize`], while the no-argument `tidyshot ocr` selects a
+/// region, grabs it, and recognizes that frame, matching the source's
+/// capture-then-OCR flow.
+// Ported from omnishot/app.py (recognize_text)
+fn run_recognize(path: &Path, linebreaks: i32) -> Result<Presentation, TextError> {
+    let runner = crate::commands::SystemRunner;
+    let qr = CommandQrReader::new(runner, "zbarimg");
+    let settings = crate::settings::ocr_settings();
+    let override_linebreaks = match linebreaks {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    recognize(&runner, &qr, path, &settings, override_linebreaks)
+}
+
+/// Select a region, capture it to a temporary PNG, then recognize its text.
+fn capture_then_recognize(linebreaks: i32) -> Result<Presentation, TextError> {
+    let png = capture_selection()?;
+    let temporary = std::env::temp_dir().join(format!(
+        "tidyshot-ocr-{}-{}.png",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::write(&temporary, &png).map_err(|error| TextError {
+        message: error.to_string(),
+    })?;
+    let outcome = run_recognize(&temporary, linebreaks);
+    let _ = std::fs::remove_file(&temporary);
+    outcome
+}
+
+/// Run the interactive selector and grab the chosen region.
+///
+/// `ocr` with no file uses the same interactive selection as the area command;
+/// a dismissed selector is reported rather than swallowed.
+fn capture_selection() -> Result<Vec<u8>, TextError> {
+    use crate::capture_session::{
+        CaptureMode, CaptureOptions, CaptureOutcome, CaptureRequest, CaptureSession, run_capture,
+    };
+    let runner = crate::commands::SystemRunner;
+    let registry = crate::mirror::MirrorRegistry::global();
+    let monitor_spec = crate::commands::CommandSpec::new("hyprctl").args(["-j", "monitors"]);
+    let monitors = runner
+        .run(&monitor_spec)
+        .ok()
+        .and_then(|output| crate::json::parse(&output.stdout_string()).ok())
+        .and_then(|value| value.as_array().map(<[_]>::to_vec))
+        .unwrap_or_default();
+    let session = CaptureSession {
+        runner: &runner,
+        mirror: registry,
+        native: crate::recording::native_dir(),
+    };
+    let error = |detail: String| TextError { message: detail };
+    session
+        .capture_ready(&monitors)
+        .map_err(|error| TextError {
+            message: error.to_string(),
+        })?;
+    let request =
+        CaptureRequest::resolve(CaptureMode::Ocr.command(), None, None, 0).map_err(|error| {
+            TextError {
+                message: error.to_string(),
+            }
+        })?;
+    match run_capture(
+        &session,
+        &monitors,
+        &request,
+        CaptureOptions {
+            cursor: false,
+            freeze: false,
+        },
+        |_| {},
+        || false,
+    ) {
+        Ok(CaptureOutcome::Grabbed(frame)) => Ok(frame.png),
+        Ok(_) => Err(error("No region was captured".to_owned())),
+        Err(capture_error) => Err(TextError {
+            message: capture_error.to_string(),
+        }),
+    }
+}
+
 // --- QML bridge: the recognized-text dialog ------------------------------
 
 #[cxx_qt::bridge]
@@ -696,6 +786,15 @@ pub mod qobject {
         #[cxx_name = "recognize"]
         fn recognize_path(self: Pin<&mut Self>, path: &QString, linebreaks: i32);
 
+        /// Select a region, capture it, then recognize its text.
+        ///
+        /// This is the no-path `tidyshot ocr` / `capture-text` flow: the
+        /// interactive selector runs first and its frame feeds the same
+        /// completion path as a file.
+        #[qinvokable]
+        #[cxx_name = "captureAndRecognize"]
+        fn capture_and_recognize(self: Pin<&mut Self>, linebreaks: i32);
+
         /// Close the review dialog and hide it.
         #[qinvokable]
         fn dismiss(self: Pin<&mut Self>);
@@ -709,6 +808,8 @@ pub mod qobject {
         #[cxx_name = "linkUrl"]
         fn link_url(self: Pin<&mut Self>, row: i32) -> QString;
     }
+
+    impl cxx_qt::Threading for TextOutput {}
 }
 
 use core::pin::Pin;
@@ -767,30 +868,60 @@ impl qobject::TextOutput {
     /// This is the completion end of `tidyshot ocr <path>` and the
     /// `capture-text` URL: extraction copies an ordinary result and opens
     /// this dialog only when there are links to act on or an error to show.
-    pub fn recognize_path(mut self: Pin<&mut Self>, path: &QString, linebreaks: i32) {
+    ///
+    /// The pipeline shells out to tesseract and the QR reader, so it runs on a
+    /// worker thread and delivers its outcome back to the Qt thread; running
+    /// it here would freeze the window for the length of both OCR passes.
+    pub fn recognize_path(self: Pin<&mut Self>, path: &QString, linebreaks: i32) {
+        use cxx_qt::Threading as _;
         let path = path.to_string();
-        let runner = crate::commands::SystemRunner;
-        let qr = CommandQrReader::new(runner, "zbarimg");
-        let settings = TextSettings::default();
-        let override_linebreaks = match linebreaks {
-            0 => Some(false),
-            1 => Some(true),
-            _ => None,
-        };
-        let outcome = recognize(
-            &runner,
-            &qr,
-            Path::new(&path),
-            &settings,
-            override_linebreaks,
-        );
-        let completion = complete(outcome);
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let outcome = run_recognize(Path::new(&path), linebreaks);
+            let completion = complete(outcome);
+            let _ = qt_thread.queue(move |mut qobject| {
+                qobject.as_mut().apply_completion(completion);
+            });
+        });
+    }
+
+    /// Select a region, grab it, then recognize the frame's text.
+    ///
+    /// Both the capture and the OCR run off the Qt thread; the outcome is
+    /// delivered through the same completion path as a file.
+    pub fn capture_and_recognize(self: Pin<&mut Self>, linebreaks: i32) {
+        use cxx_qt::Threading as _;
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let outcome = capture_then_recognize(linebreaks);
+            let completion = complete(outcome);
+            let _ = qt_thread.queue(move |mut qobject| {
+                qobject.as_mut().apply_completion(completion);
+            });
+        });
+    }
+
+    /// Apply a finished recognition to the dialog without freezing the UI.
+    fn apply_completion(mut self: Pin<&mut Self>, completion: Completion) {
         self.as_mut()
             .set_status(QString::from(completion.status.clone()));
         match completion.result {
             Some(result) => self.as_mut().apply_result(&result),
-            None => self.as_mut().set_shown(completion.shown),
+            None => {
+                // An error or an empty read must not leave the previous run's
+                // text and links under the new status.
+                self.as_mut().reset_state();
+                self.as_mut().set_shown(completion.shown);
+            }
         }
+    }
+
+    /// Clear the reviewable result while keeping the current detection mode.
+    fn reset_state(mut self: Pin<&mut Self>) {
+        self.as_mut().set_text(QString::default());
+        self.as_mut().set_copied(false);
+        self.as_mut().set_shown(false);
+        self.as_mut().project_links(&[]);
     }
 
     /// Load a presented result into the dialog and show it.

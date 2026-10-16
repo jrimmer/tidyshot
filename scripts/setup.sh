@@ -33,7 +33,7 @@ if [[ -z ${TIDYSHOT_SKIP_PACKAGES:-} ]]; then
   omarchy pkg add git rust qt6-base qt6-declarative python gcc pkgconf \
     wayland wayland-protocols \
     cairo libxkbcommon libglvnd lua54 grim slurp wl-clipboard ffmpeg \
-    tesseract tesseract-data-eng tesseract-data-osd gpu-screen-recorder libpulse \
+    tesseract tesseract-data-eng tesseract-data-osd zbar gpu-screen-recorder libpulse \
     desktop-file-utils shared-mime-info xdg-utils libnotify
 fi
 

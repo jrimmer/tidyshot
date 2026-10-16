@@ -29,7 +29,28 @@ where
             Some(doctor(&args[1..]))
         }
         Some("compat") => Some(tidyshot::compat::cli(&args[1..])),
+        Some("ocr-models") => Some(install_ocr_models()),
         _ => None,
+    }
+}
+
+/// Download the OCR language, OSD, and script models for offline recognition.
+///
+/// Upstream installs these from its settings UI; the headless entry keeps the
+/// models reachable from setup and from a terminal on the pilot.
+fn install_ocr_models() -> i32 {
+    let fetcher = tidyshot::ocr::CommandFetcher::new(tidyshot::commands::SystemRunner);
+    match tidyshot::ocr::install_models(&fetcher, &mut |done, total| {
+        println!("installing OCR models {done}/{total}");
+    }) {
+        Ok(languages) => {
+            println!("installed {languages} OCR language models");
+            0
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
     }
 }
 
