@@ -20,7 +20,7 @@ use std::time::Duration;
 use crate::commands::{CommandRunner, CommandSpec, hypr};
 use crate::geometry::Rect;
 use crate::json::Value;
-use crate::stitch::{FrameData, ScrollStitcher, StitchError};
+use crate::stitch::{FrameData, ScrollStitcher};
 
 /// The default interval between automatic grabs, matching the source setting.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(550);
@@ -611,12 +611,6 @@ impl<R: CommandRunner> ScrollCapture for SystemScrollCapture<'_, R> {
         self.mirror_enabled.set(false);
         Ok(())
     }
-}
-
-/// Render a stitch failure for the status line.
-#[must_use]
-pub fn stitch_message(error: &StitchError) -> String {
-    error.to_string()
 }
 
 #[cfg(test)]

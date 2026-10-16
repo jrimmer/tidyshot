@@ -610,12 +610,6 @@ impl ScrollStitcher {
         Some(FrameData::new(data, width, height, image.channels))
     }
 
-    /// The stitched image as a borrowed view in internal orientation.
-    #[must_use]
-    pub fn image(&self) -> Option<FrameRef<'_>> {
-        self.image.as_ref().map(FrameData::view)
-    }
-
     /// Place a frame into the internal output orientation.
     ///
     /// Horizontal captures are transposed once here, at the boundary, so the
