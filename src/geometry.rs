@@ -6,7 +6,29 @@
 //! `y + height`), matching the arithmetic the Python app performs with Qt's
 //! inclusive `QRect.right()` / `QRect.bottom()`.
 
+use std::fmt;
 use std::ops::Range;
+
+/// Why a capture geometry string could not be parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeometryError {
+    message: String,
+}
+
+impl GeometryError {
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for GeometryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for GeometryError {}
 
 /// Left, top, width and height in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +319,62 @@ pub fn geometry_text(rect: Rect) -> String {
     format!("{},{} {}x{}", rect.x, rect.y, rect.width, rect.height)
 }
 
+/// Parse the `X,Y WxH` form used by `--geometry` and slurp output.
+// Ported from omnishot/backend.py (parse_geometry)
+pub fn parse_geometry(text: &str) -> Result<Rect, GeometryError> {
+    let text = text.trim();
+    let (rest, x) = parse_signed(text).ok_or_else(invalid)?;
+    let rest = rest.strip_prefix(',').ok_or_else(invalid)?;
+    let (rest, y) = parse_signed(rest).ok_or_else(invalid)?;
+    let rest = strip_required_whitespace(rest).ok_or_else(invalid)?;
+    let (rest, width) = parse_unsigned(rest).ok_or_else(invalid)?;
+    let rest = rest.strip_prefix('x').ok_or_else(invalid)?;
+    let (rest, height) = parse_unsigned(rest).ok_or_else(invalid)?;
+    if !rest.is_empty() {
+        return Err(invalid());
+    }
+    if width < 2 || height < 2 {
+        return Err(GeometryError {
+            message: "Selection is too small".to_owned(),
+        });
+    }
+    Ok(Rect::new(x as i32, y as i32, width as i32, height as i32))
+}
+
+fn invalid() -> GeometryError {
+    GeometryError {
+        message: "Invalid capture geometry".to_owned(),
+    }
+}
+
+fn parse_signed(text: &str) -> Option<(&str, i64)> {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (rest, value) = parse_unsigned(digits)?;
+    Some((rest, if negative { -value } else { value }))
+}
+
+fn parse_unsigned(text: &str) -> Option<(&str, i64)> {
+    let end = text
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .map(|(index, c)| index + c.len_utf8())
+        .last()?;
+    let value = text[..end].parse().ok()?;
+    Some((&text[end..], value))
+}
+
+fn strip_required_whitespace(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start_matches(char::is_whitespace);
+    if trimmed.len() == text.len() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,5 +511,40 @@ mod tests {
     #[test]
     fn geometry_text_matches_grim_grammar() {
         assert_eq!(geometry_text(Rect::new(10, 20, 640, 400)), "10,20 640x400");
+    }
+
+    #[test]
+    fn geometry_parsing_round_trips_and_rejects_bad_input() {
+        assert_eq!(
+            parse_geometry(" 10,20 640x400 ").unwrap(),
+            Rect::new(10, 20, 640, 400)
+        );
+        assert_eq!(
+            parse_geometry("-1800,0\t800x500").unwrap(),
+            Rect::new(-1800, 0, 800, 500)
+        );
+        for bad in [
+            "",
+            "10,20",
+            "10,20 640",
+            "10,20 640x",
+            "10,20 640x400 extra",
+            "10,20 -640x400",
+            "10 20 640x400",
+        ] {
+            assert_eq!(
+                parse_geometry(bad).unwrap_err().message(),
+                "Invalid capture geometry",
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            parse_geometry("0,0 1x100").unwrap_err().message(),
+            "Selection is too small"
+        );
+        assert_eq!(
+            parse_geometry("0,0 100x1").unwrap_err().message(),
+            "Selection is too small"
+        );
     }
 }
