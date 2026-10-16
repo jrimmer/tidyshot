@@ -2,6 +2,7 @@
 pub mod api;
 pub mod bridge;
 pub mod capture;
+pub mod color;
 pub mod commands;
 pub mod filenames;
 pub mod geometry;
