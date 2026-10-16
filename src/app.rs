@@ -65,7 +65,10 @@ pub enum Command {
     /// Show a corner preview for one file.
     Overlay(PathBuf),
     /// Recognize text in a file.
-    Ocr { path: PathBuf, linebreaks: Option<bool> },
+    Ocr {
+        path: PathBuf,
+        linebreaks: Option<bool>,
+    },
     /// Routed with no argument: open the chooser in the UI.
     EditChooser,
     PinChooser,
@@ -90,9 +93,13 @@ pub enum Command {
     /// Unlock every pin.
     UnlockPins,
     /// Open settings on a tab.
-    Settings { tab: String },
+    Settings {
+        tab: String,
+    },
     /// Open recording setup.
-    Record { geometry: Option<String> },
+    Record {
+        geometry: Option<String>,
+    },
     /// Stop the active recording.
     Stop,
     /// Pause or resume the active recording.
@@ -213,8 +220,9 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
                 .unwrap_or_else(|| "general".to_owned());
             if tab == "cloud" {
                 return Err(RouteError {
-                    message: "Cloud services are excluded from OmniShot. Captures stay on your device."
-                        .to_owned(),
+                    message:
+                        "Cloud services are excluded from OmniShot. Captures stay on your device."
+                            .to_owned(),
                 });
             }
             Ok(Command::Settings { tab })
@@ -239,7 +247,10 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
 // Ported from omnishot/backend.py (screenshot_actions)
 #[must_use]
 pub fn screenshot_actions(settings: &Value, action: Option<&str>) -> BTreeSet<String> {
-    if let Some((_, named)) = AREA_SHORTCUTS.iter().find(|(name, _)| Some(*name) == action) {
+    if let Some((_, named)) = AREA_SHORTCUTS
+        .iter()
+        .find(|(name, _)| Some(*name) == action)
+    {
         let mut actions = if settings
             .get("capture_shortcut_actions")
             .and_then(Value::as_bool)
@@ -279,7 +290,10 @@ pub fn capture_actions(settings: &Value, recording: bool) -> BTreeSet<String> {
     {
         actions.insert(value.to_owned());
     }
-    if let Some(extra) = settings.get(&format!("{key}_extra")).and_then(Value::as_array) {
+    if let Some(extra) = settings
+        .get(&format!("{key}_extra"))
+        .and_then(Value::as_array)
+    {
         for value in extra {
             if let Some(value) = value.as_str()
                 && allowed.contains(&value)
@@ -307,11 +321,10 @@ pub fn url_geometry_text(
     let Some(coordinates) = &url.coordinates else {
         return Ok(None);
     };
-    let rect = crate::api::url_geometry(coordinates, monitors, cursor).map_err(|error| {
-        RouteError {
+    let rect =
+        crate::api::url_geometry(coordinates, monitors, cursor).map_err(|error| RouteError {
             message: error.to_string(),
-        }
-    })?;
+        })?;
     Ok(Some(crate::geometry::geometry_text(rect)))
 }
 
@@ -430,7 +443,9 @@ mod tests {
     #[test]
     fn capture_commands_route_with_their_action() {
         match routed(&["area", "--action", "annotate"]) {
-            Command::Capture { command, action, .. } => {
+            Command::Capture {
+                command, action, ..
+            } => {
                 assert_eq!(command, "area");
                 assert_eq!(action.as_deref(), Some("annotate"));
             }
@@ -482,7 +497,10 @@ mod tests {
 
     #[test]
     fn unknown_commands_are_reported_not_panicking() {
-        assert_eq!(routed(&["frobnicate"]), Command::Unknown("frobnicate".into()));
+        assert_eq!(
+            routed(&["frobnicate"]),
+            Command::Unknown("frobnicate".into())
+        );
     }
 
     #[test]

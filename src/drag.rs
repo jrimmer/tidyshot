@@ -66,7 +66,11 @@ fn symbol(name: &str) -> Option<*mut libc::c_void> {
     // `RTLD_DEFAULT` is the null handle on glibc: search the global scope, so
     // the LD_PRELOAD helper's symbols are found but nothing is loaded.
     let pointer = unsafe { libc::dlsym(std::ptr::null_mut(), name.as_ptr()) };
-    if pointer.is_null() { None } else { Some(pointer) }
+    if pointer.is_null() {
+        None
+    } else {
+        Some(pointer)
+    }
 }
 
 #[cfg(not(unix))]

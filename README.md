@@ -45,7 +45,28 @@ plugin contract, `tests/setup_scripts.rs` drives `setup.sh`/`uninstall.sh`
 against a throwaway HOME with stubbed desktop commands, and
 `tests/install_user.rs` covers the user-level installer in an isolated home.
 `tests/editor_port.rs` drives the annotate editor document, project file,
-clipboard and renderer.
+clipboard and renderer. `tests/app_surface.rs` asserts every CLI subcommand and
+URL parameter in `docs/USAGE.md` still routes, and covers the single-instance
+socket, UI scale, preview and clipboard rules. `qml/tests/tst_overlay.qml`
+drives the corner preview overlay with synthetic events offscreen.
+
+## Command surface
+
+`src/cli.rs` parses the same argument vector the OmniShot launcher uses;
+`src/api.rs` parses `omnishot://` and `cleanshot://` URLs; `src/app.rs` routes
+both into one command and decides the after-capture action set; `src/instance.rs`
+delivers commands to a running instance over a user-only socket. Headless
+commands (`doctor`, `compat`, `menu`) run before Qt and before the socket, so
+they work when the display or the running app is broken.
+
+## Quick Access preview
+
+The corner preview overlay is `qml/Overlay.qml` for layout and `src/overlay.rs`
+for behavior: auto-close and the save-on-timeout action, dismiss and restore,
+pin, and drag-out with the close-after-drag and Alt-to-keep rules. `src/drag.rs`
+tracks definitive Wayland drag completion through the `drag-status` preload.
+`src/ui_scale.rs` reflows UI measurements to the Omarchy theme without touching
+captured pixels.
 
 `cargo run --release --bin bench [reps]` is a fixed-workload timing harness for
 the scroll stitcher and the annotation effects. It is not a gate; the unit

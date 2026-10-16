@@ -40,7 +40,9 @@ pub fn state_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|_| std::env::var("XDG_DATA_HOME").map(PathBuf::from))
         .unwrap_or_else(|_| {
-            std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from).join(".local/share")
+            std::env::var("HOME")
+                .map_or_else(|_| PathBuf::from("."), PathBuf::from)
+                .join(".local/share")
         })
         .join("tidyshot")
 }
@@ -259,10 +261,8 @@ mod tests {
     use std::thread;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "tidyshot-instance-{}-{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("tidyshot-instance-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -277,7 +277,10 @@ mod tests {
         ];
         let encoded = encode(&argv);
         assert!(encoded.ends_with(b"\n"));
-        assert_eq!(decode(std::str::from_utf8(&encoded).unwrap()).unwrap(), argv);
+        assert_eq!(
+            decode(std::str::from_utf8(&encoded).unwrap()).unwrap(),
+            argv
+        );
     }
 
     #[test]
@@ -293,8 +296,15 @@ mod tests {
         let instance = Instance::bind(&socket).unwrap();
         assert_eq!(instance.path(), socket);
         assert_eq!(
-            forward(&["scroll".to_owned(), "--action".to_owned(), "copy".to_owned()], &socket)
-                .unwrap(),
+            forward(
+                &[
+                    "scroll".to_owned(),
+                    "--action".to_owned(),
+                    "copy".to_owned()
+                ],
+                &socket
+            )
+            .unwrap(),
             Forwarded::Delivered
         );
         let received = instance.accept().unwrap().unwrap();

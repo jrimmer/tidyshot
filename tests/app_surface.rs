@@ -73,10 +73,7 @@ fn every_documented_cli_subcommand_routes() {
     for command in commands {
         let parsed = parse(&[command]);
         let routed = route(&parsed);
-        assert!(
-            routed.is_ok(),
-            "{command} must route, got {routed:?}"
-        );
+        assert!(routed.is_ok(), "{command} must route, got {routed:?}");
         assert!(
             !matches!(routed.unwrap(), Command::Unknown(_)),
             "{command} routed to an unknown command"
@@ -104,9 +101,7 @@ fn documented_url_parameters_survive_parsing_and_routing() {
         ("true", "true"),
         ("false", "false"),
     ] {
-        let url = format!(
-            "omnishot://scrolling-capture?start={start}&autoscroll={autoscroll}"
-        );
+        let url = format!("omnishot://scrolling-capture?start={start}&autoscroll={autoscroll}");
         let parsed = parse(&[&url]);
         match route(&parsed).unwrap() {
             Command::Capture {
@@ -143,7 +138,10 @@ fn documented_url_parameters_survive_parsing_and_routing() {
     }
     // The two coordinate file formats resolve to the same open action.
     let local = parse(&["cleanshot://open-annotate?filepath=%2Ftmp%2Fa.png"]);
-    assert_eq!(route(&local).unwrap(), Command::Edit(PathBuf::from("/tmp/a.png")));
+    assert_eq!(
+        route(&local).unwrap(),
+        Command::Edit(PathBuf::from("/tmp/a.png"))
+    );
     // OCR line-break overrides.
     let url = parse(&["omnishot://capture-text?linebreaks=false"]);
     match route(&url).unwrap() {
@@ -158,7 +156,10 @@ fn a_forwarded_command_reaches_the_running_instance() {
     let socket = instance::socket_path(&dir);
     let listener = Instance::bind(&socket).unwrap();
     let argv = vec!["scroll-done".to_owned()];
-    assert_eq!(instance::forward(&argv, &socket).unwrap(), Forwarded::Delivered);
+    assert_eq!(
+        instance::forward(&argv, &socket).unwrap(),
+        Forwarded::Delivered
+    );
     assert_eq!(listener.accept().unwrap().unwrap(), argv);
 }
 
@@ -183,7 +184,10 @@ fn ui_scale_reflows_measurements_without_touching_content() {
     assert_eq!(appearance.font_size, 20);
     assert_eq!(appearance.factor(), 2.0);
     // A window that was 335 px wide reflows to 670 px.
-    assert_eq!(ui_scale::size(335.0, 200.0, appearance.factor()), (670, 400));
+    assert_eq!(
+        ui_scale::size(335.0, 200.0, appearance.factor()),
+        (670, 400)
+    );
 }
 
 #[test]
@@ -229,8 +233,13 @@ fn a_recording_preview_uses_its_first_frame_and_omits_pin() {
     assert_eq!(available_actions(true).len(), 3);
     // Opening it without ffmpeg data surfaces the decode error rather than
     // panicking or silently showing nothing.
-    let error = Preview::open(&path, 0, &PreviewSettings::default(), &tidyshot::commands::SystemRunner)
-        .unwrap_err();
+    let error = Preview::open(
+        &path,
+        0,
+        &PreviewSettings::default(),
+        &tidyshot::commands::SystemRunner,
+    )
+    .unwrap_err();
     assert!(!error.to_string().is_empty());
 }
 
@@ -239,15 +248,12 @@ fn clipboard_file_lists_accept_local_media_and_reject_remote_or_missing() {
     let dir = scratch("clipboard");
     let image = dir.join("my image.png");
     fs::write(&image, b"png").unwrap();
-    let files = tidyshot::clipboard::local_files(format!("file://{}\n", image.display()).as_bytes())
-        .unwrap();
+    let files =
+        tidyshot::clipboard::local_files(format!("file://{}\n", image.display()).as_bytes())
+            .unwrap();
     assert_eq!(files, vec![image]);
     assert!(tidyshot::clipboard::local_files(b"https://example.com/a.png").is_err());
-    assert!(
-        tidyshot::clipboard::local_files(b"file:///tmp/definitely-missing-98765.png").is_err()
-    );
+    assert!(tidyshot::clipboard::local_files(b"file:///tmp/definitely-missing-98765.png").is_err());
     // Paste only accepts images; a video must go through Open from clipboard.
-    assert!(
-        tidyshot::clipboard::pasteable_images(&[PathBuf::from("/tmp/a.mp4")]).is_err()
-    );
+    assert!(tidyshot::clipboard::pasteable_images(&[PathBuf::from("/tmp/a.mp4")]).is_err());
 }

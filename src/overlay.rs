@@ -264,7 +264,11 @@ pub enum AutoAction {
 impl AutoAction {
     #[must_use]
     pub fn parse(value: &str) -> Self {
-        if value == "save" { Self::Save } else { Self::Close }
+        if value == "save" {
+            Self::Save
+        } else {
+            Self::Close
+        }
     }
 }
 
@@ -518,7 +522,13 @@ impl Preview {
     /// Handle one wheel gesture, applying the collapse/restore/dismiss rules.
     ///
     /// Returns `Some(true)` when the preview should close.
-    pub fn swipe(&mut self, state: &mut SwipeState, pixel: bool, delta: Swipe, inverted: bool) -> Option<bool> {
+    pub fn swipe(
+        &mut self,
+        state: &mut SwipeState,
+        pixel: bool,
+        delta: Swipe,
+        inverted: bool,
+    ) -> Option<bool> {
         match state.wheel(pixel, delta, inverted) {
             SwipeAction::Dismiss => Some(true),
             SwipeAction::Collapse => {

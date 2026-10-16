@@ -161,7 +161,11 @@ pub fn py_round(value: f64) -> f64 {
     let floor = value.floor();
     let fraction = value - floor;
     if (fraction - 0.5).abs() < f64::EPSILON {
-        if (floor as i64) % 2 == 0 { floor } else { floor + 1.0 }
+        if (floor as i64) % 2 == 0 {
+            floor
+        } else {
+            floor + 1.0
+        }
     } else {
         value.round()
     }
@@ -226,7 +230,8 @@ fn scale_pixels(value: &str, factor: f64) -> String {
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
-        if byte.is_ascii_digit() || (byte == b'-' && number_start.is_none() && index + 1 < bytes.len())
+        if byte.is_ascii_digit()
+            || (byte == b'-' && number_start.is_none() && index + 1 < bytes.len())
         {
             if number_start.is_none() {
                 number_start = Some(index);
