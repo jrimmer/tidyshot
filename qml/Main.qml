@@ -60,8 +60,13 @@ ApplicationWindow {
     }
 
     // Recognized-text review. TextOutput is a singleton, so it is referenced
-    // by id rather than instantiated, and the dialog below binds its state.
+    // by id rather than instantiated. When the command line opened the app for
+    // a file, run the completion path so the dialog can present its links.
     TextResultDialog {
         id: textResultDialog
+        Component.onCompleted: {
+            if (Args.ocrPath !== "")
+                TextOutput.recognize(Args.ocrPath, Args.linebreaks)
+        }
     }
 }

@@ -26,12 +26,15 @@ pub mod qobject {
         #[qml_element]
         #[qml_singleton]
         #[qproperty(QString, label)]
+        #[qproperty(QString, ocr_path, cxx_name = "ocrPath")]
+        #[qproperty(i32, linebreaks)]
         type Args = super::ArgsRust;
     }
 }
 
 use core::pin::Pin;
 use cxx_qt_lib::QString;
+use std::sync::OnceLock;
 
 #[derive(Default)]
 pub struct CounterRust {
@@ -49,14 +52,49 @@ impl qobject::Counter {
     }
 }
 
+/// What the command line asked the GUI to do on startup.
+#[derive(Default)]
+struct Startup {
+    /// A file for the recognized-text dialog to run OCR over, when any.
+    ocr_path: Option<String>,
+    /// The `ocr-lines` / `ocr-single-line` override: -1 unset, 0 false, 1 true.
+    linebreaks: i32,
+}
+
+static STARTUP: OnceLock<Startup> = OnceLock::new();
+
+/// Record the command-line OCR request before QML loads.
+///
+/// The `Args` singleton reads this when it is first touched, so QML can start
+/// the recognized-text completion for a file or `capture-text` URL.
+pub fn set_startup_ocr(path: Option<String>, linebreaks: Option<bool>) {
+    let _ = STARTUP.set(Startup {
+        ocr_path: path,
+        linebreaks: match linebreaks {
+            None => -1,
+            Some(false) => 0,
+            Some(true) => 1,
+        },
+    });
+}
+
+fn startup() -> &'static Startup {
+    STARTUP.get_or_init(Startup::default)
+}
+
 pub struct ArgsRust {
     label: QString,
+    ocr_path: QString,
+    linebreaks: i32,
 }
 
 impl Default for ArgsRust {
     fn default() -> Self {
+        let startup = startup();
         Self {
             label: QString::from("tidyshot"),
+            ocr_path: QString::from(startup.ocr_path.clone().unwrap_or_default()),
+            linebreaks: startup.linebreaks,
         }
     }
 }

@@ -1,7 +1,5 @@
 // tidyshot: the CLI dispatch and the GUI entry point.
 
-use std::path::Path;
-
 /// Run a subcommand that must stay headless, before Qt is initialised.
 ///
 /// Returns `Some(exit_code)` when the invocation was handled without starting
@@ -31,39 +29,19 @@ where
             Some(doctor(&args[1..]))
         }
         Some("compat") => Some(tidyshot::compat::cli(&args[1..])),
-        // With no path the GUI runs the capture; only a file path is
-        // recognized headlessly here.
-        Some("ocr") => args.get(1).map(|path| run_ocr(path)),
         _ => None,
     }
 }
 
-/// Recognize `path` and copy the result.
-fn run_ocr(path: &str) -> i32 {
-    let runner = tidyshot::commands::SystemRunner;
-    let qr = tidyshot::text_result::CommandQrReader::new(runner, "zbarimg");
-    let settings = tidyshot::text_result::TextSettings::default();
-    let clipboard = tidyshot::commands::SystemRunner;
-    match tidyshot::text_result::recognize(&runner, &qr, Path::new(path), &settings, None) {
-        Ok(tidyshot::text_result::Presentation::Copied) => 0,
-        Ok(tidyshot::text_result::Presentation::Dialog(result)) => {
-            let mut result = result;
-            match result.copy(&clipboard) {
-                Ok(()) => {
-                    print!("{}", result.text());
-                    0
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    1
-                }
-            }
-        }
-        Ok(tidyshot::text_result::Presentation::Empty) => 0,
-        Err(error) => {
-            eprintln!("{error}");
-            1
-        }
+/// Record a startup OCR request from the command line or a `capture-text` URL.
+///
+/// The recognized-text dialog reads this before it loads, so the file runs
+/// through the same completion path the dialog serves.
+fn note_startup_ocr(args: &[String]) {
+    if let Ok(parsed) = tidyshot::cli::parse_args(args)
+        && parsed.command == "ocr"
+    {
+        tidyshot::bridge::set_startup_ocr(parsed.path, parsed.linebreaks);
     }
 }
 
@@ -72,6 +50,7 @@ fn main() {
     if let Some(code) = run_subcommand(&args) {
         std::process::exit(code);
     }
+    note_startup_ocr(&args);
     tidyshot::run();
 }
 
@@ -85,8 +64,9 @@ mod tests {
     }
 
     #[test]
-    fn ocr_without_a_path_falls_through_to_the_gui() {
+    fn ocr_starts_the_gui_for_the_dialog() {
         assert!(run_subcommand(&["ocr".to_owned()]).is_none());
+        assert!(run_subcommand(&["ocr".to_owned(), "/tmp/a.png".to_owned()]).is_none());
     }
 
     #[test]

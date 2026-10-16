@@ -687,9 +687,13 @@ pub mod qobject {
         fn update_text(self: Pin<&mut Self>, text: &QString);
 
         /// Run the OCR/QR pipeline over `path` and present the result.
+        ///
+        /// `linebreaks` is the `ocr-lines` / `ocr-single-line` override: -1
+        /// keeps the saved preference, 0 forces one line, 1 forces line
+        /// breaks.
         #[qinvokable]
         #[cxx_name = "recognize"]
-        fn recognize_path(self: Pin<&mut Self>, path: &QString);
+        fn recognize_path(self: Pin<&mut Self>, path: &QString, linebreaks: i32);
 
         /// Close the review dialog and hide it.
         #[qinvokable]
@@ -762,12 +766,23 @@ impl qobject::TextOutput {
     /// This is the completion end of `tidyshot ocr <path>` and the
     /// `capture-text` URL: extraction copies an ordinary result and opens
     /// this dialog only when there are links to act on or an error to show.
-    pub fn recognize_path(mut self: Pin<&mut Self>, path: &QString) {
+    pub fn recognize_path(mut self: Pin<&mut Self>, path: &QString, linebreaks: i32) {
         let path = path.to_string();
         let runner = crate::commands::SystemRunner;
         let qr = CommandQrReader::new(runner, "zbarimg");
         let settings = TextSettings::default();
-        let outcome = recognize(&runner, &qr, Path::new(&path), &settings, None);
+        let override_linebreaks = match linebreaks {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        };
+        let outcome = recognize(
+            &runner,
+            &qr,
+            Path::new(&path),
+            &settings,
+            override_linebreaks,
+        );
         let completion = complete(outcome);
         self.as_mut()
             .set_status(QString::from(completion.status.clone()));
