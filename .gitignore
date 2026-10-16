@@ -1,3 +1,4 @@
+# Cargo build outputs.
 /target
 /build/
 Cargo.lock.bak
@@ -7,10 +8,9 @@ Cargo.lock.bak
 .beads/
 .qmlls.ini
 
-# Build outputs the plugin runtime keeps across updates. Rerun `setup.sh`
-# mirrors the checkout without deleting these, so they must stay ignored.
-/target/
-/build/
+# Build outputs the plugin runtime keeps across updates. `omarchy plugin
+# validate` rejects them inside the checkout, so they are ignored here and
+# `scripts/setup.sh` mirrors the checkout without deleting them.
 /native/
 /.venv/
 /backups/
