@@ -46,6 +46,7 @@ pub mod studio;
 pub mod text_result;
 pub mod text_styles;
 pub mod timeline;
+pub mod timeline_thumbnails;
 pub mod toolbar;
 pub mod ui_scale;
 pub mod video_audio_tracks;
