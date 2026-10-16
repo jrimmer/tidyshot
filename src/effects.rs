@@ -201,7 +201,19 @@ pub fn secure_blur(buffer: &mut RgbaBuffer<'_>, region: Region, strength: u32, s
     };
     let strength = strength.max(2) as f64;
     let (mut sum_r, mut sum_g, mut sum_b, mut weight) = (0.0f64, 0.0, 0.0, 0.0);
-    let mut accumulate = |pixel: [u8; 4]| {
+    let mut accumulate = |x: usize, y: usize| {
+        // Only pixels strictly outside the region may feed the replacement,
+        // so the concealed content cannot leak into its own texture.
+        if x >= region.x
+            && x < region.x + region.width
+            && y >= region.y
+            && y < region.y + region.height
+        {
+            return;
+        }
+        let Some(pixel) = buffer.pixel(x, y) else {
+            return;
+        };
         let alpha = f64::from(pixel[3]) / 255.0;
         sum_r += f64::from(pixel[0]) * alpha;
         sum_g += f64::from(pixel[1]) * alpha;
@@ -213,24 +225,12 @@ pub fn secure_blur(buffer: &mut RgbaBuffer<'_>, region: Region, strength: u32, s
     let top = region.y.saturating_sub(1);
     let bottom = (region.y + region.height).min(buffer.height.saturating_sub(1));
     for x in left..=right {
-        if let Some(pixel) = buffer.pixel(x, top) {
-            accumulate(pixel);
-        }
-        if bottom != top
-            && let Some(pixel) = buffer.pixel(x, bottom)
-        {
-            accumulate(pixel);
-        }
+        accumulate(x, top);
+        accumulate(x, bottom);
     }
     for y in top..=bottom {
-        if let Some(pixel) = buffer.pixel(left, y) {
-            accumulate(pixel);
-        }
-        if right != left
-            && let Some(pixel) = buffer.pixel(right, y)
-        {
-            accumulate(pixel);
-        }
+        accumulate(left, y);
+        accumulate(right, y);
     }
     let base = if weight > 0.0 {
         [sum_r / weight, sum_g / weight, sum_b / weight]
