@@ -45,7 +45,9 @@ plugin contract, `tests/setup_scripts.rs` drives `setup.sh`/`uninstall.sh`
 against a throwaway HOME with stubbed desktop commands, and
 `tests/install_user.rs` covers the user-level installer in an isolated home.
 `tests/editor_port.rs` drives the annotate editor document, project file,
-clipboard and renderer. `tests/app_surface.rs` asserts every CLI subcommand and
+clipboard and renderer. `tests/video_studio.rs` drives the video decoder
+policy, timeline persistence, motion blur and export planning.
+`tests/app_surface.rs` asserts every CLI subcommand and
 URL parameter in `docs/USAGE.md` still routes, and covers the single-instance
 socket, UI scale, preview and clipboard rules. `qml/tests/tst_overlay.qml`
 drives the corner preview overlay with synthetic events offscreen.
@@ -85,6 +87,22 @@ The editor is ported from OmniShot's `editor.py`, `annotation_*.py`, `crop.py`,
 `image.png`, `project.json` and the optional `original.png`, so version-1
 projects without an original still open. PNG and ZIP are written and read by
 `src/pngzip.rs` on top of the vendored-free codec in `src/compress.rs`.
+
+## Video studio
+
+The recording editor is ported from OmniShot's `video_*.py`, `studio.py`,
+`timeline.py`, `zoom_*.py`, `motion_blur.py` and `camera_framing.py`. The model
+lives in `src/timeline.rs`, `src/video_splits.rs` and `src/studio.rs`; the
+composition and export pipeline in `src/studio.rs` runs media through the
+`ffmpeg` command line only, never libav. Timeline split boundaries, cuts and
+zooms persist through the `.omnishot-video` project (`src/video_project.rs`),
+and exports default to software x264 with VAAPI hardware encoding opt-in.
+
+Preview decoding follows the PR15 policy in `src/video_decoder.rs`:
+software-decode by default on every GPU, Intel always software because of the
+VAAPI seek crash, hardware only when the Advanced setting is enabled off Intel,
+and a `QT_FFMPEG_DECODING_HW_DEVICE_TYPES` value set before launch wins. The
+setting applies after TidyShot restarts.
 
 ## License
 
