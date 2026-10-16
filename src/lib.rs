@@ -53,11 +53,14 @@ pub mod video_camera;
 pub mod video_clicks;
 pub mod video_cursor;
 pub mod video_decoder;
+pub mod video_history;
 pub mod video_keys;
 pub mod video_motion;
 pub mod video_position;
 pub mod video_project;
 pub mod video_splits;
+pub mod video_styles;
+pub mod video_ui;
 pub mod zoom_focus;
 
 /// Initialise the cxx-qt registrations and run the application.
