@@ -409,19 +409,39 @@ fn manifest_value(
 /// The archive's entries are checked against the manifest before any extraction
 /// happens; this function never writes to disk.
 pub fn read_archive(bytes: &[u8]) -> Result<VideoProject, ProjectError> {
-    let archive = ZipArchive::read(bytes)?;
-    let entries = archive.entries();
-    let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+    // Check the declared entry sizes before inflating anything, so a crafted
+    // archive cannot force unbounded memory use ahead of the limits.
+    let infos =
+        ZipArchive::entry_infos(bytes).map_err(|error| ProjectError::new(error.to_string()))?;
+    let names: Vec<&str> = infos
+        .entries()
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
     let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
-    if unique.len() != names.len() || entries.len() > 3 {
+    if unique.len() != names.len() || infos.entries().len() > 3 {
         return Err(ProjectError::new("Unexpected project entries"));
     }
+    let total: u64 = infos
+        .entries()
+        .iter()
+        .map(|entry| entry.uncompressed_size as u64)
+        .sum();
+    if total > MAX_MEDIA_BYTES + MAX_MANIFEST_BYTES {
+        return Err(ProjectError::new("Project media exceeds the 50 GB limit"));
+    }
+    let manifest_info = infos
+        .entries()
+        .iter()
+        .find(|entry| entry.name == "manifest.json")
+        .ok_or_else(|| ProjectError::new("Unexpected or missing project tracks"))?;
+    if manifest_info.uncompressed_size as u64 > MAX_MANIFEST_BYTES {
+        return Err(ProjectError::new("Project metadata is too large"));
+    }
+    let archive = ZipArchive::read(bytes)?;
     let manifest_bytes = archive
         .get("manifest.json")
         .ok_or_else(|| ProjectError::new("Unexpected or missing project tracks"))?;
-    if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err(ProjectError::new("Project metadata is too large"));
-    }
     let manifest: Value = crate::json::parse(
         std::str::from_utf8(manifest_bytes).map_err(|_| ProjectError::new("Invalid manifest"))?,
     )
@@ -434,10 +454,6 @@ pub fn read_archive(bytes: &[u8]) -> Result<VideoProject, ProjectError> {
     }
     if unique != expected {
         return Err(ProjectError::new("Unexpected or missing project tracks"));
-    }
-    let total: u64 = entries.iter().map(|entry| entry.data.len() as u64).sum();
-    if total > MAX_MEDIA_BYTES + MAX_MANIFEST_BYTES {
-        return Err(ProjectError::new("Project media exceeds the 50 GB limit"));
     }
     let options = manifest
         .get("options")

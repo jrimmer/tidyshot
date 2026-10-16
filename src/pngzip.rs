@@ -304,13 +304,71 @@ pub struct ZipEntry {
     pub data: Vec<u8>,
 }
 
+/// One ZIP entry's directory metadata, read before any decompression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipEntryInfo {
+    pub name: String,
+    pub uncompressed_size: usize,
+}
+
 /// A ZIP archive read from disk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ZipArchive {
     entries: Vec<ZipEntry>,
 }
 
+/// A ZIP archive's directory metadata, read without decompressing payloads.
+pub struct ZipArchiveInfo {
+    entries: Vec<ZipEntryInfo>,
+}
+
+impl ZipArchiveInfo {
+    #[must_use]
+    pub fn entries(&self) -> &[ZipEntryInfo] {
+        &self.entries
+    }
+}
+
 impl ZipArchive {
+    /// List the archive's entries without decompressing any payload.
+    ///
+    /// Callers that enforce a size limit should inspect these first, so a
+    /// crafted archive cannot force an unbounded inflation before the limit
+    /// runs.
+    // Ported from omnishot/image_project.py (ZipFile.infolist)
+    pub fn entry_infos(bytes: &[u8]) -> Result<ZipArchiveInfo, ImageError> {
+        let eocd = find_eocd(bytes).ok_or_else(|| ImageError::new("invalid ZIP file"))?;
+        let count = u16::from_le_bytes(bytes[eocd + 10..eocd + 12].try_into().unwrap()) as usize;
+        let mut offset =
+            u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            if offset + 46 > bytes.len() || &bytes[offset..offset + 4] != b"PK\x01\x02" {
+                return Err(ImageError::new("invalid ZIP directory"));
+            }
+            let uncompressed_size =
+                u32::from_le_bytes(bytes[offset + 24..offset + 28].try_into().unwrap()) as usize;
+            let name_length =
+                u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().unwrap()) as usize;
+            let extra_length =
+                u16::from_le_bytes(bytes[offset + 30..offset + 32].try_into().unwrap()) as usize;
+            let comment_length =
+                u16::from_le_bytes(bytes[offset + 32..offset + 34].try_into().unwrap()) as usize;
+            let name_start = offset + 46;
+            let name_end = name_start + name_length;
+            if name_end > bytes.len() {
+                return Err(ImageError::new("truncated ZIP directory"));
+            }
+            let name = String::from_utf8_lossy(&bytes[name_start..name_end]).into_owned();
+            offset = name_end + extra_length + comment_length;
+            entries.push(ZipEntryInfo {
+                name,
+                uncompressed_size,
+            });
+        }
+        Ok(ZipArchiveInfo { entries })
+    }
+
     /// Read a ZIP archive, decoding each entry's DEFLATE stream.
     // Ported from omnishot/image_project.py (ZipFile)
     pub fn read(bytes: &[u8]) -> Result<Self, ImageError> {
@@ -558,5 +616,22 @@ mod tests {
         );
         // Truncating the central directory invalidates the archive.
         assert!(ZipArchive::read(&archive[..archive.len() / 2]).is_err());
+    }
+
+    #[test]
+    fn zip_entry_infos_report_sizes_without_decompressing() {
+        let mut writer = ZipWriter::new();
+        writer.add("a", b"one".to_vec());
+        writer.add("b", b"three".to_vec());
+        let archive = writer.finish();
+        let infos = ZipArchive::entry_infos(&archive).unwrap();
+        assert_eq!(
+            infos
+                .entries()
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.uncompressed_size))
+                .collect::<Vec<_>>(),
+            vec![("a", 3), ("b", 5)]
+        );
     }
 }

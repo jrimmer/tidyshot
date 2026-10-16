@@ -37,6 +37,29 @@ pub fn ocr_settings() -> TextSettings {
     ocr_settings_at(&settings_path())
 }
 
+/// Read the saved settings the decoder policy consults.
+///
+/// A missing or unreadable file yields an empty map, so software decoding
+/// stays the default rather than failing startup.
+#[must_use]
+pub fn stored_settings() -> std::collections::BTreeMap<String, crate::json::Value> {
+    stored_settings_at(&settings_path())
+}
+
+/// Read the saved settings from an explicit file.
+#[must_use]
+fn stored_settings_at(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<String, crate::json::Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return std::collections::BTreeMap::new();
+    };
+    match crate::json::parse(&text) {
+        Ok(crate::json::Value::Object(object)) => object,
+        _ => std::collections::BTreeMap::new(),
+    }
+}
+
 /// Read the OCR preferences from an explicit settings file.
 #[must_use]
 fn ocr_settings_at(path: &std::path::Path) -> TextSettings {
@@ -81,6 +104,24 @@ mod tests {
         // A malformed file must not stop OCR either.
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(ocr_settings_at(&path).ocr_languages, ocr::AUTO);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stored_settings_expose_the_decoder_flag_and_tolerate_bad_files() {
+        let path =
+            std::env::temp_dir().join(format!("tidyshot-decoder-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"hardware_video_decoding":true}"#).unwrap();
+        assert_eq!(
+            stored_settings_at(&path).get("hardware_video_decoding"),
+            Some(&crate::json::Value::Bool(true))
+        );
+        // A missing or malformed file yields no settings, so software stays
+        // the default instead of failing startup.
+        let _ = std::fs::remove_file(&path);
+        assert!(stored_settings_at(&path).is_empty());
+        std::fs::write(&path, "not json").unwrap();
+        assert!(stored_settings_at(&path).is_empty());
         let _ = std::fs::remove_file(&path);
     }
 }

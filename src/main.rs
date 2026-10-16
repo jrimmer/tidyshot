@@ -115,7 +115,7 @@ fn main() {
     }
     // Qt reads its hardware-decoding variable when the media backend starts,
     // so the preview policy is applied before the GUI constructs QGuiApplication.
-    tidyshot::video_decoder::configure_preview_decoder(&std::collections::BTreeMap::new());
+    tidyshot::video_decoder::configure_preview_decoder(&tidyshot::settings::stored_settings());
     tidyshot::run();
 }
 
