@@ -47,9 +47,10 @@ tidyshot_require_session() {
 tidyshot_mirror() {
   local task_src=$1 task_dst=$2 task_rel task_path task_file
   mkdir -p -- "$task_dst"
-  # Files the checkout owns: tracked plus untracked, minus ignored.
+  # Files the checkout owns: tracked plus untracked, minus ignored. Disable
+  # git's path quoting so the list is literal even for odd filenames.
   local task_list
-  task_list=$(git -C "$task_src" ls-files -co --exclude-standard)
+  task_list=$(git -C "$task_src" -c core.quotePath=false ls-files -co --exclude-standard)
   # Drop destination files the source no longer owns. Ignored paths (build
   # outputs, backups) survive because check-ignore matches them here.
   while IFS= read -r -d '' task_path; do
