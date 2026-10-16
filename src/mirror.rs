@@ -75,7 +75,7 @@ impl From<CommandError> for MirrorError {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct MirrorState {
     loaded_path: Option<PathBuf>,
     unavailable: Option<String>,
@@ -84,6 +84,7 @@ struct MirrorState {
 
 /// Shared plugin state: the loaded plugin path, the cached degrade reason and
 /// the per-role consumer counts.
+#[derive(Debug)]
 pub struct MirrorRegistry {
     state: Mutex<MirrorState>,
     arch: String,
@@ -169,6 +170,88 @@ impl MirrorRegistry {
         let mut state = self.state.lock().expect("mirror state poisoned");
         self.unload_unused(runner, &mut state)
     }
+
+    /// Acquire the mirror for `role`, loading the plugin when needed.
+    ///
+    /// The role count is only incremented on success, so a failed attempt
+    /// leaves no phantom consumer behind.
+    // Ported from omnishot/clean_capture.py (MirrorLease.start)
+    pub fn acquire<R: CommandRunner>(
+        &self,
+        role: &'static str,
+        runner: &R,
+        native: &Path,
+    ) -> Result<(), MirrorError> {
+        let mut state = self.state.lock().expect("mirror state poisoned");
+        if state.roles.get(role).copied().unwrap_or(0) > 0 {
+            *state.roles.entry(role).or_insert(0) += 1;
+            return Ok(());
+        }
+        if let Some(message) = &state.unavailable {
+            return Err(MirrorError::Unavailable(MirrorUnavailable {
+                message: message.clone(),
+            }));
+        }
+        let plugin = native.join(MIRROR_PLUGIN);
+        if !plugin.is_file() {
+            return Err(MirrorError::Rebuild(REBUILD.to_owned()));
+        }
+        if !self.loaded(runner)? {
+            let path = std::fs::canonicalize(&plugin)
+                .map_err(|error| MirrorError::Rebuild(format!("{REBUILD}\n\n{error}")))?;
+            // hyprctl exits 0 even when the plugin fails to initialize.
+            let path_text = path.to_string_lossy().into_owned();
+            let spec = CommandSpec::new("hyprctl").args(["plugin", "load", &path_text]);
+            let output = runner.run(&spec)?.stdout_string();
+            if !self.loaded(runner)? {
+                let output = output.trim().to_owned();
+                if !output.contains("Could not hook") && self.arch == "x86_64" {
+                    // e.g. an ABI mismatch after a Hyprland upgrade: fixable.
+                    return Err(MirrorError::Rebuild(format!("{REBUILD}\n\n{output}")));
+                }
+                let message = if output.is_empty() {
+                    "The OmniShot compositor plugin could not be loaded".to_owned()
+                } else {
+                    output
+                };
+                state.unavailable = Some(message.clone());
+                return Err(MirrorError::Unavailable(MirrorUnavailable { message }));
+            }
+            state.loaded_path = Some(path);
+        }
+        let spec = CommandSpec::new("hyprctl").args([
+            "eval",
+            &format!("hl.plugin.omnishot.{role}({})", std::process::id()),
+        ]);
+        if let Err(error) = runner.run(&spec) {
+            let _ = self.unload_unused(runner, &mut state);
+            return Err(MirrorError::Command(error));
+        }
+        *state.roles.entry(role).or_insert(0) += 1;
+        Ok(())
+    }
+
+    /// Release the mirror for `role`.
+    // Ported from omnishot/clean_capture.py (MirrorLease.stop)
+    pub fn release<R: CommandRunner>(
+        &self,
+        role: &'static str,
+        enabled: bool,
+        runner: &R,
+    ) -> Result<(), CommandError> {
+        let mut state = self.state.lock().expect("mirror state poisoned");
+        if !enabled {
+            return self.unload_unused(runner, &mut state);
+        }
+        let remaining = state.roles.get(role).copied().unwrap_or(0) - 1;
+        if remaining == 0 {
+            let spec = CommandSpec::new("hyprctl")
+                .args(["eval", &format!("hl.plugin.omnishot.{role}(0)")]);
+            runner.run(&spec)?;
+        }
+        state.roles.insert(role, remaining);
+        self.unload_unused(runner, &mut state)
+    }
 }
 
 fn is_mirror(plugin: &Value) -> bool {
@@ -176,6 +259,7 @@ fn is_mirror(plugin: &Value) -> bool {
 }
 
 /// One consumer's hold on the shared compositor mirror.
+#[derive(Debug)]
 pub struct MirrorLease<'a> {
     registry: &'a MirrorRegistry,
     role: &'static str,
@@ -196,56 +280,10 @@ impl MirrorLease<'_> {
         runner: &R,
         native: &Path,
     ) -> Result<(), MirrorError> {
-        let mut state = self.registry.state.lock().expect("mirror state poisoned");
         if self.enabled {
             return Ok(());
         }
-        if state.roles.get(self.role).copied().unwrap_or(0) > 0 {
-            *state.roles.entry(self.role).or_insert(0) += 1;
-            self.enabled = true;
-            return Ok(());
-        }
-        if let Some(message) = &state.unavailable {
-            return Err(MirrorError::Unavailable(MirrorUnavailable {
-                message: message.clone(),
-            }));
-        }
-        let plugin = native.join(MIRROR_PLUGIN);
-        if !plugin.is_file() {
-            return Err(MirrorError::Rebuild(REBUILD.to_owned()));
-        }
-        if !self.registry.loaded(runner)? {
-            let path = std::fs::canonicalize(&plugin)
-                .map_err(|error| MirrorError::Rebuild(format!("{REBUILD}\n\n{error}")))?;
-            // hyprctl exits 0 even when the plugin fails to initialize.
-            let path_text = path.to_string_lossy().into_owned();
-            let spec = CommandSpec::new("hyprctl").args(["plugin", "load", &path_text]);
-            let output = runner.run(&spec)?.stdout_string();
-            if !self.registry.loaded(runner)? {
-                let output = output.trim().to_owned();
-                if !output.contains("Could not hook") && self.registry.arch == "x86_64" {
-                    // e.g. an ABI mismatch after a Hyprland upgrade: fixable.
-                    return Err(MirrorError::Rebuild(format!("{REBUILD}\n\n{output}")));
-                }
-                let message = if output.is_empty() {
-                    "The OmniShot compositor plugin could not be loaded".to_owned()
-                } else {
-                    output
-                };
-                state.unavailable = Some(message.clone());
-                return Err(MirrorError::Unavailable(MirrorUnavailable { message }));
-            }
-            state.loaded_path = Some(path);
-        }
-        let spec = CommandSpec::new("hyprctl").args([
-            "eval",
-            &format!("hl.plugin.omnishot.{}({})", self.role, std::process::id()),
-        ]);
-        if let Err(error) = runner.run(&spec) {
-            let _ = self.registry.unload_unused(runner, &mut state);
-            return Err(MirrorError::Command(error));
-        }
-        *state.roles.entry(self.role).or_insert(0) += 1;
+        self.registry.acquire(self.role, runner, native)?;
         self.enabled = true;
         Ok(())
     }
@@ -268,30 +306,12 @@ impl MirrorLease<'_> {
     /// Release this consumer's hold on the mirror.
     // Ported from omnishot/clean_capture.py (MirrorLease.stop)
     pub fn stop<R: CommandRunner>(&mut self, runner: &R) -> Result<(), CommandError> {
-        let mut state = self.registry.state.lock().expect("mirror state poisoned");
         if !self.enabled {
-            return self.registry.unload_unused(runner, &mut state);
+            return self.registry.release(self.role, false, runner);
         }
-        let remaining = state.roles.get(self.role).copied().unwrap_or(0) - 1;
-        if remaining == 0 {
-            let spec = CommandSpec::new("hyprctl")
-                .args(["eval", &format!("hl.plugin.omnishot.{}(0)", self.role)]);
-            runner.run(&spec)?;
-        }
-        state.roles.insert(self.role, remaining);
+        self.registry.release(self.role, true, runner)?;
         self.enabled = false;
-        self.registry.unload_unused(runner, &mut state)
-    }
-}
-
-impl Drop for MirrorLease<'_> {
-    fn drop(&mut self) {
-        // Consumers stop explicitly; a dropped lease must not leave the plugin
-        // registered. The system runner is safe to use from Drop.
-        if self.enabled {
-            let runner = crate::commands::SystemRunner;
-            let _ = self.stop(&runner);
-        }
+        Ok(())
     }
 }
 

@@ -171,15 +171,19 @@ impl CleanCapture {
                 return Err(MirrorError::Rebuild(crate::mirror::REBUILD.to_owned()));
             }
         }
-        let mut lease = registry.lease("clean_capture");
-        if let Err(MirrorError::Unavailable(_)) = lease.start(runner, native) {
-            // Record the plain output instead; the controls stay outside
-            // region captures or visible in full-display captures.
-            return Ok(false);
+        let acquired = registry.acquire("clean_capture", runner, native);
+        match acquired {
+            Err(MirrorError::Unavailable(_)) => {
+                // Record the plain output instead; the controls stay outside
+                // region captures or visible in full-display captures.
+                Ok(false)
+            }
+            Err(error) => Err(error),
+            Ok(()) => {
+                self.enabled = true;
+                Ok(true)
+            }
         }
-        drop(lease);
-        self.enabled = true;
-        Ok(true)
     }
 
     /// Stop the clean source.
@@ -189,8 +193,7 @@ impl CleanCapture {
         runner: &R,
     ) -> Result<(), crate::commands::CommandError> {
         if self.enabled {
-            let mut lease = registry.lease("clean_capture");
-            lease.stop(runner)?;
+            registry.release("clean_capture", true, runner)?;
             self.enabled = false;
         } else {
             registry.release_unused(runner)?;

@@ -620,6 +620,53 @@ impl Countdown {
     }
 }
 
+/// How a selection overlay should be shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionPlan {
+    /// Whether the selector follows the live desktop instead of a frozen frame.
+    pub live: bool,
+    /// Whether the selection mirror must be held while the overlay is open.
+    pub mirror: bool,
+}
+
+/// Choose the selection strategy, degrading live selection when the plugin
+/// cannot load.
+///
+/// A live overlay would appear in its own capture, so when the mirror is
+/// unavailable the selection freezes instead of following the desktop.
+// Ported from omnishot/app.py (frozen_selection) and omnishot/clean_capture.py
+pub fn plan_selection<R: CommandRunner>(
+    registry: &MirrorRegistry,
+    runner: &R,
+    native: &std::path::Path,
+    freeze: bool,
+) -> SelectionPlan {
+    if freeze {
+        return SelectionPlan {
+            live: false,
+            mirror: false,
+        };
+    }
+    let mut lease = registry.lease("selection_capture");
+    match lease.start(runner, native) {
+        Ok(()) => {
+            let _ = lease.stop(runner);
+            SelectionPlan {
+                live: true,
+                mirror: true,
+            }
+        }
+        Err(MirrorError::Unavailable(_)) => SelectionPlan {
+            live: false,
+            mirror: false,
+        },
+        Err(_) => SelectionPlan {
+            live: true,
+            mirror: true,
+        },
+    }
+}
+
 /// Wait out a countdown on the calling thread, emitting its label.
 ///
 /// Used by worker threads; the QML layer drives [`Countdown`] directly when a
@@ -1100,5 +1147,63 @@ mod tests {
             error.to_string().contains("Capture an area first"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn live_selection_degrades_to_a_frozen_frame_without_the_plugin() {
+        let runner = Fake::default();
+        let native = NativeDir::new();
+        // aarch64 rejects the hook, so a live overlay is impossible.
+        let registry = degraded_registry();
+        let plan = plan_selection(&registry, &runner, &native.0, false);
+        assert_eq!(
+            plan,
+            SelectionPlan {
+                live: false,
+                mirror: false,
+            }
+        );
+        // Freezing never needs the mirror.
+        let plan = plan_selection(&registry, &runner, &native.0, true);
+        assert!(!plan.live && !plan.mirror);
+    }
+
+    #[test]
+    fn live_selection_uses_the_mirror_when_it_loads() {
+        // A real load succeeds on x86_64 with a valid plugin.
+        struct Loading {
+            loaded: std::sync::atomic::AtomicBool,
+        }
+        impl CommandRunner for Loading {
+            fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+                use std::sync::atomic::Ordering;
+                let out = |text: &str| CommandOutput {
+                    status: 0,
+                    stdout: text.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                };
+                match spec.args.as_slice() {
+                    [flag, query] if flag == "-j" && query == "plugin list" => {
+                        if self.loaded.load(Ordering::SeqCst) {
+                            Ok(out("[{\"name\":\"omnishot-clean-mirror\"}]"))
+                        } else {
+                            Ok(out("[]"))
+                        }
+                    }
+                    [action, sub, ..] if action == "plugin" && sub == "load" => {
+                        self.loaded.store(true, Ordering::SeqCst);
+                        Ok(out("ok"))
+                    }
+                    _ => Ok(out("false")),
+                }
+            }
+        }
+        let native = NativeDir::new();
+        let registry = MirrorRegistry::with_arch("x86_64");
+        let loading = Loading {
+            loaded: std::sync::atomic::AtomicBool::new(false),
+        };
+        let plan = plan_selection(&registry, &loading, &native.0, false);
+        assert!(plan.live && plan.mirror);
     }
 }
