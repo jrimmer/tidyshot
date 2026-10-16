@@ -338,7 +338,15 @@ pub fn parse_geometry(text: &str) -> Result<Rect, GeometryError> {
             message: "Selection is too small".to_owned(),
         });
     }
-    Ok(Rect::new(x as i32, y as i32, width as i32, height as i32))
+    let (Ok(x), Ok(y), Ok(width), Ok(height)) = (
+        i32::try_from(x),
+        i32::try_from(y),
+        i32::try_from(width),
+        i32::try_from(height),
+    ) else {
+        return Err(invalid());
+    };
+    Ok(Rect::new(x, y, width, height))
 }
 
 fn invalid() -> GeometryError {
@@ -531,6 +539,7 @@ mod tests {
             "10,20 640x400 extra",
             "10,20 -640x400",
             "10 20 640x400",
+            "0,0 4294967297x400",
         ] {
             assert_eq!(
                 parse_geometry(bad).unwrap_err().message(),
