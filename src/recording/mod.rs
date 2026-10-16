@@ -8,7 +8,10 @@
 //! disk must not cost the user a playable recording.
 
 pub mod checkpoint;
+pub mod display;
 pub mod journal;
+pub mod options;
+pub mod recorder;
 pub mod recovery;
 
 use std::io;
