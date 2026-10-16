@@ -655,12 +655,11 @@ pub fn recognize<R: CommandRunner, Q: QrReader>(
     Ok(present(runner, &value, settings, false))
 }
 
-/// Extract an image's text and present it, capturing first when `path` is empty.
+/// Extract a saved image's text and present it.
 ///
-/// This is the worker body behind the QML completion path: a saved file goes
-/// straight to [`recognize`], while the no-argument `tidyshot ocr` selects a
-/// region, grabs it, and recognizes that frame, matching the source's
-/// capture-then-OCR flow.
+/// This is the worker body behind the QML completion path for a file. The
+/// no-argument flow captures a region first and then calls this with the
+/// temporary frame.
 // Ported from omnishot/app.py (recognize_text)
 fn run_recognize(path: &Path, linebreaks: i32) -> Result<Presentation, TextError> {
     let runner = crate::commands::SystemRunner;
