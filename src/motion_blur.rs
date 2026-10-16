@@ -29,7 +29,7 @@ pub fn blur_level(options: &BTreeMap<String, Value>) -> u32 {
     };
     let number = match value {
         Value::Number(n) if n.is_finite() => *n,
-        Value::Bool(true) => 2.0,
+        Value::Bool(true) => 1.0,
         Value::Bool(false) => 0.0,
         _ => return 0,
     };
