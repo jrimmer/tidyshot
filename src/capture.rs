@@ -36,6 +36,46 @@ impl fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
+/// A capture the menu or CLI asks the capture module to perform.
+///
+/// These are the capture commands `omnishot/app.py` dispatches before an
+/// after-capture action or an explicit region is attached. Keeping them here
+/// lets the menu hand a request to the capture module instead of re-encoding
+/// command strings.
+// Ported from omnishot/app.py (dispatch)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureRequest {
+    AllInOne,
+    Area,
+    Window,
+    Display,
+    AllDisplays,
+    Scrolling,
+    HorizontalScrolling,
+    PreviousArea,
+    SelfTimer,
+    Text,
+}
+
+impl CaptureRequest {
+    /// The command word the request corresponds to.
+    #[must_use]
+    pub const fn command(self) -> &'static str {
+        match self {
+            CaptureRequest::AllInOne => "select",
+            CaptureRequest::Area => "area",
+            CaptureRequest::Window => "window",
+            CaptureRequest::Display => "fullscreen",
+            CaptureRequest::AllDisplays => "desktop",
+            CaptureRequest::Scrolling => "scroll",
+            CaptureRequest::HorizontalScrolling => "scroll-horizontal",
+            CaptureRequest::PreviousArea => "previous",
+            CaptureRequest::SelfTimer => "timer",
+            CaptureRequest::Text => "ocr",
+        }
+    }
+}
+
 /// One compositor output with the identity fields capture decides on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Display {
