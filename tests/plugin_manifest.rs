@@ -85,6 +85,34 @@ fn widget_qml_parses() {
     assert!(!text.contains("[syntax]"), "{text}");
 }
 
+#[test]
+fn app_qml_parses() {
+    // The app's QML is packaged into the binary, so a syntax error only shows
+    // up when the GUI loads; lint every file here instead.
+    let root = repo();
+    let lint = find_qmllint();
+    let Some(lint) = lint else {
+        eprintln!("qmllint is not installed; skipping");
+        return;
+    };
+    let mut files: Vec<PathBuf> = fs::read_dir(root.join("qml"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "qml"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no qml files found");
+    for file in files {
+        let output = Command::new(&lint).arg(&file).output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!text.contains("[syntax]"), "{}: {text}", file.display());
+    }
+}
+
 /// Locate a Qt 6 qmllint on PATH or in the usual Qt bin directory.
 fn find_qmllint() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("QMAKE6") {
