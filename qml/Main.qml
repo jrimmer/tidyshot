@@ -59,8 +59,8 @@ ApplicationWindow {
         }
     }
 
-    // Recognized-text review shares the TextResultDialog singleton's state.
-    TextResultDialog {
+    // Recognized-text review shares the TextOutput singleton's state.
+    TextOutput {
         id: textResultDialog
     }
 }

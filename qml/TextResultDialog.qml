@@ -4,12 +4,12 @@ import QtQuick.Layouts
 import tidyshot
 
 // Recognized-text dialog: review or edit OCR/QR output, copy it, and open a
-// detected link explicitly. The TextResultDialog singleton owns the state and
+// detected link explicitly. The TextOutput singleton owns the state and
 // all link decisions; this file only lays it out.
 Dialog {
     id: root
 
-    property var links: TextResultDialog
+    property var links: TextOutput
 
     title: "tidyshot \u2014 Recognized Text"
     modal: false
@@ -24,7 +24,7 @@ Dialog {
 
         Label {
             Layout.fillWidth: true
-            text: TextResultDialog.status
+            text: TextOutput.status
             wrapMode: Text.WordWrap
         }
 
@@ -35,16 +35,16 @@ Dialog {
             TextArea {
                 id: editor
                 objectName: "recognizedText"
-                text: TextResultDialog.text
+                text: TextOutput.text
                 wrapMode: TextArea.Wrap
                 selectByMouse: true
-                onTextChanged: TextResultDialog.updateText(text)
+                onTextChanged: TextOutput.updateText(text)
             }
         }
 
         Label {
             Layout.fillWidth: true
-            visible: TextResultDialog.linkLabels.length > 0
+            visible: TextOutput.linkLabels.length > 0
             text: "Detected links"
         }
 
@@ -52,8 +52,8 @@ Dialog {
             id: linkList
             Layout.fillWidth: true
             Layout.preferredHeight: 120
-            visible: TextResultDialog.linkLabels.length > 0
-            model: TextResultDialog.linkLabels
+            visible: TextOutput.linkLabels.length > 0
+            model: TextOutput.linkLabels
             clip: true
 
             delegate: ItemDelegate {
@@ -68,17 +68,17 @@ Dialog {
 
             Button {
                 text: "Copy Text"
-                enabled: TextResultDialog.text.length > 0
-                onClicked: TextResultDialog.copy()
+                enabled: TextOutput.text.length > 0
+                onClicked: TextOutput.copy()
             }
 
             Button {
                 objectName: "openLink"
                 text: "Open Link"
-                visible: TextResultDialog.canOpen
-                enabled: TextResultDialog.canOpen
+                visible: TextOutput.canOpen
+                enabled: TextOutput.canOpen
                 onClicked: {
-                    var target = TextResultDialog.linkUrl(linkList.currentIndex)
+                    var target = TextOutput.linkUrl(linkList.currentIndex)
                     if (target.length > 0)
                         Qt.openUrlExternally(target)
                 }

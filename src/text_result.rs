@@ -610,7 +610,7 @@ pub mod qobject {
         #[qproperty(bool, copied)]
         #[qproperty(bool, can_open, cxx_name = "canOpen")]
         #[qproperty(bool, detect)]
-        type TextResultDialog = super::TextResultDialogRust;
+        type TextOutput = super::TextResultDialogRust;
 
         /// Replace the edited text.
         #[qinvokable]
@@ -660,7 +660,7 @@ impl Default for TextResultDialogRust {
     }
 }
 
-impl qobject::TextResultDialog {
+impl qobject::TextOutput {
     /// Replace the edited text and refresh the link projections.
     pub fn update_text(mut self: Pin<&mut Self>, text: &QString) {
         self.as_mut().set_text(text.clone());
