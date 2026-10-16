@@ -243,7 +243,8 @@ impl MirrorRegistry {
         if !enabled {
             return self.unload_unused(runner, &mut state);
         }
-        let remaining = state.roles.get(role).copied().unwrap_or(0) - 1;
+        let current = state.roles.get(role).copied().unwrap_or(0);
+        let remaining = current.saturating_sub(1);
         if remaining == 0 {
             let spec = CommandSpec::new("hyprctl")
                 .args(["eval", &format!("hl.plugin.omnishot.{role}(0)")]);
