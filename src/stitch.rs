@@ -279,11 +279,17 @@ fn correlate(image: &Gray, template: &[f32], left: usize, right: usize, top: usi
         let score = if template_norm <= f32::EPSILON || norm <= f32::EPSILON {
             0.0
         } else {
+            // Contiguous row slices, so the per-location dot product
+            // autovectorizes instead of indexing `value(x, y)` per sample.
             let mut dot = 0.0f32;
             for y in 0..template_h {
-                for x in left..right {
-                    dot += image.value(x, location + y) * template[y * template_w + (x - left)];
-                }
+                let image_row = &image.data[(location + y) * image.width + left..][..template_w];
+                let template_row = &template[y * template_w..(y + 1) * template_w];
+                dot += image_row
+                    .iter()
+                    .zip(template_row)
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>();
             }
             (dot - mean * template_sum) / (template_norm * norm)
         };
