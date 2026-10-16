@@ -7,6 +7,8 @@ pub mod clean_capture;
 pub mod cli;
 pub mod color;
 pub mod commands;
+pub mod compat;
+pub mod doctor;
 pub mod effects;
 pub mod filenames;
 pub mod geometry;
