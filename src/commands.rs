@@ -7,8 +7,10 @@
 //! asserted without spawning processes.
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// A captured command result.
@@ -88,6 +90,13 @@ pub struct CommandSpec {
     pub stdin: Option<Vec<u8>>,
     pub timeout: Option<Duration>,
     pub env: BTreeMap<String, String>,
+    /// Capture stderr through a temporary file instead of a pipe, and send
+    /// stdout to `/dev/null`.
+    ///
+    /// Some programs fork a long-lived owner that inherits our pipes
+    /// (`wl-copy`); reading them to EOF blocks until that owner exits. A file
+    /// never makes the caller wait for the owner.
+    pub stderr_to_file: bool,
 }
 
 impl CommandSpec {
@@ -126,6 +135,27 @@ impl CommandSpec {
         self.timeout = Some(timeout);
         self
     }
+
+    /// Capture stderr through a temporary file rather than a pipe.
+    #[must_use]
+    pub fn stderr_to_file(mut self, on: bool) -> Self {
+        self.stderr_to_file = on;
+        self
+    }
+}
+
+/// A `wl-copy` invocation that does not wait on the clipboard owner.
+///
+/// The owner inherits our stdout/stderr, so both are kept off pipes: stdout is
+/// discarded and stderr goes to a temporary file, matching the source's
+/// clipboard write. The timeout is the source's ten seconds.
+// Ported from omnishot/backend.py (clipboard_write)
+pub fn clipboard_spec(mime: &str, data: Vec<u8>) -> CommandSpec {
+    CommandSpec::new("wl-copy")
+        .args(["--type", mime])
+        .stdin(data)
+        .stderr_to_file(true)
+        .timeout(Duration::from_secs(10))
 }
 
 /// Run a command and return its output, or a [`CommandError`] on failure.
@@ -154,8 +184,19 @@ impl CommandRunner for SystemRunner {
         } else {
             Stdio::null()
         });
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
+        let mut stderr_file = None;
+        if spec.stderr_to_file {
+            command.stdout(Stdio::null());
+            let file = temp_file()?;
+            stderr_file = Some(file.try_clone().map_err(|source| CommandError::Spawn {
+                program: spec.program.clone(),
+                source,
+            })?);
+            command.stderr(Stdio::from(file));
+        } else {
+            command.stdout(Stdio::piped());
+            command.stderr(Stdio::piped());
+        }
         for (key, value) in &spec.env {
             command.env(key, value);
         }
@@ -194,11 +235,16 @@ impl CommandRunner for SystemRunner {
         let timeout = spec.timeout.unwrap_or(DEFAULT_TIMEOUT);
         let output = wait_with_timeout(child, timeout, &spec.program)?;
         let status = output.status.code().unwrap_or(-1);
-        let captured = CommandOutput {
+        let mut captured = CommandOutput {
             status,
             stdout: output.stdout,
             stderr: output.stderr,
         };
+        if let Some(mut file) = stderr_file {
+            use std::io::{Read as _, Seek as _, SeekFrom};
+            let _ = file.seek(SeekFrom::Start(0));
+            let _ = file.read_to_end(&mut captured.stderr);
+        }
         if captured.success() {
             Ok(captured)
         } else {
@@ -240,6 +286,46 @@ fn wait_with_timeout(
 /// The timeout applied when a caller does not request one, matching Python's
 /// `backend.run` default.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// An unlinked temporary file for capturing a child's stderr.
+///
+/// The name is removed as soon as the file is open, so nothing is left behind
+/// even if the process dies; the open descriptor keeps the file alive.
+#[cfg(unix)]
+fn temp_file() -> Result<File, CommandError> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nonce = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        ".tidyshot-command-{}-{nonce:x}",
+        std::process::id()
+    ));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|source| CommandError::Spawn {
+            program: "temporary stderr file".to_owned(),
+            source,
+        })?;
+    let _ = std::fs::remove_file(&path);
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn temp_file() -> Result<File, CommandError> {
+    let path = std::env::temp_dir().join(format!(".tidyshot-command-{}", std::process::id()));
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|source| CommandError::Spawn {
+            program: "temporary stderr file".to_owned(),
+            source,
+        })
+}
 
 #[cfg(unix)]
 fn unsafe_kill(pid: u32) {
@@ -342,5 +428,38 @@ mod tests {
             seen[0].args,
             ["-v", "error", "-show_entries", "stream=width,height"]
         );
+    }
+
+    // A `wl-copy`-style program forks an owner that inherits our pipes and
+    // outlives the parent; piping stderr would block the caller until the
+    // owner exits. The temp-file path must return as soon as the parent exits.
+    #[cfg(unix)]
+    #[test]
+    fn stderr_file_does_not_wait_for_a_pipe_holding_child() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("tidyshot-holder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("holder");
+        std::fs::write(&script, "#!/bin/sh\n( sleep 5 ) &\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        let program = script.to_string_lossy().into_owned();
+
+        let piped = CommandSpec::new(&program).timeout(Duration::from_secs(1));
+        assert!(matches!(
+            SystemRunner.run(&piped),
+            Err(CommandError::Timeout { .. })
+        ));
+
+        let spec = CommandSpec::new(&program)
+            .stderr_to_file(true)
+            .timeout(Duration::from_secs(2));
+        let started = std::time::Instant::now();
+        SystemRunner.run(&spec).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

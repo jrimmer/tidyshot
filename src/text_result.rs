@@ -508,9 +508,10 @@ impl TextResult {
 
     /// Copy the current text through `wl-copy`.
     pub fn copy<R: CommandRunner>(&mut self, runner: &R) -> Result<(), TextError> {
-        let spec = CommandSpec::new("wl-copy")
-            .args(["--type", "text/plain;charset=utf-8"])
-            .stdin(self.text.clone().into_bytes());
+        let spec = crate::commands::clipboard_spec(
+            "text/plain;charset=utf-8",
+            self.text.clone().into_bytes(),
+        );
         match runner.run(&spec) {
             Ok(_) => {
                 self.copied = true;
@@ -830,9 +831,7 @@ impl qobject::TextOutput {
     /// Copy the current text through `wl-copy`.
     pub fn copy(mut self: Pin<&mut Self>) {
         let value = self.text().to_string();
-        let spec = crate::commands::CommandSpec::new("wl-copy")
-            .args(["--type", "text/plain;charset=utf-8"])
-            .stdin(value.into_bytes());
+        let spec = crate::commands::clipboard_spec("text/plain;charset=utf-8", value.into_bytes());
         match crate::commands::SystemRunner.run(&spec) {
             Ok(_) => {
                 self.as_mut().set_copied(true);
