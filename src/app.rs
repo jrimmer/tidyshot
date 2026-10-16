@@ -183,16 +183,14 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
         }
         "select" | "area" | "window" | "fullscreen" | "desktop" | "previous" | "scroll"
         | "scroll-horizontal" | "timer" => Ok(capture(command, action.clone())),
-        "ocr" => {
-            if let Some(path) = &args.path {
-                Ok(Command::Ocr {
-                    path: PathBuf::from(path),
-                    linebreaks: args.url.as_ref().and_then(|url| url.linebreaks),
-                })
-            } else {
-                Ok(capture("ocr", action.clone()))
-            }
-        }
+        "ocr" => Ok(Command::Ocr {
+            path: PathBuf::from(args.path.clone().unwrap_or_default()),
+            linebreaks: args
+                .url
+                .as_ref()
+                .and_then(|url| url.linebreaks)
+                .or(args.linebreaks),
+        }),
         "open" => match &args.path {
             Some(path) if !path.is_empty() => Ok(Command::Edit(PathBuf::from(path))),
             _ => Ok(Command::EditChooser),
