@@ -87,6 +87,9 @@ impl ScrollUi for NoUi {
 pub struct ScrollJob {
     pub generation: u64,
     pub rect: Rect,
+    /// Whether the capture surfaces were hidden, so the worker waits for the
+    /// compositor to present before grabbing.
+    pub wait: bool,
 }
 
 /// A running scrolling capture.
@@ -245,11 +248,24 @@ impl ScrollSession {
             return None;
         }
         self.busy = true;
-        self.ui.before_grab();
+        let hidden = self.ui.before_grab();
         Some(ScrollJob {
             generation: self.generation,
             rect: self.rect,
+            wait: hidden,
         })
+    }
+
+    /// Run one job on the calling thread, honouring the hide delay.
+    ///
+    /// The UI calls this from its worker so the compositor has a chance to
+    /// present an empty frame before the grab, matching the source's 150 ms
+    /// wait when the surfaces were visible in the frame.
+    pub fn run_job(&self, job: ScrollJob) -> Result<FrameData, String> {
+        if job.wait {
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        self.capture.grab(job.rect)
     }
 
     /// Fold a completed grab into the stitch and drive auto-scroll.
@@ -849,6 +865,7 @@ mod tests {
         let stale = ScrollJob {
             generation: 0,
             rect: session.rect,
+            wait: false,
         };
         assert!(session.complete(stale, Ok(frame(200, 100, 0))).is_none());
     }
