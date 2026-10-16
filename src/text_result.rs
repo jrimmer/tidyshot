@@ -694,55 +694,25 @@ fn capture_then_recognize(linebreaks: i32) -> Result<Presentation, TextError> {
 
 /// Run the interactive selector and grab the chosen region.
 ///
-/// `ocr` with no file uses the same interactive selection as the area command;
-/// a dismissed selector is reported rather than swallowed.
+/// `ocr` with no file uses the same interactive selection as the area command:
+/// slurp runs the selector, then grim grabs the chosen region. A dismissed
+/// selector is reported rather than swallowed.
 fn capture_selection() -> Result<Vec<u8>, TextError> {
-    use crate::capture_session::{
-        CaptureMode, CaptureOptions, CaptureOutcome, CaptureRequest, CaptureSession, run_capture,
-    };
+    use crate::capture_session::{CaptureSession, slurp_region};
     let runner = crate::commands::SystemRunner;
-    let registry = crate::mirror::MirrorRegistry::global();
-    let monitor_spec = crate::commands::CommandSpec::new("hyprctl").args(["-j", "monitors"]);
-    let monitors = runner
-        .run(&monitor_spec)
-        .ok()
-        .and_then(|output| crate::json::parse(&output.stdout_string()).ok())
-        .and_then(|value| value.as_array().map(<[_]>::to_vec))
-        .unwrap_or_default();
     let session = CaptureSession {
         runner: &runner,
-        mirror: registry,
+        mirror: crate::mirror::MirrorRegistry::global(),
         native: crate::recording::native_dir(),
     };
-    let error = |detail: String| TextError { message: detail };
+    let rect = slurp_region(&runner, false, &[]).map_err(|error| TextError {
+        message: error.to_string(),
+    })?;
     session
-        .capture_ready(&monitors)
+        .grab(Some(rect), false, None, None)
         .map_err(|error| TextError {
             message: error.to_string(),
-        })?;
-    let request =
-        CaptureRequest::resolve(CaptureMode::Ocr.command(), None, None, 0).map_err(|error| {
-            TextError {
-                message: error.to_string(),
-            }
-        })?;
-    match run_capture(
-        &session,
-        &monitors,
-        &request,
-        CaptureOptions {
-            cursor: false,
-            freeze: false,
-        },
-        |_| {},
-        || false,
-    ) {
-        Ok(CaptureOutcome::Grabbed(frame)) => Ok(frame.png),
-        Ok(_) => Err(error("No region was captured".to_owned())),
-        Err(capture_error) => Err(TextError {
-            message: capture_error.to_string(),
-        }),
-    }
+        })
 }
 
 // --- QML bridge: the recognized-text dialog ------------------------------

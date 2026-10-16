@@ -59,7 +59,8 @@ pub fn run() {
 ///
 /// A `tidyshot ocr <file>` or `capture-text` URL starts the GUI so the
 /// recognized-text dialog can review links; the `Args` singleton reads this
-/// request so the dialog runs the completion path once it is created.
+/// request so the dialog runs the completion path once it is created. A bare
+/// `ocr` carries no path and the dialog runs the interactive capture instead.
 fn note_startup_ocr() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Ok(parsed) = cli::parse_args(args)

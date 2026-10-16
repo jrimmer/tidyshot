@@ -749,7 +749,15 @@ fn installs_the_build_toolchain_it_requires() {
         .into_iter()
         .find(|call| call.iter().take(3).eq(["omarchy", "pkg", "add"]))
         .expect("setup installs missing packages");
-    for package in ["git", "rust", "qt6-base", "qt6-declarative", "ffmpeg"] {
+    for package in [
+        "git",
+        "rust",
+        "qt6-base",
+        "qt6-declarative",
+        "ffmpeg",
+        "tesseract",
+        "zbar",
+    ] {
         assert!(
             package_call.iter().any(|arg| arg == package),
             "the package list must include {package}: {package_call:?}"
