@@ -67,8 +67,9 @@ pub trait ScrollCapture: Send + Sync {
 /// The capture surfaces and keyboard lease the session must release.
 ///
 /// Production supplies an adapter over the QML windows; tests supply a
-/// recorder so the release order is observable.
-pub trait ScrollUi: Send {
+/// recorder so the release order is observable. It stays on the owning
+/// thread, so it needs no `Send` bound.
+pub trait ScrollUi {
     /// Hide the capture surfaces; returns whether the grab should wait.
     fn before_grab(&mut self) -> bool;
     /// Restore the capture surfaces after a grab.
