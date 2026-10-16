@@ -155,7 +155,7 @@ pub fn decode_png(bytes: &[u8]) -> Result<Image, ImageError> {
                 interlace = data[12];
             }
             b"PLTE" => {
-                for chunk in data.chunks_exact(3) {
+                for chunk in data.as_chunks::<3>().0 {
                     palette.push([chunk[0], chunk[1], chunk[2]]);
                 }
             }
