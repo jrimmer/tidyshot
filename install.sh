@@ -38,9 +38,7 @@ cp -r -- "$task_root/manifest.json" "$task_root/plugin" "$task_plugin_check/"
 omarchy plugin validate "$task_plugin_check" || { rm -rf -- "$task_plugin_check"; exit 1; }
 rm -rf -- "$task_plugin_check"
 
-cargo build --release --offline
-mkdir -p -- "$task_root/build"
-cp -p -- "$task_root/target/release/tidyshot" "$task_root/build/tidyshot"
+bash "$task_root/bin/build"
 
 TIDYSHOT_SOURCE="$task_root" python3 "$task_root/scripts/install_user.py"
 hyprctl reload
