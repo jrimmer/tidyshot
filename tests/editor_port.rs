@@ -99,11 +99,13 @@ fn expansion_preserves_alpha_and_cancels_pending_drafts() {
 #[test]
 fn a_portable_project_reopens_with_a_cover_background() {
     let mut document = Document::new(image(300, 200, [255, 255, 255, 255]), None, false);
-    let mut background = Background::default();
-    background.padding = 40;
-    background.radius = 0.0;
-    background.shadow = false;
-    background.image_data = Some(image(20, 20, [0, 0, 255, 255]));
+    let background = Background {
+        padding: 40,
+        radius: 0.0,
+        shadow: false,
+        image_data: Some(image(20, 20, [0, 0, 255, 255])),
+        ..Background::default()
+    };
     document.background = Some(background);
     document.commit();
     let expected = document.render_export();
