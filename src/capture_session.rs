@@ -203,6 +203,10 @@ impl CaptureRequest {
             CaptureMode::Area | CaptureMode::Timer | CaptureMode::Ocr => {
                 self.rect.is_none() && (freeze || !selection_live)
             }
+            // Window selection is a separate overlay that hit-tests the frozen
+            // frame; a window command without geometry always needs it.
+            // Ported from omnishot/app.py (capture)
+            CaptureMode::Window => self.rect.is_none(),
             _ => false,
         }
     }
@@ -250,14 +254,12 @@ impl<R: CommandRunner> CaptureSession<'_, R> {
                 "Unlock the desktop before capturing.".to_owned(),
             ));
         }
-        if !monitors.is_empty()
-            && monitors.iter().all(|monitor| {
-                !monitor
-                    .get("dpmsStatus")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true)
-            })
-        {
+        if monitors.iter().all(|monitor| {
+            !monitor
+                .get("dpmsStatus")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        }) {
             return Err(CaptureRequestError::Compositor(
                 "The display is asleep. Wake it before capturing.".to_owned(),
             ));
@@ -345,11 +347,7 @@ impl<R: CommandRunner> CaptureSession<'_, R> {
 
 fn solitary_locked(monitor: &Value) -> Option<bool> {
     let blocked = monitor.get("solitaryBlockedBy")?.as_array()?;
-    Some(blocked.iter().any(|entry| {
-        entry
-            .as_str()
-            .is_some_and(|name| name.to_ascii_uppercase().contains("LOCK"))
-    }))
+    Some(blocked.iter().any(|entry| entry.as_str() == Some("LOCK")))
 }
 
 /// Build capture displays from the `hyprctl -j monitors` rows.
@@ -477,7 +475,7 @@ pub fn run_capture<R: CommandRunner>(
             CaptureMode::Area | CaptureMode::Timer | CaptureMode::Ocr
         ) && request.rect.is_none());
     let plan = if needs_plan {
-        plan_selection(session.mirror, session.runner, &session.native, freeze)
+        plan_selection(session.mirror, session.runner, &session.native, freeze)?
     } else {
         SelectionPlan {
             live: false,
@@ -487,8 +485,10 @@ pub fn run_capture<R: CommandRunner>(
     if request.needs_selection(freeze, plan.live) {
         return Ok(CaptureOutcome::NeedsSelection);
     }
-    // A live selection runs slurp itself; fullscreen/desktop/window keep
-    // their output-based grab and every other mode uses the selected region.
+    // A live selection runs slurp itself; fullscreen/desktop keep their
+    // output-based grab and every other mode uses the selected region. A live
+    // slurp holds the selection mirror so the selector never appears in its
+    // own frame.
     let mut rect = request.rect;
     if rect.is_none()
         && matches!(
@@ -496,7 +496,20 @@ pub fn run_capture<R: CommandRunner>(
             CaptureMode::Select | CaptureMode::Area | CaptureMode::Timer | CaptureMode::Ocr
         )
     {
-        rect = Some(slurp_region(session.runner, false, &[])?);
+        let mut selection_lease = if plan.mirror {
+            let mut lease = session.mirror.lease("selection_capture");
+            lease
+                .start(session.runner, &session.native)
+                .map_err(CaptureRequestError::Mirror)?;
+            Some(lease)
+        } else {
+            None
+        };
+        let selected = slurp_region(session.runner, false, &[]);
+        if let Some(mut lease) = selection_lease.take() {
+            lease.stop(session.runner)?;
+        }
+        rect = Some(selected?);
     }
     // The self timer counts down here, after the area exists and before the
     // pixels are taken, matching `timed_capture`.
@@ -562,16 +575,6 @@ pub fn run_capture<R: CommandRunner>(
                     })
                     .collect(),
             ))
-        }
-        CaptureMode::Window => {
-            // The frozen desktop frame is grabbed like a fullscreen capture;
-            // window hit-testing runs in the overlay.
-            let target = session.target(&displays, None)?;
-            let png = session.grab(None, cursor, target.name.as_deref(), None)?;
-            Ok(CaptureOutcome::Grabbed(GrabbedFrame {
-                rect: Some(target.bounds),
-                png,
-            }))
         }
         _ => {
             let output = rect
@@ -704,41 +707,41 @@ pub struct SelectionPlan {
     pub mirror: bool,
 }
 
-/// Choose the selection strategy, degrading live selection when the plugin
-/// cannot load.
+/// Choose the selection strategy, degrading live selection only when the
+/// compositor cannot hook functions.
 ///
 /// A live overlay would appear in its own capture, so when the mirror is
-/// unavailable the selection freezes instead of following the desktop.
+/// unavailable on aarch64 the selection freezes instead of following the
+/// desktop. Every other mirror failure is fatal, exactly like the source:
+/// an ABI mismatch or a failed role registration must stop the capture rather
+/// than let the live overlay leak into the frame.
 // Ported from omnishot/app.py (frozen_selection) and omnishot/clean_capture.py
 pub fn plan_selection<R: CommandRunner>(
     registry: &MirrorRegistry,
     runner: &R,
     native: &std::path::Path,
     freeze: bool,
-) -> SelectionPlan {
+) -> Result<SelectionPlan, CaptureRequestError> {
     if freeze {
-        return SelectionPlan {
+        return Ok(SelectionPlan {
             live: false,
             mirror: false,
-        };
+        });
     }
     let mut lease = registry.lease("selection_capture");
     match lease.start(runner, native) {
         Ok(()) => {
             let _ = lease.stop(runner);
-            SelectionPlan {
+            Ok(SelectionPlan {
                 live: true,
                 mirror: true,
-            }
+            })
         }
-        Err(MirrorError::Unavailable(_)) => SelectionPlan {
+        Err(MirrorError::Unavailable(_)) => Ok(SelectionPlan {
             live: false,
             mirror: false,
-        },
-        Err(_) => SelectionPlan {
-            live: true,
-            mirror: true,
-        },
+        }),
+        Err(error) => Err(CaptureRequestError::Mirror(error)),
     }
 }
 
@@ -955,6 +958,13 @@ mod tests {
         assert!(ocr.needs_selection(true, false));
         assert!(ocr.needs_selection(false, false));
         assert!(!ocr.needs_selection(false, true));
+        // A window command hit-tests the frozen frame in its own overlay
+        // unless a geometry pins the region.
+        let window = CaptureRequest::resolve("window", None, None, 0).unwrap();
+        assert!(window.needs_selection(true, true));
+        assert!(window.needs_selection(false, true));
+        let fixed_window = CaptureRequest::resolve("window", Some("0,0 100x100"), None, 0).unwrap();
+        assert!(!fixed_window.needs_selection(true, true));
     }
 
     #[test]
@@ -1064,6 +1074,12 @@ mod tests {
         };
         let locked = crate::json::parse(r#"[{"solitaryBlockedBy":["LOCK"]}]"#).unwrap();
         assert!(session.capture_ready(locked.as_array().unwrap()).is_err());
+        // An empty monitor list is asleep because `all` over nothing is true,
+        // matching the source's `not any(...)`.
+        assert!(session.capture_ready(&[]).is_err());
+        // Only the exact-case 'LOCK' entry blocks the session.
+        let locked_lower = crate::json::parse(r#"[{"solitaryBlockedBy":["locked"]}]"#).unwrap();
+        assert!(session.capture_ready(locked_lower.as_array().unwrap()).is_ok());
         let asleep = crate::json::parse(r#"[{"dpmsStatus":false}]"#).unwrap();
         assert!(session.capture_ready(asleep.as_array().unwrap()).is_err());
         let awake = crate::json::parse(r#"[{"dpmsStatus":true}]"#).unwrap();
@@ -1199,6 +1215,43 @@ mod tests {
                 .iter()
                 .all(|spec| spec.program != "grim"),
             "the overlay owns the pointer, grim must not run"
+        );
+    }
+
+    #[test]
+    fn window_without_geometry_defers_to_the_window_overlay() {
+        // app.py routes a window command without geometry to window_selection,
+        // which grabs the frozen frame and never runs grim itself here.
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let request = CaptureRequest::resolve("window", None, None, 0).unwrap();
+        let outcome = run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: true,
+            },
+            |_| {},
+            || false,
+        )
+        .unwrap();
+        assert_eq!(outcome, CaptureOutcome::NeedsSelection);
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|spec| spec.program != "grim"),
+            "the window overlay owns the grab"
         );
     }
 
@@ -1553,7 +1606,7 @@ mod tests {
         let native = NativeDir::new();
         // aarch64 rejects the hook, so a live overlay is impossible.
         let registry = degraded_registry();
-        let plan = plan_selection(&registry, &runner, &native.0, false);
+        let plan = plan_selection(&registry, &runner, &native.0, false).unwrap();
         assert_eq!(
             plan,
             SelectionPlan {
@@ -1562,8 +1615,93 @@ mod tests {
             }
         );
         // Freezing never needs the mirror.
-        let plan = plan_selection(&registry, &runner, &native.0, true);
+        let plan = plan_selection(&registry, &runner, &native.0, true).unwrap();
         assert!(!plan.live && !plan.mirror);
+    }
+
+    #[test]
+    fn a_rebuildable_mirror_failure_stops_the_selection() {
+        // Missing components or a failed role registration are fatal, not a
+        // silent degrade: a live overlay without the mirror would appear in
+        // its own capture.
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        // No native directory at all triggers MirrorError::Rebuild.
+        let missing =
+            std::env::temp_dir().join(format!("tidyshot-missing-native-{}", std::process::id()));
+        let error = plan_selection(&registry, &runner, &missing, false).unwrap_err();
+        assert!(matches!(error, CaptureRequestError::Mirror(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_failed_selection_registration_stops_the_capture_up_front() {
+        // The cursor role can still succeed for grab, but a selection_capture
+        // registration failure must stop the capture before grim runs.
+        #[derive(Default)]
+        struct FailingRegistration {
+            seen: std::sync::Mutex<Vec<CommandSpec>>,
+        }
+        impl CommandRunner for FailingRegistration {
+            fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+                self.seen.lock().unwrap().push(spec.clone());
+                let out = |text: &str| CommandOutput {
+                    status: 0,
+                    stdout: text.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                };
+                match spec.args.as_slice() {
+                    [flag, query] if flag == "-j" && query == "plugin list" => {
+                        Ok(out("[{\"name\":\"omnishot-clean-mirror\"}]"))
+                    }
+                    [action, expression] if action == "eval" => {
+                        if expression.contains("selection_capture") {
+                            Err(CommandError::Failure {
+                                program: "hyprctl".to_owned(),
+                                output: CommandOutput {
+                                    status: 1,
+                                    stdout: Vec::new(),
+                                    stderr: b"registration failed".to_vec(),
+                                },
+                            })
+                        } else {
+                            Ok(out("ok"))
+                        }
+                    }
+                    _ => Ok(out("ok")),
+                }
+            }
+        }
+        let native = NativeDir::new();
+        let registry = MirrorRegistry::with_arch("x86_64");
+        let runner = FailingRegistration::default();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let request = CaptureRequest::resolve("area", None, None, 0).unwrap();
+        let error = run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: false,
+            },
+            |_| {},
+            || false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("registration"), "{error}");
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|spec| spec.program != "grim" && spec.program != "slurp"),
+            "a failed mirror must fail before any interactive selection"
+        );
     }
 
     #[test]
@@ -1601,7 +1739,7 @@ mod tests {
         let loading = Loading {
             loaded: std::sync::atomic::AtomicBool::new(false),
         };
-        let plan = plan_selection(&registry, &loading, &native.0, false);
+        let plan = plan_selection(&registry, &loading, &native.0, false).unwrap();
         assert!(plan.live && plan.mirror);
     }
 }
