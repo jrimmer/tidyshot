@@ -59,14 +59,11 @@ impl Value {
         }
     }
 
-    /// Resolve a dotted key path through nested objects.
+    /// Look up a single object key, as Python's `dict.get` does. A key that
+    /// contains a literal `.` is matched exactly rather than split as a path.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&Value> {
-        let mut current = self;
-        for part in key.split('.') {
-            current = current.as_object()?.get(part)?;
-        }
-        Some(current)
+        self.as_object()?.get(key)
     }
 }
 
@@ -345,7 +342,37 @@ impl Parser<'_> {
                         b'n' => out.push('\n'),
                         b'r' => out.push('\r'),
                         b't' => out.push('\t'),
-                        b'u' => out.push(self.parse_unicode_escape()?),
+                        b'u' => {
+                            let first = self.parse_hex4()?;
+                            if (0xD800..=0xDBFF).contains(&first) {
+                                // A high surrogate must be followed by a low one.
+                                if self.peek() != Some(b'\\') {
+                                    return Err(JsonError::new("lone high surrogate", self.pos));
+                                }
+                                self.pos += 1;
+                                if self.peek() != Some(b'u') {
+                                    return Err(JsonError::new(
+                                        "high surrogate without low surrogate",
+                                        self.pos,
+                                    ));
+                                }
+                                self.pos += 1;
+                                let second = self.parse_hex4()?;
+                                if !(0xDC00..=0xDFFF).contains(&second) {
+                                    return Err(JsonError::new("invalid low surrogate", self.pos));
+                                }
+                                let code = 0x1_0000 + ((first - 0xD800) << 10) + (second - 0xDC00);
+                                let c = char::from_u32(code).ok_or_else(|| {
+                                    JsonError::new("invalid code point", self.pos)
+                                })?;
+                                out.push(c);
+                            } else {
+                                let c = char::from_u32(first).ok_or_else(|| {
+                                    JsonError::new("invalid code point", self.pos)
+                                })?;
+                                out.push(c);
+                            }
+                        }
                         _ => return Err(JsonError::new("invalid escape", self.pos)),
                     }
                 }
@@ -363,7 +390,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_unicode_escape(&mut self) -> Result<char, JsonError> {
+    fn parse_hex4(&mut self) -> Result<u32, JsonError> {
         if self.pos + 4 > self.bytes.len() {
             return Err(JsonError::new("truncated unicode escape", self.pos));
         }
@@ -372,7 +399,7 @@ impl Parser<'_> {
         let code = u32::from_str_radix(hex, 16)
             .map_err(|_| JsonError::new("invalid unicode escape", self.pos))?;
         self.pos += 4;
-        char::from_u32(code).ok_or_else(|| JsonError::new("invalid code point", self.pos))
+        Ok(code)
     }
 
     fn parse_number(&mut self) -> Result<Value, JsonError> {
@@ -423,8 +450,24 @@ mod tests {
     }
 
     #[test]
+    fn literal_dots_in_keys_are_not_paths() {
+        let value = parse(r#"{"a.b":1}"#).unwrap();
+        assert_eq!(value.get("a.b").unwrap().as_f64(), Some(1.0));
+    }
+
+    #[test]
     fn parses_escapes() {
         let value = parse(r#""a\nb\u0041""#).unwrap();
         assert_eq!(value.as_str(), Some("a\nbA"));
+    }
+
+    #[test]
+    fn parses_surrogate_pairs() {
+        assert_eq!(parse(r#""\uD83D\uDE00""#).unwrap().as_str(), Some("😀"));
+        assert_eq!(parse(r#""\ud83d\ude00""#).unwrap().as_str(), Some("😀"));
+        assert_eq!(parse(r#""\uD83D\uDE00a""#).unwrap().as_str(), Some("😀a"));
+        // A lone or malformed surrogate is rejected, not silently dropped.
+        assert!(parse(r#""\uD83D""#).is_err());
+        assert!(parse(r#""\uD83D\u0041""#).is_err());
     }
 }

@@ -10,6 +10,8 @@ description = "Screen capture, annotation and recording for Omarchy, rebuilt in 
 cxx = "1.0.205"
 cxx-qt = "0.10.0"
 cxx-qt-lib = { version = "0.10.0", features = ["full"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+getrandom = "0.4.3"
 
 [build-dependencies]
 cxx-qt-build = { version = "0.10.0", features = ["link_qt_object_files"] }

@@ -8,6 +8,8 @@
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Datelike as _, Local, TimeZone as _, Timelike as _, Utc};
+
 pub const DEFAULT_FORMAT: &str = "OmniShot %y-%m-%d at %H.%M.%S";
 
 /// A single `%X` token offered to the name customizer.
@@ -156,7 +158,7 @@ pub fn format_name(pattern: &str, options: &NameOptions<'_>) -> String {
             'r' => {
                 let token = options
                     .random_token
-                    .map_or_else(|| random_token(created, options.sequence), str::to_owned);
+                    .map_or_else(random_token, str::to_owned);
                 name.write_str(&token).ok()
             }
             'i' => write!(name, "{}", options.sequence).ok(),
@@ -191,11 +193,22 @@ pub fn format_name(pattern: &str, options: &NameOptions<'_>) -> String {
 #[must_use]
 pub fn scale_suffix(ratio: f64) -> String {
     if ratio.is_finite() && ratio > 1.001 && ratio <= 16.0 {
-        let text = format!("{ratio:.3}");
-        let trimmed = text.trim_end_matches('0').trim_end_matches('.');
-        format!("@{trimmed}x")
+        format!("@{}x", three_significant(ratio))
     } else {
         String::new()
+    }
+}
+
+/// Format a value with three significant digits, the way Python's `:.3g` does
+/// (including dropping trailing zeros).
+fn three_significant(value: f64) -> String {
+    let magnitude = value.abs().log10().floor() as i32;
+    let decimals = (2 - magnitude).max(0) as usize;
+    let text = format!("{value:.decimals$}");
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        text
     }
 }
 
@@ -235,39 +248,27 @@ struct Civil {
 
 /// Convert an epoch timestamp into local or UTC civil fields.
 ///
-/// Without a timezone database, local time falls back to UTC; the Python
-/// default also uses the process timezone, and captures on this system run in
-/// UTC.
+/// `%y-%m-%d` and friends follow the configured time zone: the default
+/// (`utc: false`) uses the machine's local time, matching the Python default.
 fn civil_time(epoch: i64, utc: bool) -> Civil {
-    let _ = utc;
-    let days = epoch.div_euclid(86_400);
-    let secs = epoch.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    // 1970-01-01 was a Thursday (weekday 4, Monday = 0).
-    let weekday = (days.rem_euclid(7) as u32 + 3) % 7;
-    Civil {
-        year,
-        month,
-        day,
-        hour: (secs / 3600) as u32,
-        minute: (secs % 3600 / 60) as u32,
-        second: (secs % 60) as u32,
-        weekday,
+    if utc {
+        civil_fields(DateTime::<Utc>::from_timestamp(epoch, 0).unwrap_or_default())
+    } else {
+        civil_fields(Local.timestamp_opt(epoch, 0).single().unwrap_or_default())
     }
 }
 
-/// Days-to-civil (Howard Hinnant's algorithm), matching `strftime` fields.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
+fn civil_fields<Tz: chrono::TimeZone>(datetime: DateTime<Tz>) -> Civil {
+    Civil {
+        year: i64::from(datetime.year()),
+        month: datetime.month(),
+        day: datetime.day(),
+        hour: datetime.hour(),
+        minute: datetime.minute(),
+        second: datetime.second(),
+        // Monday = 0, matching the `%w` ordering below and Python's `%A`.
+        weekday: datetime.weekday().num_days_from_monday(),
+    }
 }
 
 fn month_name(month: u32) -> &'static str {
@@ -304,12 +305,11 @@ fn weekday_name(weekday: u32) -> &'static str {
     NAMES.get(weekday as usize).copied().unwrap_or("")
 }
 
-/// Deterministic fallback when the caller supplies no random token.
-fn random_token(created: i64, sequence: i64) -> String {
-    let mixed = (created as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add((sequence as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
-    format!("{:06x}", mixed & 0xFF_FFFF)
+/// Six hex characters like `uuid4().hex[:6]`, backed by the system RNG.
+fn random_token() -> String {
+    let mut bytes = [0u8; 3];
+    let _ = getrandom::fill(&mut bytes);
+    format!("{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2])
 }
 
 #[cfg(test)]
@@ -367,6 +367,40 @@ mod tests {
         assert_eq!(scale_suffix(1.0), "");
         assert_eq!(scale_suffix(1.6), "@1.6x");
         assert_eq!(scale_suffix(2.0), "@2x");
+        assert_eq!(scale_suffix(1.234), "@1.23x");
+        assert_eq!(scale_suffix(12.34), "@12.3x");
         assert_eq!(scale_suffix(20.0), "");
+    }
+
+    #[test]
+    fn utc_and_local_rendering_differ_by_the_local_offset() {
+        // A fixed instant; its local and UTC fields differ anywhere but UTC.
+        let stamp = 1_788_617_229;
+        let utc = format_name(
+            "%y-%m-%d %H.%M",
+            &NameOptions {
+                created: Some(stamp),
+                utc: true,
+                ..NameOptions::default()
+            },
+        );
+        let local = format_name(
+            "%y-%m-%d %H.%M",
+            &NameOptions {
+                created: Some(stamp),
+                ..NameOptions::default()
+            },
+        );
+        assert_eq!(utc, "2026-09-05 14.07");
+        // Only assert equality with a separately computed local rendering when
+        // the machine is not on UTC, so the test is stable in both cases.
+        if Local
+            .timestamp_opt(stamp, 0)
+            .single()
+            .map(|t| t.offset().local_minus_utc())
+            != Some(0)
+        {
+            assert_ne!(local, utc);
+        }
     }
 }

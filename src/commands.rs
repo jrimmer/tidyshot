@@ -159,6 +159,13 @@ impl CommandRunner for SystemRunner {
         for (key, value) in &spec.env {
             command.env(key, value);
         }
+        // Give every child its own process group so a timeout can reap the
+        // encoder it spawned as well as the child itself.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
 
         let mut child = command.spawn().map_err(|source| CommandError::Spawn {
             program: spec.program.clone(),
@@ -170,23 +177,22 @@ impl CommandRunner for SystemRunner {
                 program: spec.program.clone(),
                 source: io::Error::other("stdin pipe unavailable"),
             })?;
-            stdin
-                .write_all(data)
-                .map_err(|source| CommandError::Spawn {
+            if let Err(source) = stdin.write_all(data) {
+                // A broken pipe means the child exited early; reap it so it
+                // does not linger as a zombie.
+                drop(stdin);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CommandError::Spawn {
                     program: spec.program.clone(),
                     source,
-                })?;
+                });
+            }
         }
 
-        let output = match spec.timeout {
-            Some(timeout) => wait_with_timeout(child, timeout, &spec.program)?,
-            None => child
-                .wait_with_output()
-                .map_err(|source| CommandError::Spawn {
-                    program: spec.program.clone(),
-                    source,
-                })?,
-        };
+        // Python's backend.run defaults to a 30 second timeout.
+        let timeout = spec.timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let output = wait_with_timeout(child, timeout, &spec.program)?;
         let status = output.status.code().unwrap_or(-1);
         let captured = CommandOutput {
             status,
@@ -221,7 +227,7 @@ fn wait_with_timeout(
             source,
         }),
         Err(_) => {
-            // SIGKILL the process group so children (encoders) die too.
+            // SIGKILL the whole process group, so children (encoders) die too.
             unsafe_kill(pid);
             Err(CommandError::Timeout {
                 program: program.to_owned(),
@@ -231,12 +237,16 @@ fn wait_with_timeout(
     }
 }
 
+/// The timeout applied when a caller does not request one, matching Python's
+/// `backend.run` default.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[cfg(unix)]
 fn unsafe_kill(pid: u32) {
-    // The runner is the only place a child is signalled, and it needs libc's
-    // kill without linking libc: use the raw syscall through `Command`.
+    // The child leads its own process group (see `process_group(0)` above), so
+    // a negative pid signals the group and takes any encoder with it.
     let _ = Command::new("kill")
-        .args(["-9", &pid.to_string()])
+        .args(["-9", &format!("-{pid}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
