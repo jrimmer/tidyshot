@@ -411,7 +411,7 @@ impl Preview {
     /// The pixel dimensions of the content.
     #[must_use]
     pub fn dimensions(&self) -> (usize, usize) {
-        (self.image.width as usize, self.image.height as usize)
+        (self.image.width, self.image.height)
     }
 
     /// The title line for this preview, from the configured display name.

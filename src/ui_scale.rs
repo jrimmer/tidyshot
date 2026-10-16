@@ -185,12 +185,12 @@ pub fn size(width: f64, height: f64, factor: f64) -> (i32, i32) {
 #[must_use]
 pub fn stylesheet(text: &str, appearance: &Appearance) -> String {
     let mut out = String::with_capacity(text.len());
-    for (index, segment) in text.split_inclusive(|c| c == ';' || c == '{' || c == '}').enumerate() {
+    for (index, segment) in text.split_inclusive([';', '{', '}']).enumerate() {
         let _ = index;
         let delimiter = segment
             .chars()
             .last()
-            .filter(|c| *c == ';' || *c == '{' || *c == '}')
+            .filter(|c| [';', '{', '}'].contains(c))
             .map(|c| c.to_string())
             .unwrap_or_default();
         let body = &segment[..segment.len() - delimiter.len()];
@@ -239,14 +239,14 @@ fn scale_pixels(value: &str, factor: f64) -> String {
             continue;
         }
         if let Some(start) = number_start {
-            if value[index..].starts_with("px") {
-                if let Ok(number) = value[start..index].parse::<f64>() {
-                    out.push_str(&(py_round(number * factor) as i64).to_string());
-                    out.push_str("px");
-                    index += 2;
-                    number_start = None;
-                    continue;
-                }
+            if value[index..].starts_with("px")
+                && let Ok(number) = value[start..index].parse::<f64>()
+            {
+                out.push_str(&(py_round(number * factor) as i64).to_string());
+                out.push_str("px");
+                index += 2;
+                number_start = None;
+                continue;
             }
             out.push_str(&value[start..index]);
             number_start = None;
@@ -303,8 +303,10 @@ impl TomlValue {
 
 /// Parse the subset of TOML the shell theme uses: `[section]` headers and
 /// `key = value` pairs with integers, floats, quoted strings or booleans.
-fn parse_toml(text: &str) -> Result<Vec<(String, Vec<(String, TomlValue)>)>, AppearanceError> {
-    let mut sections: Vec<(String, Vec<(String, TomlValue)>)> = Vec::new();
+type TomlSections = Vec<(String, Vec<(String, TomlValue)>)>;
+
+fn parse_toml(text: &str) -> Result<TomlSections, AppearanceError> {
+    let mut sections: TomlSections = Vec::new();
     let mut current: Option<usize> = None;
     for raw in text.lines() {
         let line = raw.trim();
@@ -458,7 +460,7 @@ mod tests {
         let dir = scratch("spacing");
         let file = dir.join("theme.toml");
         std::fs::write(&file, "[spacing]\nscale=-1\n").unwrap();
-        assert!(read(Some(&[file.clone()])).is_none());
+        assert!(read(Some(std::slice::from_ref(&file))).is_none());
         std::fs::write(&file, "[spacing]\nscale=0\n").unwrap();
         assert_eq!(read(Some(&[file])).unwrap().factor(), 0.0);
     }

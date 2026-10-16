@@ -1,6 +1,7 @@
 // The library target every binary and test links.
 pub mod annotation;
 pub mod api;
+pub mod app;
 pub mod backgrounds;
 pub mod bridge;
 pub mod capture;
@@ -20,6 +21,7 @@ pub mod effects;
 pub mod filenames;
 pub mod geometry;
 pub mod gif;
+pub mod instance;
 pub mod json;
 pub mod media_import;
 pub mod menu;
