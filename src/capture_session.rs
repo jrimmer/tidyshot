@@ -1079,7 +1079,11 @@ mod tests {
         assert!(session.capture_ready(&[]).is_err());
         // Only the exact-case 'LOCK' entry blocks the session.
         let locked_lower = crate::json::parse(r#"[{"solitaryBlockedBy":["locked"]}]"#).unwrap();
-        assert!(session.capture_ready(locked_lower.as_array().unwrap()).is_ok());
+        assert!(
+            session
+                .capture_ready(locked_lower.as_array().unwrap())
+                .is_ok()
+        );
         let asleep = crate::json::parse(r#"[{"dpmsStatus":false}]"#).unwrap();
         assert!(session.capture_ready(asleep.as_array().unwrap()).is_err());
         let awake = crate::json::parse(r#"[{"dpmsStatus":true}]"#).unwrap();
