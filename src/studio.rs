@@ -319,8 +319,9 @@ pub fn paint_cursor(
 
 /// One composed frame from the source and optional camera.
 ///
-/// Motion blur, when enabled, averages several sharp compositions sampled
-/// inside the frame's shutter window before returning a single image.
+/// Motion blur averages source-sized input-layer renders sampled inside the
+/// frame's shutter window, then frames the blurred canvas once, so padding and
+/// background are applied to the final image rather than to each sample.
 // Ported from omnishot/studio.py (compose_frame) and
 // omnishot/motion_blur.py (compose_motion)
 #[must_use]
@@ -335,19 +336,72 @@ pub fn compose_frame(
     if times.len() == 1 || blur_level(options) == 0 {
         return compose_sharp_frame(frame, t, metadata, options, camera);
     }
-    let mut accumulation = vec![0u32; frame.width * frame.height * 4];
-    for seconds in &times {
-        let rendered = compose_sharp_frame(frame, *seconds, metadata, options, camera);
-        for (target, source) in accumulation.iter_mut().zip(rendered.data.iter()) {
-            *target += u32::from(*source);
+    let (sharp, zoom) = compose_screen(frame, t, metadata, options);
+    let canvas = if zooms_moved(&times, metadata, options, frame.width, frame.height) {
+        let mut accumulation = vec![0u32; frame.width * frame.height * 4];
+        for seconds in &times {
+            let (rendered, _) = compose_screen(frame, *seconds, metadata, options);
+            for (target, source) in accumulation.iter_mut().zip(rendered.data.iter()) {
+                *target += u32::from(*source);
+            }
         }
-    }
-    let count = times.len() as u32;
-    let data: Vec<u8> = accumulation
-        .into_iter()
-        .map(|value| ((value + count / 2) / count).min(255) as u8)
-        .collect();
-    Image::new(frame.width, frame.height, data)
+        let count = times.len() as u32;
+        let data: Vec<u8> = accumulation
+            .into_iter()
+            .map(|value| ((value + count / 2) / count).min(255) as u8)
+            .collect();
+        Image::new(frame.width, frame.height, data)
+    } else {
+        sharp
+    };
+    compose_scene(&canvas, t, metadata, options, camera, zoom)
+}
+
+/// Whether any shutter state maps at least a sub-pixel distance from the state
+/// at `t`.
+///
+/// When nothing moves during the shutter window the sharp render is returned
+/// without averaging, matching the source's state-similarity fast path.
+// Ported from omnishot/motion_blur.py (compose_motion)
+fn zooms_moved(
+    times: &[f64],
+    metadata: &Value,
+    options: &Options,
+    width: usize,
+    height: usize,
+) -> bool {
+    let samples = CursorSample::list_from_json(metadata.get("cursor"));
+    let zooms = Zoom::list_from_json(options.get("zooms"));
+    let animation = options
+        .get("zoom_animation")
+        .and_then(Value::as_str)
+        .unwrap_or("Smooth");
+    let cursor_enabled = options.get("cursor").is_none_or(Value::is_truthy);
+    let state = |seconds: f64| {
+        let cursor = cursor_at(&samples, seconds);
+        let (scale, x, y) = zoom_at(&zooms, seconds, cursor.map(|c| (c.x, c.y)), animation);
+        let x = x.clamp(0.5 / scale, 1.0 - 0.5 / scale);
+        let y = y.clamp(0.5 / scale, 1.0 - 0.5 / scale);
+        let mut values = vec![
+            (0.5 - x * scale) * width as f64,
+            (0.5 - y * scale) * height as f64,
+            scale * width as f64,
+            scale * height as f64,
+        ];
+        if cursor_enabled && let Some(cursor) = cursor {
+            values.extend([cursor.x * width as f64, cursor.y * height as f64]);
+        }
+        values
+    };
+    let reference = state(times[times.len() - 1]);
+    times.iter().any(|seconds| {
+        let values = state(*seconds);
+        values.len() != reference.len()
+            || values
+                .iter()
+                .zip(reference.iter())
+                .any(|(a, b)| (a - b).abs() >= 0.15)
+    })
 }
 
 /// One sharp composition, without motion blur.
@@ -1580,6 +1634,31 @@ mod tests {
         let result = compose_frame(&frame, 0.0, &metadata, &options, None);
         assert_eq!(result.width, result.height);
         assert_eq!(result.pixel(1, 1), [0x25, 0x30, 0x4f, 255]);
+    }
+
+    #[test]
+    fn motion_impl_is_framed_once_at_the_output_size() {
+        // Regression: blur must run on source-sized input layers, then the
+        // padded scene framing is applied exactly once, so a padded blurred
+        // frame is the same size as the sharp one.
+        let mut frame = Image::new(64, 64, vec![0u8; 64 * 64 * 4]);
+        for pixel in frame.data.as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[200, 120, 40, 255]);
+        }
+        let metadata = Value::Object(BTreeMap::new());
+        let options = options(&[
+            ("motion_blur", Value::Number(3.0)),
+            ("fps", Value::Number(30.0)),
+            ("padding", Value::Number(10.0)),
+            ("width", Value::Number(64.0)),
+            ("cursor", Value::Bool(false)),
+            ("clicks", Value::Bool(false)),
+            ("keys", Value::Bool(false)),
+        ]);
+        let sharp = compose_sharp_frame(&frame, 0.5, &metadata, &options, None);
+        let blurred = compose_motion(&frame, 0.5, &metadata, &options);
+        assert_eq!((sharp.width, sharp.height), (84, 84));
+        assert_eq!((blurred.width, blurred.height), (sharp.width, sharp.height));
     }
 
     #[test]

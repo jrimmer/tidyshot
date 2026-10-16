@@ -594,6 +594,9 @@ fn a_real_export_writes_a_playable_higher_resolution_file() {
         ("fps".to_owned(), Value::Number(15.0)),
         ("width".to_owned(), Value::Number(320.0)),
         ("padding".to_owned(), Value::Number(20.0)),
+        // Regression: padding plus motion blur must frame the blurred
+        // source-sized canvas once, not truncate the padded output.
+        ("motion_blur".to_owned(), Value::Number(3.0)),
         ("background".to_owned(), Value::String("#25304f".to_owned())),
         ("cursor".to_owned(), Value::Bool(true)),
         (

@@ -135,10 +135,9 @@ pub fn edit_event(
     value: Value,
     duration: f64,
 ) -> bool {
-    let slot = edits.entry(index.to_string()).or_default();
     match key {
         EditField::Hidden => {
-            slot.hidden = Some(!value.is_truthy());
+            edits.entry(index.to_string()).or_default().hidden = Some(!value.is_truthy());
             true
         }
         EditField::Time => {
@@ -148,7 +147,7 @@ pub fn edit_event(
             if !(0.0..=duration).contains(&t) {
                 return false;
             }
-            slot.t = Some(t);
+            edits.entry(index.to_string()).or_default().t = Some(t);
             true
         }
         EditField::Label => {
@@ -160,7 +159,7 @@ pub fn edit_event(
             };
             let mut label = label.to_owned();
             label.truncate(200);
-            slot.label = Some(label);
+            edits.entry(index.to_string()).or_default().label = Some(label);
             true
         }
     }
@@ -302,6 +301,16 @@ mod tests {
             Value::Number(9.0),
             5.0
         ));
+        // A rejected edit must not create an empty slot in the map.
+        assert!(!edit_event(
+            &mut edits,
+            1,
+            &events,
+            EditField::Time,
+            Value::Number(9.0),
+            5.0
+        ));
+        assert!(!edits.contains_key("1"));
         assert!(edit_event(
             &mut edits,
             0,

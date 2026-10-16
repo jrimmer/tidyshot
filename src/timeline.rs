@@ -206,10 +206,14 @@ impl Timeline {
     #[must_use]
     pub fn zoom_gap(&self, seconds: f64) -> Option<(f64, f64)> {
         let mut lo = self.start;
-        let mut hi = self.end.max(self.duration);
-        if self.end <= 0.0 {
-            hi = self.duration;
-        }
+        // The zoom window is capped at the trim end, as `self.end or
+        // self.duration` does in the source: an unset (`0`) end falls back to
+        // the full duration.
+        let mut hi = if self.end > 0.0 {
+            self.end
+        } else {
+            self.duration
+        };
         if !(lo <= seconds && seconds < hi) {
             return None;
         }
@@ -681,6 +685,25 @@ mod tests {
         assert_eq!(t.zoom_gap(5.0), Some((4.0, 6.0)));
         assert_eq!(t.zoom_limits(0), (0.0, 6.0));
         assert_eq!(t.zoom_limits(1), (4.0, 18.0));
+    }
+
+    #[test]
+    fn zoom_gap_is_capped_at_the_trim_end() {
+        // Regression: `self.end or self.duration` caps the zoom window at the
+        // trim end, so a zoom cannot be added outside the trimmed range.
+        let mut t = timeline(10000.0, 30.0);
+        t.start = 1.0;
+        t.end = 5.0;
+        assert_eq!(t.zoom_gap(4.0), Some((1.0, 5.0)));
+        // A zoom at 7s is outside the trimmed range and must be rejected.
+        assert_eq!(t.zoom_gap(7.0), None);
+        assert_eq!(t.add_zoom_at(7.0), None);
+        assert_eq!(t.add_zoom_at(2.0), Some(0));
+        assert!(t.zooms[0].end <= 5.0);
+        // An unset end still spans the whole duration; the existing zoom
+        // ending at 5 is what now raises the floor.
+        t.end = 0.0;
+        assert_eq!(t.zoom_gap(7.0), Some((5.0, 10.0)));
     }
 
     #[test]
