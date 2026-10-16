@@ -12,6 +12,7 @@ pub mod commands;
 pub mod compat;
 pub mod compress;
 pub mod doctor;
+pub mod editor;
 pub mod effects;
 pub mod filenames;
 pub mod geometry;
