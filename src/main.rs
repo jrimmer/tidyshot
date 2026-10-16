@@ -31,20 +31,15 @@ where
             Some(doctor(&args[1..]))
         }
         Some("compat") => Some(tidyshot::compat::cli(&args[1..])),
-        Some("ocr") => {
-            let path = args.get(1).map(String::as_str).unwrap_or_default();
-            Some(run_ocr(path))
-        }
+        // With no path the GUI runs the capture; only a file path is
+        // recognized headlessly here.
+        Some("ocr") => args.get(1).map(|path| run_ocr(path)),
         _ => None,
     }
 }
 
 /// Recognize `path` and copy the result.
 fn run_ocr(path: &str) -> i32 {
-    if path.is_empty() {
-        eprintln!("ocr needs an image path");
-        return 1;
-    }
     let runner = tidyshot::commands::SystemRunner;
     let qr = tidyshot::text_result::CommandQrReader::new(runner, "zbarimg");
     let settings = tidyshot::text_result::TextSettings::default();
@@ -90,8 +85,8 @@ mod tests {
     }
 
     #[test]
-    fn ocr_without_a_path_fails_without_starting_the_gui() {
-        assert_eq!(run_subcommand(&["ocr".to_owned()]), Some(1));
+    fn ocr_without_a_path_falls_through_to_the_gui() {
+        assert!(run_subcommand(&["ocr".to_owned()]).is_none());
     }
 
     #[test]
