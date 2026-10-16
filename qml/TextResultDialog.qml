@@ -40,7 +40,9 @@ Dialog {
                 text: TextOutput.text
                 wrapMode: TextArea.Wrap
                 selectByMouse: true
-                onTextChanged: TextOutput.updateText(text)
+                // Only a user edit transitions to the edited state; a
+                // programmatic result must keep its own status and copy flag.
+                onTextEdited: TextOutput.updateText(text)
             }
         }
 
@@ -58,7 +60,7 @@ Dialog {
             model: TextOutput.linkLabels
             clip: true
 
-            Component.onCompleted: currentIndex = count > 0 ? 0 : -1
+            onCountChanged: currentIndex = count > 0 ? 0 : -1
 
             delegate: ItemDelegate {
                 required property var modelData
