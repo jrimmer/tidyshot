@@ -77,6 +77,22 @@ pub fn hardware_decoding_supported_in(root: &Path) -> bool {
     !intel_gpu_present_in(root)
 }
 
+/// The explicit value of [`VARIABLE`] observed before this module wrote it.
+///
+/// A value set before TidyShot started (for example while debugging) stays
+/// authoritative; only the value this module writes follows the setting. The
+/// capture happens once, on first use, so a later configure call cannot mistake
+/// this module's own write for a user choice.
+static EXPLICIT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// The pre-launch value of [`VARIABLE`], captured on first use.
+#[must_use]
+pub fn explicit_override() -> Option<&'static str> {
+    EXPLICIT
+        .get_or_init(|| std::env::var(VARIABLE).ok())
+        .as_deref()
+}
+
 /// Resolve the preview decoding policy.
 ///
 /// `explicit` is the value of [`VARIABLE`] observed before this process wrote
@@ -120,12 +136,8 @@ pub fn policy_environment(policy: DecoderPolicy) -> Option<(&'static str, Option
 /// Qt reads the variable when its media backend starts, so a change applies
 /// after the app restarts.
 pub fn configure_preview_decoder(settings: &BTreeMap<String, Value>) {
-    let explicit = std::env::var(VARIABLE).ok();
-    let policy = decoder_policy(
-        settings,
-        explicit.as_deref(),
-        intel_gpu_present_in(&drm_root()),
-    );
+    let explicit = explicit_override();
+    let policy = decoder_policy(settings, explicit, intel_gpu_present_in(&drm_root()));
     // SAFETY: this runs on the main thread before Qt initialises its media
     // backend, and no other thread reads the environment during this call.
     unsafe {
