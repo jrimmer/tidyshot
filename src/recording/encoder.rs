@@ -157,11 +157,13 @@ fn make_inheritable(fds: &[RawFd]) -> io::Result<RestoreCloexec> {
     for fd in fds {
         saved.push((*fd, fd_flags(*fd)?));
     }
+    // Take the restore guard before clearing, so a partial failure still puts
+    // back whatever was already made inheritable.
+    let restore = RestoreCloexec(saved);
     for fd in fds {
-        let flags = fd_flags(*fd)?;
-        set_fd_flags(*fd, flags & !libc::FD_CLOEXEC)?;
+        set_fd_flags(*fd, fd_flags(*fd)? & !libc::FD_CLOEXEC)?;
     }
-    Ok(RestoreCloexec(saved))
+    Ok(restore)
 }
 
 /// A launched encoder that can be stopped without a hang.
