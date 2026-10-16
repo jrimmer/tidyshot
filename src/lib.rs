@@ -7,6 +7,7 @@ pub mod capture;
 pub mod capture_session;
 pub mod clean_capture;
 pub mod cli;
+pub mod clipboard;
 pub mod color;
 pub mod commands;
 pub mod compat;
