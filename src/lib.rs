@@ -7,6 +7,7 @@ pub mod commands;
 pub mod filenames;
 pub mod geometry;
 pub mod json;
+pub mod media_import;
 pub mod motion_blur;
 pub mod recording;
 pub mod storage;
