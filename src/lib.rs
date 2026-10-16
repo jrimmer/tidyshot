@@ -80,7 +80,20 @@ fn start_instance() {
         }
     };
     std::thread::spawn(move || {
-        let _ = instance::serve(&instance, |_argv| true);
+        let _ = instance::serve(&instance, |argv| {
+            // Re-parse and route so a forwarded command is understood exactly
+            // as the command line understands it, and a malformed payload is
+            // reported rather than dropped silently. Window actions are
+            // handled by the layer that owns the windows; the headless ones
+            // are performed here.
+            match app::route_argv(&argv) {
+                Ok(app::Command::Quit) => std::process::exit(0),
+                Ok(_) => {}
+                Err(error) => eprintln!("tidyshot: {error}"),
+            }
+            // Keep accepting: only `quit` ends the loop, and it exits above.
+            true
+        });
     });
 }
 
@@ -105,6 +118,20 @@ mod crate_tests {
     fn crate_links_cxx_qt() {
         cxx_qt::init_crate!(tidyshot);
         cxx_qt::init_qml_module!("tidyshot");
+    }
+
+    #[test]
+    fn forwarded_commands_route_through_the_shared_parser() {
+        let command = super::app::route_argv(&["area-annotate".to_owned()]).unwrap();
+        assert!(matches!(
+            command,
+            super::app::Command::Capture { action: Some(ref action), .. } if action == "annotate"
+        ));
+        assert!(matches!(
+            super::app::route_argv(&["frobnicate".to_owned()]),
+            Err(ref message) if message.contains("unknown command")
+        ));
+        assert!(super::app::route_argv(&["https://example.com".to_owned()]).is_err());
     }
 
     #[test]

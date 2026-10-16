@@ -337,6 +337,20 @@ pub fn known_settings_tab(tab: &str) -> bool {
     SETTINGS_TABS.contains(&tab)
 }
 
+/// Route an argument vector through parsing into one command.
+///
+/// This is what the running instance uses for a command forwarded over the
+/// socket: the sender and the receiver share one parser and one router, so
+/// they can never disagree about what a command means.
+pub fn route_argv(argv: &[String]) -> Result<Command, String> {
+    let args = crate::cli::parse_args(argv.iter().map(String::as_str))
+        .map_err(|error| error.to_string())?;
+    match route(&args).map_err(|error| error.to_string())? {
+        Command::Unknown(command) => Err(format!("unknown command: {command}")),
+        command => Ok(command),
+    }
+}
+
 /// The newest capture in a history listing.
 ///
 /// The listing is newest-first, so this is the first row with a path.
