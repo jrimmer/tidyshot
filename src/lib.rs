@@ -2,6 +2,7 @@
 pub mod api;
 pub mod bridge;
 pub mod capture;
+pub mod capture_session;
 pub mod cli;
 pub mod color;
 pub mod commands;
@@ -12,6 +13,7 @@ pub mod gif;
 pub mod json;
 pub mod media_import;
 pub mod menu;
+pub mod mirror;
 pub mod motion_blur;
 pub mod recording;
 pub mod storage;
