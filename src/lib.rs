@@ -11,6 +11,7 @@ pub mod geometry;
 pub mod gif;
 pub mod json;
 pub mod media_import;
+pub mod menu;
 pub mod motion_blur;
 pub mod recording;
 pub mod storage;

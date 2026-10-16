@@ -6,7 +6,7 @@ import tidyshot
 ApplicationWindow {
     id: window
     width: 480
-    height: 320
+    height: 620
     visible: true
     title: qsTr("tidyshot")
     color: "#1e1e1e"
@@ -14,21 +14,30 @@ ApplicationWindow {
     Material.theme: Material.Dark
     Material.accent: "#FFD60A"
 
-    Column {
+    // The bar panel renders the same action table the tray menu and the
+    // `tidyshot menu` listing render. Menu is the Rust side of that table;
+    // MenuPanel stays free of it so the component lints with QtQuick alone.
+    MenuPanel {
+        id: menuPanel
         anchors.centerIn: parent
-        spacing: 16
-
-        Label {
-            text: Args.label + " — " + Counter.count
-            color: "#f5f5f5"
-            font.pixelSize: 18
-            anchors.horizontalCenter: parent.horizontalCenter
+        visible: true
+        ids: Menu.ids
+        labels: Menu.labels
+        shortcuts: Menu.shortcuts
+        selectedIndex: Menu.selectedIndex
+        onMoved: function (dx, dy) {
+            Menu.moveSelection(dx, dy)
         }
-
-        Button {
-            text: qsTr("Count")
-            anchors.horizontalCenter: parent.horizontalCenter
-            onClicked: Counter.increment()
+        onActivated: function (index) {
+            Menu.activateIndex(index)
         }
+        onDismissed: Qt.quit()
+    }
+
+    Label {
+        anchors.bottom: parent.bottom
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: Args.label
+        color: "#9a9a9a"
     }
 }
