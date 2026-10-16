@@ -2,10 +2,11 @@
 // Ported from omnishot/app.py (capture), omnishot/backend.py (grab,
 // select_region, capture_monitors) and omnishot/capture_countdown.py
 //!
-//! A capture command picks a mode, optionally parses a `--geometry` region,
-//! grabs the pixels through grim, and hands the result to the countdown when
-//! a delay applies. Every external program runs through [`CommandRunner`], so
-//! the behavior is asserted without a compositor.
+//! A capture command picks a mode, optionally parses a `--geometry` region and
+//! waits out its countdown before grabbing the pixels through grim. Interactive
+//! modes either run the live slurp selector or hand the selection to the QML
+//! overlay. Every external program runs through [`CommandRunner`], so the
+//! behavior is asserted without a compositor.
 
 use std::fmt;
 use std::thread;
@@ -96,6 +97,8 @@ pub enum CaptureRequestError {
     Geometry(GeometryError),
     /// The delay was outside the accepted range.
     Delay(i64),
+    /// The user dismissed the countdown before any pixels were taken.
+    Interrupted,
     /// No display is available or the region does not fit one.
     Target(CaptureError),
     /// slurp was cancelled or its output was not a region.
@@ -116,6 +119,7 @@ impl fmt::Display for CaptureRequestError {
                 f,
                 "Capture delay must be between 0 and 86400 seconds (got {delay})"
             ),
+            Self::Interrupted => f.write_str("capture cancelled"),
             Self::Target(error) => error.fmt(f),
             Self::Selection => f.write_str("selection cancelled"),
             Self::Mirror(error) => error.fmt(f),
@@ -187,13 +191,18 @@ impl CaptureRequest {
 
     /// Whether the request needs an interactive selection before grabbing.
     ///
-    /// With `freeze` enabled the area is chosen from a frozen frame; select
-    /// and an unfilled area/timer always need that step.
+    /// A frozen `select`, or a timer with no geometry, is chosen from the
+    /// overlay that the caller shows after [`CaptureOutcome::NeedsSelection`].
+    /// An unfrozen `select` runs the live slurp selector inside the capture;
+    /// an unfrozen `area`/`timer` does too unless the compositor mirror is
+    /// unavailable, in which case it degrades to the frozen overlay.
     #[must_use]
-    pub fn needs_selection(&self, freeze: bool, _remember_selection: bool) -> bool {
+    pub fn needs_selection(&self, freeze: bool, selection_live: bool) -> bool {
         match self.mode {
-            CaptureMode::Select => true,
-            CaptureMode::Area | CaptureMode::Timer => self.rect.is_none() && freeze,
+            CaptureMode::Select => freeze || !selection_live,
+            CaptureMode::Area | CaptureMode::Timer | CaptureMode::Ocr => {
+                self.rect.is_none() && (freeze || !selection_live)
+            }
             _ => false,
         }
     }
@@ -384,6 +393,15 @@ fn number(value: &Value, key: &str) -> i32 {
         .map_or(0, |number| number as i32)
 }
 
+/// Per-run capture options that come from settings rather than the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureOptions {
+    /// Whether grim bakes the cursor into the frame.
+    pub cursor: bool,
+    /// Whether the selector follows a frozen frame instead of the live desktop.
+    pub freeze: bool,
+}
+
 /// The pixels and region a completed capture produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrabbedFrame {
@@ -411,18 +429,35 @@ pub enum CaptureOutcome {
 
 /// Run a resolved capture request against the compositor.
 ///
-/// Interactive modes that need a selection return [`CaptureOutcome::NeedsSelection`]
-/// before touching grim, so the QML overlay owns the pointer. Scrolling modes
-/// return a plan for the stitcher instead of a single frame.
+/// A non-timer delay is waited out first, through the caller's `on_tick` and
+/// `should_cancel` hooks; an interactive `select` then runs the live slurp
+/// selector when the mirror is available. The self timer counts down after its
+/// selection, just before the grab, matching `timed_capture`. Modes whose
+/// selection is frozen return [`CaptureOutcome::NeedsSelection`] before touching
+/// grim, so the QML overlay owns the pointer. Scrolling modes return a plan for
+/// the stitcher instead of a single frame.
 // Ported from omnishot/app.py (capture)
 pub fn run_capture<R: CommandRunner>(
     session: &CaptureSession<'_, R>,
     monitors: &[Value],
     request: &CaptureRequest,
-    cursor: bool,
-    freeze: bool,
+    options: CaptureOptions,
+    on_tick: impl FnMut(&str),
+    should_cancel: impl FnMut() -> bool,
 ) -> Result<CaptureOutcome, CaptureRequestError> {
+    let CaptureOptions { cursor, freeze } = options;
     session.capture_ready(monitors)?;
+    // The self timer owns its countdown after the selection; every other mode
+    // waits before the selection, matching `QTimer.singleShot(int(delay*1000))`.
+    let mut on_tick = on_tick;
+    let mut should_cancel = should_cancel;
+    let timer = request.mode == CaptureMode::Timer;
+    if !timer
+        && run_countdown(request.delay, &mut on_tick, &mut should_cancel)
+            == CountdownOutcome::Cancelled
+    {
+        return Err(CaptureRequestError::Interrupted);
+    }
     let displays = displays_from_monitors(monitors);
     if request.mode.is_scrolling() {
         return Ok(CaptureOutcome::Scroll {
@@ -435,8 +470,41 @@ pub fn run_capture<R: CommandRunner>(
             "Capture an area first".to_owned(),
         ));
     }
-    if request.needs_selection(freeze, false) {
+    // The mirror is only consulted for a mode that may run a live selector.
+    let needs_plan = request.mode == CaptureMode::Select
+        || (matches!(
+            request.mode,
+            CaptureMode::Area | CaptureMode::Timer | CaptureMode::Ocr
+        ) && request.rect.is_none());
+    let plan = if needs_plan {
+        plan_selection(session.mirror, session.runner, &session.native, freeze)
+    } else {
+        SelectionPlan {
+            live: false,
+            mirror: false,
+        }
+    };
+    if request.needs_selection(freeze, plan.live) {
         return Ok(CaptureOutcome::NeedsSelection);
+    }
+    // A live selection runs slurp itself; fullscreen/desktop/window keep
+    // their output-based grab and every other mode uses the selected region.
+    let mut rect = request.rect;
+    if rect.is_none()
+        && matches!(
+            request.mode,
+            CaptureMode::Select | CaptureMode::Area | CaptureMode::Timer | CaptureMode::Ocr
+        )
+    {
+        rect = Some(slurp_region(session.runner, false, &[])?);
+    }
+    // The self timer counts down here, after the area exists and before the
+    // pixels are taken, matching `timed_capture`.
+    if timer
+        && run_countdown(request.delay, &mut on_tick, &mut should_cancel)
+            == CountdownOutcome::Cancelled
+    {
+        return Err(CaptureRequestError::Interrupted);
     }
     match request.mode {
         CaptureMode::Fullscreen => {
@@ -506,7 +574,6 @@ pub fn run_capture<R: CommandRunner>(
             }))
         }
         _ => {
-            let rect = request.rect;
             let output = rect
                 .and_then(|rect| session.target(&displays, Some(rect)).ok())
                 .and_then(|target| target.name);
@@ -586,11 +653,11 @@ impl Countdown {
         self.seconds
     }
 
-    /// Whole seconds still remaining, rounded up.
+    /// Whole seconds still remaining, rounded up like the source's label.
     #[must_use]
     pub fn remaining_seconds(&self) -> i64 {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
-        remaining.as_secs().max(1) as i64
+        remaining.as_secs_f64().ceil() as i64
     }
 
     /// The text the countdown window displays.
@@ -754,6 +821,53 @@ mod tests {
         MirrorRegistry::with_arch("aarch64")
     }
 
+    /// A fake that loads the mirror and queues results for every other program.
+    #[derive(Default)]
+    struct Live {
+        loaded: std::sync::atomic::AtomicBool,
+        results: Mutex<VecDeque<Result<CommandOutput, CommandError>>>,
+        seen: Mutex<Vec<CommandSpec>>,
+    }
+
+    impl Live {
+        fn push(&self, stdout: &str) {
+            self.results.lock().unwrap().push_back(Ok(output(stdout)));
+        }
+    }
+
+    impl CommandRunner for Live {
+        fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+            use std::sync::atomic::Ordering;
+            self.seen.lock().unwrap().push(spec.clone());
+            if spec.program == "hyprctl" {
+                let out = |text: &str| CommandOutput {
+                    status: 0,
+                    stdout: text.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                };
+                return match spec.args.as_slice() {
+                    [flag, query] if flag == "-j" && query == "plugin list" => {
+                        if self.loaded.load(Ordering::SeqCst) {
+                            Ok(out("[{\"name\":\"omnishot-clean-mirror\"}]"))
+                        } else {
+                            Ok(out("[]"))
+                        }
+                    }
+                    [action, sub, ..] if action == "plugin" && sub == "load" => {
+                        self.loaded.store(true, Ordering::SeqCst);
+                        Ok(out("ok"))
+                    }
+                    _ => Ok(out("false")),
+                };
+            }
+            self.results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(output("")))
+        }
+    }
+
     fn display(name: &str, x: i32, y: i32) -> Display {
         Display::new(
             name,
@@ -825,14 +939,22 @@ mod tests {
     #[test]
     fn selection_step_follows_mode_and_freeze_setting() {
         let select = CaptureRequest::resolve("select", None, None, 0).unwrap();
-        assert!(select.needs_selection(true, true));
+        assert!(select.needs_selection(true, false));
+        // A live select runs slurp inside the capture, not in the overlay.
+        assert!(!select.needs_selection(false, true));
         let area = CaptureRequest::resolve("area", None, None, 0).unwrap();
         assert!(area.needs_selection(true, true));
+        assert!(area.needs_selection(false, false));
         assert!(!area.needs_selection(false, true));
         let fixed = CaptureRequest::resolve("area", Some("0,0 100x100"), None, 0).unwrap();
         assert!(!fixed.needs_selection(true, true));
         let fullscreen = CaptureRequest::resolve("fullscreen", None, None, 0).unwrap();
         assert!(!fullscreen.needs_selection(true, true));
+        // OCR with no remembered area selects like area.
+        let ocr = CaptureRequest::resolve("ocr", None, None, 0).unwrap();
+        assert!(ocr.needs_selection(true, false));
+        assert!(ocr.needs_selection(false, false));
+        assert!(!ocr.needs_selection(false, true));
     }
 
     #[test]
@@ -851,14 +973,13 @@ mod tests {
     /// Scratch native directory holding the plugin files grab expects.
     struct NativeDir(std::path::PathBuf);
 
+    static NATIVE_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     impl NativeDir {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tidyshot-capture-{}-{}",
-                std::process::id(),
-                std::sync::atomic::AtomicU64::new(0)
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            let nonce = NATIVE_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("tidyshot-capture-{}-{nonce}", std::process::id(),));
             std::fs::create_dir_all(&path).unwrap();
             for name in [crate::mirror::MIRROR_PLUGIN, crate::mirror::CAPTURE_PLUGIN] {
                 std::fs::write(path.join(name), b"plugin").unwrap();
@@ -951,8 +1072,10 @@ mod tests {
 
     #[test]
     fn countdown_finishes_once_and_reports_remaining() {
+        let countdown = Countdown::start(2);
+        assert_eq!(countdown.remaining_seconds(), 2);
         let mut countdown = Countdown::start(0);
-        assert_eq!(countdown.remaining_seconds(), 1);
+        assert_eq!(countdown.remaining_seconds(), 0);
         assert_eq!(countdown.tick(), Some(CountdownOutcome::Finished));
         assert!(countdown.terminal());
         assert_eq!(countdown.tick(), None, "finished only once");
@@ -1055,7 +1178,18 @@ mod tests {
             native: native.0.clone(),
         };
         let request = CaptureRequest::resolve("select", None, None, 0).unwrap();
-        let outcome = run_capture(&session, &monitors(), &request, false, true).unwrap();
+        let outcome = run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: true,
+            },
+            |_| {},
+            || false,
+        )
+        .unwrap();
         assert_eq!(outcome, CaptureOutcome::NeedsSelection);
         assert!(
             runner
@@ -1069,8 +1203,143 @@ mod tests {
     }
 
     #[test]
-    fn frozen_area_without_geometry_needs_selection_but_unfrozen_grabs() {
+    fn unfrozen_area_degrades_to_a_frozen_selector_without_the_plugin() {
         let request = CaptureRequest::resolve("area", None, None, 0).unwrap();
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        // Without the mirror a live selector would appear in its own capture,
+        // so the caller is asked to show the frozen overlay instead.
+        assert_eq!(
+            run_capture(
+                &session,
+                &monitors(),
+                &request,
+                CaptureOptions {
+                    cursor: false,
+                    freeze: false,
+                },
+                |_| {},
+                || false,
+            )
+            .unwrap(),
+            CaptureOutcome::NeedsSelection
+        );
+        assert_eq!(
+            run_capture(
+                &session,
+                &monitors(),
+                &request,
+                CaptureOptions {
+                    cursor: false,
+                    freeze: true,
+                },
+                |_| {},
+                || false,
+            )
+            .unwrap(),
+            CaptureOutcome::NeedsSelection
+        );
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|spec| spec.program != "grim"),
+        );
+    }
+
+    #[test]
+    fn unfrozen_area_selects_live_then_grabs_the_selected_region() {
+        let request = CaptureRequest::resolve("area", None, None, 0).unwrap();
+        let runner = Live::default();
+        runner.push("5,6 100x200\n");
+        runner.push("PNG");
+        let registry = MirrorRegistry::with_arch("x86_64");
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let outcome = run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: false,
+            },
+            |_| {},
+            || false,
+        )
+        .unwrap();
+        match outcome {
+            CaptureOutcome::Grabbed(frame) => {
+                assert_eq!(frame.rect, Some(Rect::new(5, 6, 100, 200)));
+                assert_eq!(frame.png, b"PNG");
+            }
+            other => panic!("expected a live grab, got {other:?}"),
+        }
+        let seen = runner.seen.lock().unwrap();
+        let slurp = seen.iter().find(|spec| spec.program == "slurp").unwrap();
+        assert!(!slurp.args.contains(&"-r".to_owned()));
+        let grim = seen.iter().find(|spec| spec.program == "grim").unwrap();
+        assert!(grim.args.contains(&"-g".to_owned()));
+        assert!(grim.args.contains(&"5,6 100x200".to_owned()));
+    }
+
+    #[test]
+    fn live_select_runs_slurp_inside_the_capture() {
+        let request = CaptureRequest::resolve("select", None, None, 0).unwrap();
+        let runner = Live::default();
+        runner.push("0,0 800x600\n");
+        runner.push("PNG");
+        let registry = MirrorRegistry::with_arch("x86_64");
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        match run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: false,
+            },
+            |_| {},
+            || false,
+        )
+        .unwrap()
+        {
+            CaptureOutcome::Grabbed(frame) => {
+                assert_eq!(frame.rect, Some(Rect::new(0, 0, 800, 600)));
+            }
+            other => panic!("expected a live select, got {other:?}"),
+        }
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|spec| spec.program == "slurp")
+        );
+    }
+
+    #[test]
+    fn delay_is_waited_out_before_the_pixels_are_taken() {
+        // The self timer counts down before the grab, matching timed_capture.
+        let request = CaptureRequest::resolve("timer", Some("0,0 100x100"), Some(2), 0).unwrap();
         let runner = Fake::default();
         runner.push("PNG");
         let registry = degraded_registry();
@@ -1080,17 +1349,69 @@ mod tests {
             mirror: &registry,
             native: native.0.clone(),
         };
-        assert_eq!(
-            run_capture(&session, &monitors(), &request, false, true).unwrap(),
-            CaptureOutcome::NeedsSelection
-        );
-        match run_capture(&session, &monitors(), &request, false, false).unwrap() {
+        let mut ticks = 0;
+        let outcome = run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: true,
+            },
+            |label| {
+                ticks += 1;
+                assert!(label.starts_with("Capturing in "));
+            },
+            || false,
+        )
+        .unwrap();
+        assert!(ticks >= 1, "the countdown must tick before grabbing");
+        match outcome {
             CaptureOutcome::Grabbed(frame) => {
+                assert_eq!(frame.rect, Some(Rect::new(0, 0, 100, 100)));
                 assert_eq!(frame.png, b"PNG");
-                assert_eq!(frame.rect, None);
             }
             other => panic!("expected a grab, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_cancelled_countdown_takes_no_pixels() {
+        let request = CaptureRequest::resolve("fullscreen", None, Some(300), 0).unwrap();
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let mut checks = 0;
+        let error = run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: true,
+            },
+            |_| {},
+            || {
+                checks += 1;
+                checks > 1
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureRequestError::Interrupted), "{error}");
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|spec| spec.program != "grim"),
+            "a cancelled countdown must not capture"
+        );
     }
 
     #[test]
@@ -1105,7 +1426,19 @@ mod tests {
             mirror: &registry,
             native: native.0.clone(),
         };
-        match run_capture(&session, &monitors(), &request, true, true).unwrap() {
+        match run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: true,
+                freeze: true,
+            },
+            |_| {},
+            || false,
+        )
+        .unwrap()
+        {
             CaptureOutcome::Grabbed(frame) => {
                 assert_eq!(frame.rect, Some(Rect::new(0, 0, 1920, 1080)));
             }
@@ -1131,7 +1464,18 @@ mod tests {
         let request =
             CaptureRequest::resolve("scroll-horizontal", Some("10,20 640x400"), None, 0).unwrap();
         assert_eq!(
-            run_capture(&session, &monitors(), &request, false, true).unwrap(),
+            run_capture(
+                &session,
+                &monitors(),
+                &request,
+                CaptureOptions {
+                    cursor: false,
+                    freeze: true,
+                },
+                |_| {},
+                || false,
+            )
+            .unwrap(),
             CaptureOutcome::Scroll {
                 rect: Some(Rect::new(10, 20, 640, 400)),
                 horizontal: true,
@@ -1150,7 +1494,18 @@ mod tests {
             mirror: &registry,
             native: native.0.clone(),
         };
-        let error = run_capture(&session, &monitors(), &request, false, true).unwrap_err();
+        let error = run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: true,
+            },
+            |_| {},
+            || false,
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("Capture an area first"),
             "{error}"
@@ -1170,7 +1525,19 @@ mod tests {
             mirror: &registry,
             native: native.0.clone(),
         };
-        match run_capture(&session, &monitors(), &request, false, false).unwrap() {
+        match run_capture(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: false,
+            },
+            |_| {},
+            || false,
+        )
+        .unwrap()
+        {
             CaptureOutcome::Frames(frames) => {
                 assert_eq!(frames.len(), 2);
                 assert_eq!(frames[0].png, b"LEFT");

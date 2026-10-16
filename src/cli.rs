@@ -9,7 +9,12 @@ use std::fmt;
 use std::path::Path;
 
 use crate::api::{UrlCommand, parse_url};
-use crate::capture_session::{CaptureMode, CaptureRequest, CaptureRequestError};
+use crate::capture_session::{
+    CaptureMode, CaptureOptions, CaptureOutcome, CaptureRequest, CaptureRequestError,
+    CaptureSession, run_capture,
+};
+use crate::commands::CommandRunner;
+use crate::json::Value;
 
 /// The default command when none is given.
 pub const DEFAULT_COMMAND: &str = "menu";
@@ -165,6 +170,26 @@ impl Args {
             default_delay,
         ))
     }
+
+    /// Resolve and run this command as a capture, waiting out its delay.
+    ///
+    /// This is the CLI layer's entry to a capture: the resolved request keeps
+    /// its countdown, so `timer --delay 5` waits before the pixels are taken.
+    /// `None` means the command is not a capture.
+    pub fn run_capture<R: CommandRunner>(
+        &self,
+        session: &CaptureSession<'_, R>,
+        monitors: &[Value],
+        default_delay: i64,
+        options: CaptureOptions,
+        on_tick: impl FnMut(&str),
+        should_cancel: impl FnMut() -> bool,
+    ) -> Option<Result<CaptureOutcome, CaptureRequestError>> {
+        let request = self.capture_request(default_delay)?;
+        Some(request.and_then(|request| {
+            run_capture(session, monitors, &request, options, on_tick, should_cancel)
+        }))
+    }
 }
 
 /// Convert `file://` URL to a local path, rejecting remote hosts.
@@ -279,5 +304,99 @@ mod tests {
     fn capture_request_surfaces_geometry_errors() {
         let args = parse_args(["area", "--geometry", "nope"]).unwrap();
         assert!(args.capture_request(0).unwrap().is_err());
+    }
+
+    #[test]
+    fn run_capture_consumes_the_resolved_delay() {
+        use crate::capture_session::CaptureSession;
+        use crate::commands::{CommandError, CommandOutput, CommandRunner, CommandSpec};
+        use crate::mirror::MirrorRegistry;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Fake {
+            seen: Mutex<Vec<CommandSpec>>,
+        }
+        impl CommandRunner for Fake {
+            fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+                self.seen.lock().unwrap().push(spec.clone());
+                if spec.program == "hyprctl" {
+                    // Model aarch64's unhookable plugin so the mirror degrades.
+                    let stdout = match spec.args.as_slice() {
+                        [flag, query] if flag == "-j" && query == "plugin list" => b"[]".to_vec(),
+                        [action, sub, ..] if action == "plugin" && sub == "load" => {
+                            b"Could not hook IElementRenderer::preDrawSurface".to_vec()
+                        }
+                        _ => b"false".to_vec(),
+                    };
+                    return Ok(CommandOutput {
+                        status: 0,
+                        stdout,
+                        stderr: Vec::new(),
+                    });
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: b"PNG".to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let runner = Fake::default();
+        let registry = MirrorRegistry::with_arch("aarch64");
+        // A scratch native dir with the plugin files grab expects; on aarch64
+        // the mirror still degrades, but the cursor mirror is best effort.
+        let native =
+            std::env::temp_dir().join(format!("tidyshot-cli-capture-{}", std::process::id()));
+        std::fs::create_dir_all(&native).unwrap();
+        for name in [crate::mirror::MIRROR_PLUGIN, crate::mirror::CAPTURE_PLUGIN] {
+            std::fs::write(native.join(name), b"plugin").unwrap();
+        }
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.clone(),
+        };
+        let monitors = crate::json::parse(
+            r#"[{"name":"left","x":0,"y":0,"width":1920,"height":1080,"scale":1.0,"transform":0,"focused":true}]"#,
+        )
+        .unwrap();
+
+        // A timer with a delay ticks the countdown before the pixels are taken.
+        let args = parse_args(["timer", "--delay", "2", "--geometry", "0,0 100x100"]).unwrap();
+        let mut ticks = 0;
+        let outcome = args
+            .run_capture(
+                &session,
+                monitors.as_array().unwrap(),
+                3,
+                CaptureOptions {
+                    cursor: false,
+                    freeze: true,
+                },
+                |_| ticks += 1,
+                || false,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(matches!(outcome, CaptureOutcome::Grabbed(_)));
+        assert!(ticks >= 1, "the resolved delay must be waited out");
+
+        let args = parse_args(["menu"]).unwrap();
+        assert!(
+            args.run_capture(
+                &session,
+                monitors.as_array().unwrap(),
+                3,
+                CaptureOptions {
+                    cursor: false,
+                    freeze: true,
+                },
+                |_| {},
+                || false,
+            )
+            .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&native);
     }
 }
