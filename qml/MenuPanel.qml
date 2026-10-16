@@ -59,14 +59,14 @@ KeyboardPanel {
             Repeater {
                 id: actionButtons
                 model: menuPanel.labels
-                MenuButton {
+                PanelButton {
                     required property var modelData
                     required property int index
                     width: column.width
-                    label: modelData
+                    text: modelData
                     shortcut: index < menuPanel.shortcuts.length ? menuPanel.shortcuts[index] : ""
                     hasCursor: menuPanel.selectedIndex === index
-                    onActivated: menuPanel.activated(index)
+                    onClicked: menuPanel.activated(index)
                 }
             }
         }

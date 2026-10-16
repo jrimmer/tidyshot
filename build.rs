@@ -4,7 +4,7 @@ fn main() {
             "qml/Main.qml",
             "qml/Panel.qml",
             "qml/KeyboardPanel.qml",
-            "qml/MenuButton.qml",
+            "qml/PanelButton.qml",
             "qml/MenuPanel.qml",
             "qml/TrayMenu.qml",
         ],
