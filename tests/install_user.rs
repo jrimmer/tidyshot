@@ -242,6 +242,18 @@ fn reinstall_preserves_widget_placement_and_user_config() {
         home.source.join("backups").is_dir(),
         "configuration is backed up"
     );
+    // The first install changes the widget, so the shell is asked to restart;
+    // the rerun left it untouched and must not restart it again.
+    let restart = vec![
+        "omarchy".to_owned(),
+        "restart".to_owned(),
+        "shell".to_owned(),
+    ];
+    assert_eq!(
+        home.calls().iter().filter(|call| **call == restart).count(),
+        1,
+        "the shell restarts once, when the widget changes"
+    );
 }
 
 #[test]
@@ -324,6 +336,16 @@ fn migrates_legacy_widget_with_its_settings() {
     assert_eq!(
         fs::read_to_string(backup.path().join("local.tidyshot-BarWidget.qml")).unwrap(),
         "old widget"
+    );
+    // Removing the legacy widget changes what the bar serves, so the shell
+    // must reload it.
+    assert!(
+        home.calls().contains(&vec![
+            "omarchy".to_owned(),
+            "restart".to_owned(),
+            "shell".to_owned(),
+        ]),
+        "the shell restarts when the legacy widget is migrated"
     );
 }
 

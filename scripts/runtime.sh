@@ -8,15 +8,22 @@ tidyshot_runtime="${TIDYSHOT_INSTALL_DIR:-$tidyshot_data/tidyshot-app}"
 tidyshot_stamp="$tidyshot_runtime/.tidyshot-source"
 tidyshot_launcher="$HOME/.local/bin/tidyshot"
 
+# The launcher `exec`s the built binary directly (`<runtime>/build/tidyshot`),
+# so match that command line, not a Python `-m` invocation.
 tidyshot_running() {
-  pgrep -u "$(id -u)" -f -- '-m tidyshot( |$)' >/dev/null 2>&1
+  pgrep -u "$(id -u)" -f -- 'build/tidyshot( |$)' >/dev/null 2>&1
 }
 
-# Quit a running TidyShot and wait for it, so files are not replaced under it.
+# Stop a running TidyShot and wait for it, so files are not replaced under it.
+# The app has no IPC quit command yet, so terminate each matched process
+# directly; never re-run the launcher, which would start a second GUI.
 # Returns 1 if it is still running (for example, finishing a recording).
 tidyshot_stop() {
   tidyshot_running || return 0
-  [[ -x $tidyshot_launcher ]] && "$tidyshot_launcher" quit >/dev/null 2>&1 || true
+  local task_pid
+  for task_pid in $(pgrep -u "$(id -u)" -f -- 'build/tidyshot( |$)' 2>/dev/null); do
+    kill -TERM -- "$task_pid" 2>/dev/null || true
+  done
   local attempt
   for (( attempt = 0; attempt < ${TIDYSHOT_QUIT_WAIT:-15} * 4; attempt++ )); do
     tidyshot_running || return 0
@@ -47,10 +54,13 @@ tidyshot_require_session() {
 tidyshot_mirror() {
   local task_src=$1 task_dst=$2 task_rel task_path task_file
   mkdir -p -- "$task_dst"
-  # Files the checkout owns: tracked plus untracked, minus ignored. Disable
-  # git's path quoting so the list is literal even for odd filenames.
-  local task_list
-  task_list=$(git -C "$task_src" -c core.quotePath=false ls-files -co --exclude-standard)
+  # Files the checkout owns: tracked plus untracked, minus ignored. Read the
+  # NUL-delimited list so newlines in names cannot split an entry, and key an
+  # associative array so lookups stay fixed-string, not pattern-based.
+  local -A task_owned=()
+  while IFS= read -r -d '' task_rel; do
+    [[ -n $task_rel ]] && task_owned["$task_rel"]=1
+  done < <(git -C "$task_src" -c core.quotePath=false ls-files -z -co --exclude-standard)
   # Drop destination files the source no longer owns. Ignored paths (build
   # outputs, backups) survive because check-ignore matches them here.
   while IFS= read -r -d '' task_path; do
@@ -58,26 +68,32 @@ tidyshot_mirror() {
     [[ -z $task_rel ]] && continue
     [[ -L $task_path || -f $task_path ]] || continue
     git -C "$task_src" check-ignore --no-index -q -- "$task_rel" && continue
-    if ! printf '%s\n' "$task_list" | grep -qxF -- "$task_rel"; then
-      rm -f -- "$task_path"
-    fi
+    [[ -n ${task_owned["$task_rel"]+x} ]] && continue
+    rm -f -- "$task_path"
   done < <(find "$task_dst" -mindepth 1 -print0 2>/dev/null)
   # Remove directories that are now empty and not part of the source.
   while IFS= read -r -d '' task_path; do
     task_rel=${task_path#"$task_dst"/}
     [[ -z $task_rel ]] && continue
     git -C "$task_src" check-ignore --no-index -q -- "$task_rel/" && continue
-    # Keep a directory that still owns a source file. A fixed substring match
-    # avoids regex metacharacters in plugin paths.
-    printf '%s\n' "$task_list" | grep -qF -- "$task_rel/" && continue
+    # Keep a directory that still owns a source file. Compare a fixed prefix
+    # so glob characters in plugin paths are never interpreted.
+    local task_prefix="$task_rel/" task_has_owner=0
+    for task_file in "${!task_owned[@]}"; do
+      if [[ $task_file == "$task_prefix"* ]]; then
+        task_has_owner=1
+        break
+      fi
+    done
+    (( task_has_owner )) && continue
     rmdir -- "$task_path" 2>/dev/null || true
   done < <(find "$task_dst" -mindepth 1 -depth -type d -print0 2>/dev/null)
-  # Copy every owned file, preserving content and mode.
-  while IFS= read -r task_rel; do
-    [[ -z $task_rel ]] && continue
+  # Copy every owned file with `-a`, which preserves symlinks the way
+  # `rsync -a` does instead of following them by content.
+  for task_rel in "${!task_owned[@]}"; do
     task_file="$task_src/$task_rel"
-    [[ -e $task_file ]] || continue
+    [[ -e $task_file || -L $task_file ]] || continue
     mkdir -p -- "$task_dst/$(dirname -- "$task_rel")"
-    cp -p -- "$task_file" "$task_dst/$task_rel"
-  done <<<"$task_list"
+    cp -a -- "$task_file" "$task_dst/$task_rel"
+  done
 }

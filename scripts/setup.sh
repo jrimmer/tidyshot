@@ -28,7 +28,10 @@ fi
 
 if [[ -z ${TIDYSHOT_SKIP_PACKAGES:-} ]]; then
   printf 'Installing missing system dependencies through Omarchy. You may be asked for your password.\n'
-  omarchy pkg add git python gcc pkgconf wayland wayland-protocols \
+  # `rust` provides cargo and `qt6-base`/`qt6-declarative` provide qmake6 and
+  # the QML build tools that install.sh checks for and bin/build invokes.
+  omarchy pkg add git rust qt6-base qt6-declarative python gcc pkgconf \
+    wayland wayland-protocols \
     cairo libxkbcommon libglvnd lua54 grim slurp wl-clipboard ffmpeg \
     tesseract tesseract-data-eng tesseract-data-osd gpu-screen-recorder libpulse \
     desktop-file-utils shared-mime-info xdg-utils libnotify

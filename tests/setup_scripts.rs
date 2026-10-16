@@ -538,6 +538,50 @@ fn refuses_while_the_app_will_not_quit() {
     assert!(!fixture.install_log.exists());
 }
 
+/// The runtime helpers must detect the real built binary, not the Python
+/// launcher the reference used. Drive the actual `pgrep` against a process
+/// whose command line starts with the launcher's binary path.
+#[test]
+fn running_detects_and_stops_the_built_binary() {
+    use std::os::unix::process::CommandExt as _;
+    let fixture = Fixture::new("detect");
+    let app_dir = fixture.runtime.join("build");
+    fs::create_dir_all(&app_dir).unwrap();
+    let app = app_dir.join("tidyshot");
+    fixture.own(&fixture.runtime);
+
+    // The PATH deliberately omits the fixture's `pgrep` stub so the real
+    // process table is inspected, exactly as on a desktop.
+    let real_path = std::env::var("PATH").unwrap_or_default();
+    // `arg0` makes the command line begin with the launcher's binary path,
+    // which is what `tidyshot_running` matches.
+    let mut child = Command::new("sleep").arg("300").arg0(&app).spawn().unwrap();
+    let check = |call: &str| {
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(format!(
+            "source '{0}/scripts/runtime.sh'; {call}",
+            fixture.source.display()
+        ));
+        command.env_clear();
+        command.env("PATH", &real_path);
+        command.env("HOME", &fixture.home);
+        command.env("TIDYSHOT_INSTALL_DIR", &fixture.runtime);
+        command
+    };
+    let before = check("tidyshot_running && echo yes || echo no")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&before.stdout).trim(), "yes");
+
+    let stopped = check("tidyshot_stop && echo stopped || echo alive")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&stopped.stdout).trim(), "stopped");
+    let _ = child.kill();
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "the app was terminated");
+}
+
 #[test]
 fn requires_a_plugin_checkout() {
     let fixture = Fixture::new("nocheckout");
@@ -638,6 +682,49 @@ fn install_round_trip_is_byte_exact() {
         snapshot(&fixture.source.join("plugin")),
         snapshot(&fixture.runtime.join("plugin"))
     );
+}
+
+/// The mirror preserves a symlink the way `rsync -a` does, instead of
+/// dereferencing it by content, and never aborts on a broken one.
+#[test]
+fn mirror_preserves_symlinks_without_following_them() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new("symlink");
+    assert!(fixture.run("setup.sh", &[]).status.success());
+    // A good link points at a tracked file; a broken link points at nothing.
+    symlink("manifest.json", fixture.source.join("good-link")).unwrap();
+    symlink("does-not-exist", fixture.source.join("broken-link")).unwrap();
+    let result = fixture.run("setup.sh", &[]);
+    assert!(
+        result.status.success(),
+        "a broken symlink must not abort setup: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let good = fixture.runtime.join("good-link");
+    let broken = fixture.runtime.join("broken-link");
+    assert!(fs::symlink_metadata(&good).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_link(&good).unwrap(), Path::new("manifest.json"));
+    assert!(fs::symlink_metadata(&broken).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read_link(&broken).unwrap(), Path::new("does-not-exist"));
+}
+
+/// The package step must cover the tools its own build hard-requires:
+/// `install.sh` exits when cargo or qmake6 is missing.
+#[test]
+fn installs_the_build_toolchain_it_requires() {
+    let fixture = Fixture::new("packages");
+    assert!(fixture.run("setup.sh", &[]).status.success());
+    let package_call = fixture
+        .calls()
+        .into_iter()
+        .find(|call| call.iter().take(3).eq(["omarchy", "pkg", "add"]))
+        .expect("setup installs missing packages");
+    for package in ["git", "rust", "qt6-base", "qt6-declarative", "ffmpeg"] {
+        assert!(
+            package_call.iter().any(|arg| arg == package),
+            "the package list must include {package}: {package_call:?}"
+        );
+    }
 }
 
 /// Extract the ids from one `shell.json` layout section without a JSON dep.
