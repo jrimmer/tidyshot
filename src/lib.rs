@@ -3,6 +3,7 @@ pub mod api;
 pub mod bridge;
 pub mod capture;
 pub mod capture_session;
+pub mod clean_capture;
 pub mod cli;
 pub mod color;
 pub mod commands;
