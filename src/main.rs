@@ -33,24 +33,11 @@ where
     }
 }
 
-/// Record a startup OCR request from the command line or a `capture-text` URL.
-///
-/// The recognized-text dialog reads this before it loads, so the file runs
-/// through the same completion path the dialog serves.
-fn note_startup_ocr(args: &[String]) {
-    if let Ok(parsed) = tidyshot::cli::parse_args(args)
-        && parsed.command == "ocr"
-    {
-        tidyshot::bridge::set_startup_ocr(parsed.path, parsed.linebreaks);
-    }
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = run_subcommand(&args) {
         std::process::exit(code);
     }
-    note_startup_ocr(&args);
     tidyshot::run();
 }
 

@@ -43,6 +43,7 @@ pub mod toolbar;
 pub fn run() {
     cxx_qt::init_crate!(tidyshot);
     cxx_qt::init_qml_module!("tidyshot");
+    note_startup_ocr();
     let mut app = cxx_qt_lib::QGuiApplication::new();
     let mut engine = cxx_qt_lib::QQmlApplicationEngine::new();
     if let Some(engine) = engine.as_mut() {
@@ -50,6 +51,20 @@ pub fn run() {
     }
     if let Some(app) = app.as_mut() {
         std::process::exit(app.exec());
+    }
+}
+
+/// Record a startup OCR request before QML loads.
+///
+/// A `tidyshot ocr <file>` or `capture-text` URL starts the GUI so the
+/// recognized-text dialog can review links; the `Args` singleton reads this
+/// request so the dialog runs the completion path once it is created.
+fn note_startup_ocr() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Ok(parsed) = cli::parse_args(args)
+        && parsed.command == "ocr"
+    {
+        bridge::set_startup_ocr(parsed.path, parsed.linebreaks);
     }
 }
 
