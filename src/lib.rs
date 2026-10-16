@@ -9,6 +9,7 @@ pub mod cli;
 pub mod color;
 pub mod commands;
 pub mod compat;
+pub mod compress;
 pub mod doctor;
 pub mod effects;
 pub mod filenames;
