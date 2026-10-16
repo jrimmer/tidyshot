@@ -44,6 +44,19 @@ symlinks, as `omarchy plugin validate` requires.
 plugin contract, `tests/setup_scripts.rs` drives `setup.sh`/`uninstall.sh`
 against a throwaway HOME with stubbed desktop commands, and
 `tests/install_user.rs` covers the user-level installer in an isolated home.
+`tests/editor_port.rs` drives the annotate editor document, project file,
+clipboard and renderer.
+
+## Annotate editor
+
+The editor is ported from OmniShot's `editor.py`, `annotation_*.py`, `crop.py`,
+`backgrounds.py`, `spotlight.py` and `text_styles.py`. The model lives in
+`src/annotation.rs`; raster drawing in `src/raster.rs`; rendering in
+`src/render.rs`; document, undo and canvas edits in `src/editor.rs`; the
+`.omnishot` archive in `src/project.rs`. Projects are ZIP archives holding
+`image.png`, `project.json` and the optional `original.png`, so version-1
+projects without an original still open. PNG and ZIP are written and read by
+`src/pngzip.rs` on top of the vendored-free codec in `src/compress.rs`.
 
 ## License
 
