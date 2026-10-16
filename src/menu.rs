@@ -842,6 +842,26 @@ mod tests {
     }
 
     #[test]
+    fn qt_keys_map_to_menu_keys_and_event_names() {
+        assert_eq!(MenuKey::from_qt(0x48), Some(MenuKey::H));
+        assert_eq!(MenuKey::from_qt(0x4a), Some(MenuKey::J));
+        assert_eq!(MenuKey::from_qt(0x4b), Some(MenuKey::K));
+        assert_eq!(MenuKey::from_qt(0x4c), Some(MenuKey::L));
+        assert_eq!(MenuKey::from_qt(0x0100_0004), Some(MenuKey::Enter));
+        assert_eq!(MenuKey::from_qt(0x0100_0005), Some(MenuKey::Enter));
+        assert_eq!(MenuKey::from_qt(0x0100_0000), Some(MenuKey::Escape));
+        assert_eq!(MenuKey::from_qt(0x0100_0001), Some(MenuKey::Tab));
+        assert_eq!(MenuKey::from_qt(0x0100_0002), Some(MenuKey::Backtab));
+        assert_eq!(MenuKey::from_qt(0x41), None);
+        assert_eq!(MenuEvent::SelectionChanged(0).name(), "selection");
+        assert_eq!(MenuEvent::Activated(&ACTIONS[0]).name(), "activated");
+        assert_eq!(MenuEvent::Dismissed.name(), "dismissed");
+        assert_eq!(MenuEvent::Tabbed(1).name(), "tab-forward");
+        assert_eq!(MenuEvent::Tabbed(-1).name(), "tab-back");
+        assert_eq!(MenuEvent::Ignored.name(), "ignored");
+    }
+
+    #[test]
     fn tray_projection_covers_every_row_and_groups_with_separators() {
         let labels = tray_labels();
         let ids = tray_ids();
