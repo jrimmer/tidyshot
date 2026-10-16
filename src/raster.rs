@@ -66,6 +66,67 @@ impl<'a> Canvas<'a> {
         self.data[offset..offset + 4].copy_from_slice(&color);
     }
 
+    /// Read a pixel.
+    #[must_use]
+    pub fn pixel(&self, x: usize, y: usize) -> [u8; 4] {
+        let offset = (y * self.width + x) * 4;
+        [
+            self.data[offset],
+            self.data[offset + 1],
+            self.data[offset + 2],
+            self.data[offset + 3],
+        ]
+    }
+
+    /// Copy an axis-aligned rectangle of `source` into this canvas, replacing
+    /// the destination pixels.
+    pub fn copy_region(
+        &mut self,
+        source: &[u8],
+        source_width: usize,
+        source_height: usize,
+        rect: Rect,
+    ) {
+        let x0 = rect.x.floor().max(0.0) as usize;
+        let y0 = rect.y.floor().max(0.0) as usize;
+        let x1 = (rect.right().ceil().max(0.0) as usize).min(self.width);
+        let y1 = (rect.bottom().ceil().max(0.0) as usize).min(self.height);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if x >= source_width || y >= source_height {
+                    continue;
+                }
+                let offset = (y * source_width + x) * 4;
+                self.set(
+                    x,
+                    y,
+                    [
+                        source[offset],
+                        source[offset + 1],
+                        source[offset + 2],
+                        source[offset + 3],
+                    ],
+                );
+            }
+        }
+    }
+
+    /// Fill a rectangle with rounded corners.
+    pub fn fill_rounded_rect(&mut self, rect: Rect, radius: f64, color: [u8; 4]) {
+        let mask = rounded_mask(self.width, self.height, rect, radius, 2.0);
+        let x0 = rect.x.floor().max(0.0) as usize;
+        let y0 = rect.y.floor().max(0.0) as usize;
+        let x1 = (rect.right().ceil().max(0.0) as usize).min(self.width);
+        let y1 = (rect.bottom().ceil().max(0.0) as usize).min(self.height);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if mask[y * self.width + x] != 0 {
+                    self.blend(x, y, color);
+                }
+            }
+        }
+    }
+
     /// Source-over composite an image at `(dx, dy)`.
     pub fn draw_image(
         &mut self,

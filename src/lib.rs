@@ -25,6 +25,7 @@ pub mod pngzip;
 pub mod project;
 pub mod raster;
 pub mod recording;
+pub mod render;
 pub mod scroll;
 pub mod stitch;
 pub mod storage;
