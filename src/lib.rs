@@ -1,4 +1,5 @@
 // The library target every binary and test links.
+pub mod annotation;
 pub mod api;
 pub mod bridge;
 pub mod capture;
