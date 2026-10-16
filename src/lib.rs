@@ -4,6 +4,7 @@ pub mod bridge;
 pub mod capture;
 pub mod color;
 pub mod commands;
+pub mod effects;
 pub mod filenames;
 pub mod geometry;
 pub mod json;
