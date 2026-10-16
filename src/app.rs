@@ -326,6 +326,40 @@ pub fn known_settings_tab(tab: &str) -> bool {
     SETTINGS_TABS.contains(&tab)
 }
 
+/// The newest capture in a history listing.
+///
+/// The listing is newest-first, so this is the first row with a path.
+// Ported from omnishot/app.py (dispatch: last)
+#[must_use]
+pub fn newest_capture(history: &[Value]) -> Option<String> {
+    history
+        .iter()
+        .find_map(|row| row.get("path").and_then(Value::as_str).map(str::to_owned))
+}
+
+/// The newest named screenshot, skipping imported files and recordings.
+///
+/// "Annotate last screenshot" reopens the newest capture whose pixels are a
+/// screenshot or a scroll stitch, that has a capture name, and that did not
+/// come from an external source path.
+// Ported from omnishot/app.py (dispatch: last-screenshot)
+#[must_use]
+pub fn newest_screenshot(history: &[Value]) -> Option<String> {
+    history.iter().find_map(|row| {
+        let kind = row.get("kind").and_then(Value::as_str).unwrap_or("image");
+        let named = row
+            .get("capture_named")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let external = row.get("source_path").is_some();
+        if (kind == "image" || kind == "scroll") && named && !external {
+            row.get("path").and_then(Value::as_str).map(str::to_owned)
+        } else {
+            None
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +504,38 @@ mod tests {
     fn overlay_without_a_path_is_an_error() {
         let args = parse_args(["overlay"]).unwrap();
         assert!(route(&args).is_err());
+    }
+
+    // Ported from omnishot/test_capture_actions.py
+    // (test_last_screenshot_skips_newer_imports_clipboard_images_and_recordings)
+    #[test]
+    fn last_screenshot_skips_imports_and_recordings() {
+        let history = crate::json::parse(
+            r#"[
+                {"path":"/c/video.mp4","kind":"video","capture_named":true},
+                {"path":"/c/clipboard.png","kind":"image"},
+                {"path":"/c/imported.png","kind":"image","capture_named":true,"source_path":"/tmp/imported.png"},
+                {"path":"/c/screenshot.png","kind":"image","capture_named":true}
+            ]"#,
+        )
+        .unwrap();
+        let rows = history.as_array().unwrap();
+        assert_eq!(
+            newest_screenshot(rows).as_deref(),
+            Some("/c/screenshot.png")
+        );
+        assert_eq!(newest_capture(rows).as_deref(), Some("/c/video.mp4"));
+    }
+
+    #[test]
+    fn a_scroll_stitch_counts_as_a_screenshot() {
+        let history = crate::json::parse(
+            r#"[{"path":"/c/scroll.png","kind":"scroll","capture_named":true}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            newest_screenshot(history.as_array().unwrap()).as_deref(),
+            Some("/c/scroll.png")
+        );
     }
 }
