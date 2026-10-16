@@ -15,9 +15,11 @@ use crate::text_result::TextSettings;
 /// the preferences always agree on one data home.
 #[must_use]
 pub fn data_dir() -> PathBuf {
-    ocr::model_dir()
-        .parent()
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+    let models = ocr::model_dir();
+    match models.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
 }
 
 /// The path of the JSON settings file.
@@ -32,7 +34,13 @@ pub fn settings_path() -> PathBuf {
 /// and a broken settings file must not stop OCR.
 #[must_use]
 pub fn ocr_settings() -> TextSettings {
-    let Ok(text) = std::fs::read_to_string(settings_path()) else {
+    ocr_settings_at(&settings_path())
+}
+
+/// Read the OCR preferences from an explicit settings file.
+#[must_use]
+fn ocr_settings_at(path: &std::path::Path) -> TextSettings {
+    let Ok(text) = std::fs::read_to_string(path) else {
         return TextSettings::default();
     };
     match crate::json::parse(&text) {
@@ -48,11 +56,31 @@ mod tests {
 
     #[test]
     fn ocr_settings_falls_back_to_defaults_without_a_file() {
-        // The lease has no settings file; the fallback must match defaults.
-        if !settings_path().is_file() {
-            let settings = ocr_settings();
-            assert_eq!(settings, TextSettings::default());
-            assert_eq!(settings.ocr_languages, ocr::AUTO);
-        }
+        let missing = std::env::temp_dir().join(format!(
+            "tidyshot-settings-missing-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(ocr_settings_at(&missing), TextSettings::default());
+    }
+
+    #[test]
+    fn ocr_settings_reads_saved_keys() {
+        let path =
+            std::env::temp_dir().join(format!("tidyshot-settings-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"ocr_languages":"eng+spa","ocr_linebreaks":false,"ocr_detect_links":false}"#,
+        )
+        .unwrap();
+        let settings = ocr_settings_at(&path);
+        assert_eq!(settings.ocr_languages, "eng+spa");
+        assert!(!settings.ocr_linebreaks);
+        assert!(!settings.ocr_detect_links);
+        let _ = std::fs::remove_file(&path);
+        // A malformed file must not stop OCR either.
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(ocr_settings_at(&path).ocr_languages, ocr::AUTO);
+        let _ = std::fs::remove_file(&path);
     }
 }
