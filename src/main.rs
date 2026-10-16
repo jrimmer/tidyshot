@@ -1,5 +1,7 @@
 // tidyshot: the CLI dispatch and the GUI entry point.
 
+use std::path::Path;
+
 /// Run a subcommand that must stay headless, before Qt is initialised.
 ///
 /// Returns `Some(exit_code)` when the invocation was handled without starting
@@ -29,7 +31,44 @@ where
             Some(doctor(&args[1..]))
         }
         Some("compat") => Some(tidyshot::compat::cli(&args[1..])),
+        Some("ocr") => {
+            let path = args.get(1).map(String::as_str).unwrap_or_default();
+            Some(run_ocr(path))
+        }
         _ => None,
+    }
+}
+
+/// Recognize `path` and copy the result.
+fn run_ocr(path: &str) -> i32 {
+    if path.is_empty() {
+        eprintln!("ocr needs an image path");
+        return 1;
+    }
+    let runner = tidyshot::commands::SystemRunner;
+    let qr = tidyshot::text_result::CommandQrReader::new(runner, "zbarimg");
+    let settings = tidyshot::text_result::TextSettings::default();
+    let clipboard = tidyshot::commands::SystemRunner;
+    match tidyshot::text_result::recognize(&runner, &qr, Path::new(path), &settings, None) {
+        Ok(tidyshot::text_result::Presentation::Copied) => 0,
+        Ok(tidyshot::text_result::Presentation::Dialog(result)) => {
+            let mut result = result;
+            match result.copy(&clipboard) {
+                Ok(()) => {
+                    print!("{}", result.text());
+                    0
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            }
+        }
+        Ok(tidyshot::text_result::Presentation::Empty) => 0,
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
     }
 }
 
@@ -48,6 +87,11 @@ mod tests {
     #[test]
     fn menu_subcommand_lists_actions_and_stays_headless() {
         assert_eq!(run_subcommand(&["menu".to_owned()]), Some(0));
+    }
+
+    #[test]
+    fn ocr_without_a_path_fails_without_starting_the_gui() {
+        assert_eq!(run_subcommand(&["ocr".to_owned()]), Some(1));
     }
 
     #[test]
