@@ -268,15 +268,11 @@ fn read_dynamic_tables(reader: &mut BitReader<'_>) -> Result<(Vec<u32>, Vec<u32>
             }
             17 => {
                 let repeat = reader.bits_le(3)? + 3;
-                for _ in 0..repeat {
-                    lengths.push(0);
-                }
+                lengths.extend(std::iter::repeat_n(0, repeat as usize));
             }
             18 => {
                 let repeat = reader.bits_le(7)? + 11;
-                for _ in 0..repeat {
-                    lengths.push(0);
-                }
+                lengths.extend(std::iter::repeat_n(0, repeat as usize));
             }
             _ => return Err(CompressError::new("invalid code length symbol")),
         }
