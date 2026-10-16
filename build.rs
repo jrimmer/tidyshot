@@ -9,6 +9,7 @@ fn main() {
             "qml/KeyboardPanel.qml",
             "qml/PanelButton.qml",
             "qml/MenuPanel.qml",
+            "qml/Overlay.qml",
             "qml/TrayMenu.qml",
             "qml/TextResultDialog.qml",
         ]),

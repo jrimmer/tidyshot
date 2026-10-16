@@ -3,10 +3,27 @@
 #
 # The standalone scroll helper is built first so the auto-scroll path is
 # exercised against a real binary on a machine that has the Wayland toolchain;
-# bin/native stays a no-op warning when that toolchain is absent.
+# bin/native stays a no-op warning when that toolchain is absent. The QML
+# component tests run through qmltestrunner offscreen; a missing runner only
+# warns so a Qt install without it still builds and unit-tests.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export QT_QPA_PLATFORM=offscreen
 bin/native || echo "scroll helper not built; auto-scroll tests run without it" >&2
 cargo test --offline
+qml_test_runner=$(command -v qmltestrunner || true)
+if [ -z "$qml_test_runner" ]; then
+    for candidate in "$(qmake6 -query QT_HOST_LIBEXECS 2>/dev/null)" \
+                     "$(qmake -query QT_HOST_LIBEXECS 2>/dev/null)"; do
+        if [ -n "$candidate" ] && [ -x "$candidate/qmltestrunner" ]; then
+            qml_test_runner="$candidate/qmltestrunner"
+            break
+        fi
+    done
+fi
+if [ -n "$qml_test_runner" ]; then
+    "$qml_test_runner" -input qml/tests
+else
+    echo "qmltestrunner not found; the offscreen QML tests were skipped" >&2
+fi
 echo "TIDYSHOT TESTS OK"
