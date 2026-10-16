@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-tidyshot">
+    <comment>TidyShot editable image</comment>
+    <glob pattern="*.tidyshot"/>
+    <icon name="camera-photo"/>
+  </mime-type>
+  <mime-type type="application/x-tidyshot-video">
+    <comment>TidyShot editable video</comment>
+    <glob pattern="*.tidyshot-video"/>
+    <icon name="camera-video"/>
+  </mime-type>
+</mime-info>

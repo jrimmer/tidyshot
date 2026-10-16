@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.joshdaws.tidyshot",
+  "name": "TidyShot",
+  "version": "0.1.0",
+  "author": "TidyShot contributors",
+  "license": "MIT",
+  "description": "Native screenshots, scrolling capture, annotation, recording and capture history.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "plugin/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "TidyShot",
+    "description": "Capture and annotate",
+    "category": "Utilities",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

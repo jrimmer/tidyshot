@@ -1,0 +1,101 @@
+"""Install only user-owned files; preserve package files and unrelated settings."""
+import json
+import os
+from pathlib import Path
+import shutil
+import shlex
+from datetime import datetime
+import subprocess
+
+source=Path(os.environ["TIDYSHOT_SOURCE"]).resolve()
+home=Path.home();config=Path(os.environ.get("XDG_CONFIG_HOME",home/".config"))
+data_home=Path(os.environ.get("XDG_DATA_HOME",home/".local/share"))
+# Validate inputs before writing launchers or changing desktop configuration.
+shell=config/"omarchy/shell.json"
+data=json.loads(shell.read_text())
+manifest=json.loads((source/"manifest.json").read_text())
+plugin_id=manifest["id"];legacy_id="local.tidyshot"
+bindings=config/"hypr/bindings.lua";old=bindings.read_text()
+hypr=config/"hypr/hyprland.lua";hypr_text=hypr.read_text()
+stamp=datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+backup=source/"backups"/stamp;backup.mkdir(parents=True,exist_ok=True)
+
+def preserve(path,name=None):
+    if path.exists():shutil.copy2(path,backup/(name or path.name))
+
+bin_dir=home/".local/bin";bin_dir.mkdir(parents=True,exist_ok=True)
+launcher=bin_dir/"tidyshot";preserve(launcher)
+launcher.write_text("#!/bin/sh\nexec "+shlex.quote(str(source/"build/tidyshot"))+" \"$@\"\n");launcher.chmod(0o755)
+applications=data_home/"applications";applications.mkdir(parents=True,exist_ok=True)
+mime_dir=data_home/"mime";mime_packages=mime_dir/"packages";mime_packages.mkdir(parents=True,exist_ok=True)
+preserve(mime_packages/"tidyshot.xml");shutil.copy2(source/"packaging/tidyshot.xml",mime_packages/"tidyshot.xml")
+desktop=applications/"org.omarchy.TidyShot.desktop";preserve(desktop)
+desktop.write_text('[Desktop Entry]\nType=Application\nName=TidyShot\nComment=Capture, scroll, annotate and record\nExec="'+str(launcher)+'" %u\nIcon=camera-photo\nTerminal=false\nCategories=Graphics;Utility;\nMimeType=image/png;image/jpeg;image/webp;image/heic;image/heif;image/gif;video/mp4;video/webm;video/quicktime;video/x-matroska;application/x-tidyshot;application/x-tidyshot-video;x-scheme-handler/tidyshot;\nActions=Capture;Scroll;History;\n\n[Desktop Action Capture]\nName=Capture\nExec="'+str(launcher)+'" menu\n\n[Desktop Action Scroll]\nName=Scrolling Capture\nExec="'+str(launcher)+'" scroll\n\n[Desktop Action History]\nName=Capture History\nExec="'+str(launcher)+'" history\n')
+plugins=config/"omarchy/plugins";plugin=plugins/plugin_id
+# `omarchy plugin add` owns a git checkout here and updates it itself; never
+# write into it. Manual installs get a plain copy with the same layout.
+managed=(plugin/".git").exists()
+widget_changed=False
+if not managed:
+    (plugin/"plugin").mkdir(parents=True,exist_ok=True)
+    widget=(source/"plugin/BarWidget.qml").read_bytes();installed_widget=plugin/"plugin/BarWidget.qml"
+    widget_changed=not installed_widget.exists() or installed_widget.read_bytes()!=widget
+    preserve(installed_widget);installed_widget.write_bytes(widget)
+    preserve(plugin/"manifest.json");(plugin/"manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")
+legacy=plugins/legacy_id
+if legacy.is_dir() and not (legacy/".git").exists():
+    for name in ("BarWidget.qml","manifest.json"):preserve(legacy/name,legacy_id+"-"+name)
+    shutil.rmtree(legacy);widget_changed=True
+preserve(shell)
+layout=data.setdefault("bar",{}).setdefault("layout",{})
+def placed(id):return any(v.get("id")==id for section in ("left","center","right") for v in layout.get(section,[]))
+if placed(legacy_id):
+    # Keep the widget where the user put it, with any inline settings. This
+    # wins over the default spot `omarchy plugin add --enable` just chose.
+    for section in ("left","center","right"):
+        if section in layout:layout[section]=[dict(v,id=plugin_id) if v.get("id")==legacy_id else v for v in layout[section] if v.get("id")!=plugin_id]
+if not managed and not placed(plugin_id):
+    layout.setdefault("right",[]).insert(0,{"id":plugin_id})
+shell_text=json.dumps(data,indent=2)+"\n"
+if shell.read_text()!=shell_text:shell.write_text(shell_text)
+preserve(bindings)
+marker="-- TidyShot managed bindings"
+if marker not in old:
+    with bindings.open("a") as f:
+        f.write('\n'+marker+'\n')
+        for key,desc,cmd in [("PRINT","TidyShot capture","menu"),("CTRL + PRINT","TidyShot area","area"),
+           ("SHIFT + PRINT","TidyShot fullscreen","fullscreen"),("ALT + PRINT","TidyShot recording","record"),
+           ("SUPER + SHIFT + PRINT","TidyShot scrolling capture","scroll"),("SUPER + CTRL + PRINT","TidyShot text capture","ocr")]:
+            f.write(f'hl.unbind("{key}")\no.bind("{key}", "{desc}", "{launcher} {cmd}")\n')
+rules=config/"hypr/tidyshot.lua";preserve(rules)
+rules_text='''-- TidyShot user-owned window rules.
+o.window("^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$", { float = true, opacity = "1 1", no_anim = true })
+o.window({ class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$", title = "^TidyShot Preview.*" }, { pin = true, no_initial_focus = true, no_follow_mouse = true })
+o.window({ title = "^TidyShot Pin.*", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
+o.window({ title = "^TidyShot Locked Pin.*", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_focus = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
+o.window({ title = "^TidyShot (Recording Controls|Camera Preview|Self Timer)$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_initial_focus = true, no_follow_mouse = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
+o.window({ title = "^TidyShot Scrolling (Guide.*|Preview)$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { no_focus = true, no_initial_focus = true, no_blur = true, no_shadow = true, no_dim = true, border_size = 0, rounding = 0 })
+o.window({ title = "^TidyShot Recording Dim .*", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_focus = true, no_initial_focus = true, no_blur = true, no_shadow = true, no_dim = true, border_size = 0, rounding = 0 })
+o.window({ title = "^TidyShot Scrolling Capture$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { no_initial_focus = true, no_follow_mouse = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 10 })
+o.window({ title = "^TidyShot Scrolling Selection$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { no_initial_focus = true, no_follow_mouse = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
+o.window({ title = "^TidyShot (Window )?Selection.*$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { no_initial_focus = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
+'''
+if not rules.exists() or rules.read_text()!=rules_text:rules.write_text(rules_text)
+preserve(hypr)
+if 'require("hypr.tidyshot")' not in hypr_text:
+    with hypr.open("a") as f:f.write('\n-- TidyShot capture and annotation windows.\nrequire("hypr.tidyshot")\n')
+print(f"Installed TidyShot. Configuration backups: {backup}")
+
+if shutil.which("update-desktop-database"):
+    subprocess.run(["update-desktop-database",str(applications)],check=True)
+if shutil.which("update-mime-database"):
+    subprocess.run(["update-mime-database",str(mime_dir)],check=True)
+if shutil.which("xdg-mime"):
+    preserve(config/"mimeapps.list")
+    subprocess.run(["xdg-mime","default",desktop.name,"application/x-tidyshot","application/x-tidyshot-video","x-scheme-handler/tidyshot"],check=True)
+if widget_changed and subprocess.run(["omarchy-shell","shell","ping"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:
+    # Quickshell's live component/file cache can retain the prior widget after
+    # rescanPlugins, including when a new entry-point filename is introduced.
+    # The stock restart command refuses to interrupt an active lock screen.
+    result=subprocess.run(["omarchy","restart","shell"])
+    if result.returncode:print("Widget files are installed; reload the Omarchy shell after unlocking to activate the update.")

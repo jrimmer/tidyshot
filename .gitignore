@@ -4,6 +4,13 @@ Cargo.lock.bak
 *.so
 *.o
 /work/
-/target
 .beads/
 .qmlls.ini
+
+# Build outputs the plugin runtime keeps across updates. Rerun `setup.sh`
+# mirrors the checkout without deleting these, so they must stay ignored.
+/target/
+/build/
+/native/
+/.venv/
+/backups/
