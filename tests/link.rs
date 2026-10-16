@@ -24,4 +24,12 @@ fn main_qml_loads_offscreen() {
 
     let roots = tidyshot::qml_load::root_count("qrc:/qt/qml/tidyshot/qml/Main.qml");
     assert_eq!(roots, 1, "Main.qml should produce exactly one root object");
+
+    // A missing document yields no root objects, so the count above is the
+    // document loading and not a constant.
+    let missing = tidyshot::qml_load::root_count("qrc:/qt/qml/tidyshot/qml/Missing.qml");
+    assert_eq!(
+        missing, 0,
+        "a missing document should produce no root objects"
+    );
 }
