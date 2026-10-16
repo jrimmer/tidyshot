@@ -13,6 +13,13 @@ fn crate_links_cxx_qt() {
 // failure is a plain assertion and no event loop ever starts.
 #[test]
 fn main_qml_loads_offscreen() {
+    // The harness exports the offscreen platform, but set it here too so a
+    // bare `cargo test` needs no display. Nothing else reads the variable
+    // before QGuiApplication is created, so the write is safe.
+    if std::env::var_os("QT_QPA_PLATFORM").is_none() {
+        unsafe { std::env::set_var("QT_QPA_PLATFORM", "offscreen") };
+    }
+
     cxx_qt::init_crate!(tidyshot);
     cxx_qt::init_qml_module!("tidyshot");
 
