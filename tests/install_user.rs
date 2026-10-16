@@ -353,6 +353,7 @@ fn migrates_legacy_widget_with_its_settings() {
 fn uninstall_restores_configuration_and_keeps_captures() {
     let home = Home::new("uninstall");
     copy_scripts(&home);
+    let tracked_bindings = fs::read_to_string(home.config.join("hypr/bindings.lua")).unwrap();
     let tracked: Vec<(String, String)> = ["hypr/hyprland.lua", "hypr/bindings.lua"]
         .iter()
         .map(|name| {
@@ -365,7 +366,21 @@ fn uninstall_restores_configuration_and_keeps_captures() {
     let captures = home.data.join("tidyshot/captures");
     fs::create_dir_all(&captures).unwrap();
     fs::write(captures.join("shot.png"), b"capture").unwrap();
+    let mimeapps = home.config.join("mimeapps.list");
+    fs::write(
+        &mimeapps,
+        "[Default Applications]\nimage/png=viewer.desktop;\n",
+    )
+    .unwrap();
     assert!(home.install().status.success());
+    let mut mime_text = fs::read_to_string(&mimeapps).unwrap();
+    mime_text.push_str(
+        "application/x-tidyshot=org.omarchy.TidyShot.desktop;\nimage/jpeg=org.omarchy.TidyShot.desktop;viewer.desktop;\n",
+    );
+    fs::write(&mimeapps, mime_text).unwrap();
+    // A plugin managed by omarchy plugin add is left for `plugin remove`.
+    let managed = home.config.join("omarchy/plugins/other.plugin");
+    fs::create_dir_all(managed.join(".git")).unwrap();
     let result = home.uninstall();
     assert!(
         result.status.success(),
@@ -384,7 +399,25 @@ fn uninstall_restores_configuration_and_keeps_captures() {
     );
     assert!(!home.config.join("hypr/tidyshot.lua").exists());
     assert!(!home.config.join("omarchy/plugins").join(PLUGIN_ID).exists());
+    assert!(
+        managed.exists(),
+        "a managed plugin belongs to omarchy plugin remove"
+    );
+    assert_eq!(
+        fs::read_to_string(&mimeapps).unwrap(),
+        "[Default Applications]\nimage/png=viewer.desktop;\nimage/jpeg=viewer.desktop;\n"
+    );
     assert_eq!(fs::read(captures.join("shot.png")).unwrap(), b"capture");
+    // The pre-uninstall configuration is preserved under config-backups.
+    let backup = fs::read_dir(home.data.join("tidyshot/config-backups"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        fs::read_to_string(backup.path().join("config/hypr/bindings.lua")).unwrap(),
+        tracked_bindings
+    );
 }
 
 #[test]
