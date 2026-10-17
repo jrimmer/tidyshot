@@ -7,8 +7,8 @@
 //!
 //! Release tests use a fixture directory through `TIDYSHOT_RELEASE_DIR` and
 //! fake the machine architecture through `TIDYSHOT_UNAME`, so they need no
-//! network access. The lease has no GitHub egress; the default release URL is
-//! exercised only by real installs, never by these tests.
+//! network access. `TIDYSHOT_RELEASE_URL` is exercised through a stubbed curl
+//! that serves a local tree; the real GitHub URL is used only by real installs.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -1150,7 +1150,7 @@ fn a_tarball_member_commanding_a_parent_path_falls_back() {
         String::from_utf8_lossy(&result.stderr)
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(stderr.contains("unsafe member"), "{stderr}");
     assert!(cargo_called(&fixture));
     assert!(fixture.prebuilt_log().is_empty());
     assert!(!fixture.base.join("escaped").exists());
@@ -1292,7 +1292,7 @@ fn a_tarball_member_that_is_a_symlink_falls_back() {
         String::from_utf8_lossy(&result.stderr)
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(stderr.contains("unsafe member"), "{stderr}");
     assert!(cargo_called(&fixture));
     assert!(fixture.prebuilt_log().is_empty());
 }
@@ -1311,7 +1311,7 @@ fn links_ahead_of_a_large_member_are_still_rejected() {
         String::from_utf8_lossy(&result.stderr)
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(stderr.contains("unsafe member"), "{stderr}");
     assert!(cargo_called(&fixture));
     assert!(fixture.prebuilt_log().is_empty());
     assert!(!fixture.runtime.join("link-0").exists());
@@ -1324,7 +1324,7 @@ fn a_hardlink_member_falls_back() {
     let result = run_release(&fixture, &release, &[]);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
-    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(stderr.contains("unsafe member"), "{stderr}");
     assert!(cargo_called(&fixture));
     assert!(fixture.prebuilt_log().is_empty());
 }
@@ -1336,7 +1336,7 @@ fn a_fifo_member_falls_back() {
     let result = run_release(&fixture, &release, &[]);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
-    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(stderr.contains("unsafe member"), "{stderr}");
     assert!(cargo_called(&fixture));
     assert!(fixture.prebuilt_log().is_empty());
     assert!(!fixture.runtime.join("build/fifo").exists());
@@ -1349,7 +1349,7 @@ fn a_setuid_member_falls_back() {
     let result = run_release(&fixture, &release, &[]);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
-    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(stderr.contains("unsafe member"), "{stderr}");
     assert!(cargo_called(&fixture));
     assert!(fixture.prebuilt_log().is_empty());
 }
@@ -1390,4 +1390,26 @@ fn the_release_url_override_supplies_the_download_root() {
     );
     assert!(!cargo_called(&fixture), "the source build must not run");
     assert!(!fixture.prebuilt_log().is_empty());
+}
+
+/// The extraction itself, not just its effect on the archive name: run the
+/// shared shell parser against the repository's own manifest bytes and compare
+/// it with an independent JSON read. This is the regression for the sed that
+/// carried literal double backslashes and returned nothing.
+#[test]
+fn the_shell_parser_reads_the_real_manifest_version() {
+    let script = format!(
+        "source '{}'; tidyshot_manifest_version '{}'",
+        repo_root().join("scripts/manifest.sh").display(),
+        repo_root().join("manifest.json").display()
+    );
+    let output = Command::new("bash").args(["-c", &script]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let printed = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(printed.trim(), manifest_version());
+    assert!(!printed.trim().is_empty());
 }

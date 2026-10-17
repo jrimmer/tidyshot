@@ -48,6 +48,11 @@ Omarchy.
 - A native Arch package (`pkgbuild/PKGBUILD`, `bin/install`) that installs the
   release binary, desktop entry, MIME definition, auto-scroll helper, and a
   theme-reflective icon generated from the live Omarchy accent.
+- Prebuilt release installs: `bin/make-release-artifacts` packs the binary, icon
+  command, generated icon and source stamp into a tarball with a checksum, and
+  plugin setup installs it without the Rust and Qt toolchain when the archive
+  matches its checksum, the checkout commit and the archive safety rules. The
+  auto-scroll helper still builds locally against the running compositor.
 
 ### Security
 

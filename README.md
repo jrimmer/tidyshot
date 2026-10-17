@@ -161,9 +161,16 @@ of the script. The auto-scroll helper is never shipped:
 install.sh builds it against the running compositor's Wayland protocol.
 
 Setup only trusts a download whose checksum matches `checksums.txt`, whose
-source stamp equals the checkout HEAD, and whose archive holds no absolute or
-parent-climbing paths. Anything else prints one line naming the reason and
-builds from source as before.
+source stamp equals the checkout HEAD, and whose archive holds only plain files
+and directories at relative paths: absolute or parent-climbing members are
+rejected, as are links, devices, fifos and setuid/setgid members. Anything else
+prints one line naming the reason and builds from source as before.
+
+`TIDYSHOT_RELEASE_DIR` points setup at a local directory of release files
+instead of downloading them, and `TIDYSHOT_RELEASE_URL` replaces the download
+root (`https://github.com/jrimmer/tidyshot/releases/download` by default); the
+files are then read from `$TIDYSHOT_RELEASE_URL/v<version>/`. Both leave every
+check above in place.
 
 ## Bar popup
 

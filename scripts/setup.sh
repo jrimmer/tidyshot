@@ -149,7 +149,7 @@ task_prepare_release() {
     (( task_unsafe )) && break
   done < <(LC_ALL=C tar --numeric-owner --full-time --quoting-style=escape -tvzf "$task_tarball")
   if (( task_unsafe )); then
-    task_release_reason="release tarball $task_archive has an unsafe path"
+    task_release_reason="release tarball $task_archive has an unsafe member"
     return 0
   fi
   local task_stage="$task_release_tmp/unpacked"
