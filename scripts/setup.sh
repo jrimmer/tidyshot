@@ -132,9 +132,9 @@ task_prepare_release() {
   fi
   local task_line task_mode task_member task_unsafe=0
   while IFS= read -r task_line; do
-    # mode, owner/group, size, timestamp, then the member name; the name is the
-    # rest of the line so spaces in it stay intact. Escape quoting keeps a name
-    # with a newline on one line.
+    # mode, owner/group, size, date and time, then the member name; the name is
+    # the rest of the line so spaces in it stay intact. Escape quoting keeps a
+    # name with a newline on one line.
     if [[ ! $task_line =~ ^([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+(.*)$ ]]; then
       task_unsafe=1
       break
