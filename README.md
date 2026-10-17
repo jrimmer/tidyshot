@@ -128,7 +128,11 @@ omarchy plugin add https://github.com/jrimmer/tidyshot --enable
 Each install step mirrors OmniShot's plugin flow:
 
 - `omarchy plugin add https://github.com/jrimmer/tidyshot --enable` clones the
-  checkout into `$XDG_CONFIG_HOME/omarchy/plugins/com.jasonrimmer.tidyshot`.
+  checkout into `$XDG_CONFIG_HOME/omarchy/plugins/com.jasonrimmer.tidyshot`;
+  the directory name is the manifest's plugin id.
+- Installs from before the id rename still work: uninstall removes either
+  plugin id's checkout and bar widget, and doctor accepts a bar widget that
+  answers under the older id until the plugin is updated.
 - The widget offers **Finish setup**, which runs `scripts/setup.sh`: it installs
   packages through `omarchy pkg add`, mirrors the checkout into
   `$XDG_DATA_HOME/tidyshot-app`, installs the Rust binary there, and stamps
