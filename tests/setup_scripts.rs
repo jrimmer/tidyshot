@@ -394,7 +394,7 @@ impl Release {
         Self { dir }
     }
 
-    fn env<'a>(&'a self) -> (&'a str, String) {
+    fn env(&self) -> (&str, String) {
         ("TIDYSHOT_RELEASE_DIR", self.dir.display().to_string())
     }
 }
