@@ -538,6 +538,44 @@ fn refuses_while_the_app_will_not_quit() {
     assert!(!fixture.install_log.exists());
 }
 
+#[test]
+fn accepts_the_nested_omarchy_layout() {
+    let fixture = Fixture::new("nestedguard");
+    let nested = fixture.config.join("omarchy/hypr");
+    fs::create_dir_all(&nested).unwrap();
+    fs::rename(
+        fixture.config.join("hypr/hyprland.lua"),
+        nested.join("hyprland.lua"),
+    )
+    .unwrap();
+    fs::rename(
+        fixture.config.join("hypr/bindings.lua"),
+        nested.join("bindings.lua"),
+    )
+    .unwrap();
+    fs::remove_dir(fixture.config.join("hypr")).unwrap();
+    fixture.own(&nested);
+    fixture.own(&fixture.config.join("omarchy"));
+    let result = fixture.run("setup.sh", &[]);
+    assert!(
+        result.status.success(),
+        "a nested Hyprland layout must be accepted: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(fixture.install_log().contains("install ran"));
+}
+
+#[test]
+fn refuses_when_neither_hyprland_layout_is_present() {
+    let fixture = Fixture::new("nolayout");
+    fs::remove_file(fixture.config.join("hypr/hyprland.lua")).unwrap();
+    let result = fixture.run("setup.sh", &[]);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success());
+    assert!(stderr.contains("Lua Hyprland configuration"), "{stderr}");
+    assert!(!fixture.install_log.exists());
+}
+
 /// The runtime helpers must detect the real built binary, not the Python
 /// launcher the reference used. Drive the actual `pgrep` against a process
 /// whose command line starts with the launcher's binary path.

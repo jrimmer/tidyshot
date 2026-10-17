@@ -548,6 +548,37 @@ fn migration_keeps_legacy_position_over_default_placement() {
     );
 }
 
+#[test]
+fn binds_hyprland_configuration_in_the_nested_layout() {
+    let home = Home::new("nestedhypr");
+    copy_scripts(&home);
+    // Move the fixture's Hyprland configuration into the older nested layout
+    // and drop the top-level copy, so only ~/.config/omarchy/hypr remains.
+    let nested = home.config.join("omarchy/hypr");
+    fs::create_dir_all(&nested).unwrap();
+    fs::rename(
+        home.config.join("hypr/hyprland.lua"),
+        nested.join("hyprland.lua"),
+    )
+    .unwrap();
+    fs::rename(
+        home.config.join("hypr/bindings.lua"),
+        nested.join("bindings.lua"),
+    )
+    .unwrap();
+    fs::remove_dir(home.config.join("hypr")).unwrap();
+    assert!(home.install().status.success());
+    let bindings = fs::read_to_string(nested.join("bindings.lua")).unwrap();
+    assert!(
+        bindings.contains("TidyShot managed bindings"),
+        "bindings are written where the layout detection finds them: {bindings}"
+    );
+    assert!(nested.join("tidyshot.lua").is_file());
+    let hypr = fs::read_to_string(nested.join("hyprland.lua")).unwrap();
+    assert!(hypr.contains("require(\"hypr.tidyshot\")"), "{hypr}");
+    assert!(!home.config.join("hypr/bindings.lua").exists());
+}
+
 fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     collect(root, root, &mut out);

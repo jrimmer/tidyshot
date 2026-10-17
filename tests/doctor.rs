@@ -442,6 +442,50 @@ fn json_output_and_failure_exit_code() {
 }
 
 #[test]
+fn nested_hyprland_layout_passes_config_and_rules() {
+    let root = temp_root("nested");
+    let machine = Machine::healthy(&root);
+    let top = machine.config.join("hypr");
+    let nested = machine.config.join("omarchy/hypr");
+    std::fs::create_dir_all(&nested).unwrap();
+    for name in ["hyprland.lua", "bindings.lua", "tidyshot.lua"] {
+        std::fs::rename(top.join(name), nested.join(name)).unwrap();
+    }
+    std::fs::remove_dir(&top).unwrap();
+    let found = results(&machine, false);
+    assert_eq!(found["config"].status.id(), "ok");
+    assert_eq!(found["hyprland-config"].status.id(), "ok");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn top_level_layout_wins_when_both_are_present() {
+    let root = temp_root("both");
+    let machine = Machine::healthy(&root);
+    // A stale nested copy missing the rules must not make doctor report a
+    // problem while the preferred top-level layout is healthy.
+    let nested = machine.config.join("omarchy/hypr");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("hyprland.lua"), "-- stale\n").unwrap();
+    std::fs::write(nested.join("bindings.lua"), "-- stale\n").unwrap();
+    let found = results(&machine, false);
+    assert_eq!(found["config"].status.id(), "ok");
+    assert_eq!(found["hyprland-config"].status.id(), "ok");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn missing_hyprland_config_fails_the_config_check() {
+    let root = temp_root("nohypr");
+    let machine = Machine::healthy(&root);
+    std::fs::remove_file(machine.config.join("hypr/hyprland.lua")).unwrap();
+    let config = results(&machine, false)["config"].clone();
+    assert_eq!(config.status.id(), "fail");
+    assert!(config.summary.contains("hypr/hyprland.lua"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn untested_helper_strips_the_package_release() {
     assert!(compat::untested("4.0.2-1", "0.56.2").is_empty());
     assert_eq!(compat::untested("4.0.3rc4-1", ""), ["Omarchy 4.0.3rc4-1"]);

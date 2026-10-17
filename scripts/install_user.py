@@ -15,11 +15,20 @@ shell=config/"omarchy/shell.json"
 data=json.loads(shell.read_text())
 manifest=json.loads((source/"manifest.json").read_text())
 plugin_id=manifest["id"];legacy_id="local.tidyshot"
-# The guard exports the Hyprland directory it detected; writing to the same
-# one keeps bindings where Hyprland reads them under either Omarchy layout.
-hypr_dir=Path(os.environ.get("TIDYSHOT_HYPR_DIR",config/"hypr"))
-bindings=hypr_dir/"bindings.lua";old=bindings.read_text()
-hypr=hypr_dir/"hyprland.lua";hypr_text=hypr.read_text()
+# Write to the layout the session guard detected. TIDYSHOT_HYPR_DIR is
+# authoritative; without it, prefer the top-level ~/.config/hypr and fall back
+# to the older nested ~/.config/omarchy/hypr, matching scripts/runtime.sh and
+# tidyshot doctor.
+def hypr_dir():
+    hinted=os.environ.get("TIDYSHOT_HYPR_DIR")
+    if hinted:return Path(hinted)
+    top=config/"hypr"
+    if (top/"hyprland.lua").is_file() or (top/"bindings.lua").is_file():return top
+    nested=config/"omarchy/hypr"
+    if (nested/"hyprland.lua").is_file() or (nested/"bindings.lua").is_file():return nested
+    return top
+bindings=hypr_dir()/"bindings.lua";old=bindings.read_text()
+hypr=hypr_dir()/"hyprland.lua";hypr_text=hypr.read_text()
 stamp=datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 backup=source/"backups"/stamp;backup.mkdir(parents=True,exist_ok=True)
 
@@ -98,7 +107,7 @@ if marker not in old:
            ("SHIFT + PRINT","TidyShot fullscreen","fullscreen"),("ALT + PRINT","TidyShot recording","record"),
            ("SUPER + SHIFT + PRINT","TidyShot scrolling capture","scroll"),("SUPER + CTRL + PRINT","TidyShot text capture","ocr")]:
             f.write(f'hl.unbind("{key}")\no.bind("{key}", "{desc}", "{launcher} {cmd}")\n')
-rules=hypr_dir/"tidyshot.lua";preserve(rules)
+rules=hypr_dir()/"tidyshot.lua";preserve(rules)
 rules_text='''-- TidyShot user-owned window rules.
 o.window("^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$", { float = true, opacity = "1 1", no_anim = true })
 o.window({ class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$", title = "^TidyShot Preview.*" }, { pin = true, no_initial_focus = true, no_follow_mouse = true })

@@ -943,4 +943,59 @@ mod tests {
         assert!(which_on_path("missing", Some(dir.to_string_lossy().as_ref())).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    fn config_with(root: &Path, hypr: &Path) {
+        std::fs::create_dir_all(hypr).unwrap();
+        std::fs::write(hypr.join("hyprland.lua"), b"-- mine\n").unwrap();
+        std::fs::write(hypr.join("bindings.lua"), b"-- mine\n").unwrap();
+        std::fs::create_dir_all(root.join("omarchy")).unwrap();
+        std::fs::write(root.join("omarchy/shell.json"), b"{}\n").unwrap();
+    }
+
+    #[test]
+    fn finds_the_top_level_hyprland_layout() {
+        let root = std::env::temp_dir().join(format!("tidyshot-top-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        config_with(&root, &root.join("hypr"));
+        assert_eq!(
+            hypr_dir(&root).as_deref(),
+            Some(root.join("hypr").as_path())
+        );
+        assert!(shell_settings(&root).is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn falls_back_to_the_nested_hyprland_layout() {
+        let root = std::env::temp_dir().join(format!("tidyshot-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        config_with(&root, &root.join("omarchy/hypr"));
+        assert_eq!(
+            hypr_dir(&root).as_deref(),
+            Some(root.join("omarchy/hypr").as_path())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prefers_the_top_level_layout_when_both_exist() {
+        let root = std::env::temp_dir().join(format!("tidyshot-both-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        config_with(&root, &root.join("hypr"));
+        config_with(&root, &root.join("omarchy/hypr"));
+        assert_eq!(
+            hypr_dir(&root).as_deref(),
+            Some(root.join("hypr").as_path())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_hyprland_config_is_reported() {
+        let root = std::env::temp_dir().join(format!("tidyshot-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(hypr_dir(&root).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
