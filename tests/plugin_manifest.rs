@@ -51,6 +51,23 @@ fn manifest_matches_the_shell_schema_and_ids() {
 }
 
 #[test]
+fn readme_names_the_real_repository_and_plugin_install() {
+    let text = fs::read_to_string(repo().join("README.md")).unwrap();
+    assert!(
+        text.contains("https://github.com/jrimmer/tidyshot"),
+        "README must point at the real repository"
+    );
+    assert!(
+        text.contains("omarchy plugin add https://github.com/jrimmer/tidyshot --enable"),
+        "README must document the one-line plugin install"
+    );
+    assert!(
+        !text.contains("git.lacy.casa"),
+        "no mirror placeholder remains in the README"
+    );
+}
+
+#[test]
 fn repository_tracks_no_symlinks() {
     // `omarchy plugin validate` rejects any symlink in the plugin folder.
     let root = repo();

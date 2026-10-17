@@ -44,6 +44,17 @@ Run these commands as your normal desktop user in a terminal inside an
 unlocked, supported Omarchy session. `omarchy pkg add` handles elevation for
 system packages; run `bash install.sh` **without sudo**.
 
+The supported install is the Omarchy plugin:
+
+```sh
+omarchy plugin add https://github.com/jrimmer/tidyshot --enable
+```
+
+The bar widget then offers **Finish setup**, which installs the build and
+runtime dependencies and builds TidyShot from the plugin checkout.
+
+A development checkout installs directly:
+
 ```sh
 # Install missing build and runtime dependencies.
 omarchy pkg add git rust qt6-base qt6-declarative python gcc pkgconf \
@@ -52,7 +63,6 @@ omarchy pkg add git rust qt6-base qt6-declarative python gcc pkgconf \
   gpu-screen-recorder libpulse desktop-file-utils shared-mime-info xdg-utils \
   libnotify
 
-mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}"
 git clone https://github.com/jrimmer/tidyshot "${XDG_DATA_HOME:-$HOME/.local/share}/tidyshot-app"
 cd "${XDG_DATA_HOME:-$HOME/.local/share}/tidyshot-app"
 bash install.sh
