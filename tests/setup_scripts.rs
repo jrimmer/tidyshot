@@ -4,6 +4,11 @@
 //! throwaway HOME, stub the desktop commands on PATH, and never touch a live
 //! session. The scripts refuse to run as root, so a root test process drops to
 //! an unprivileged uid for every script and git call inside the fixture.
+//!
+//! Release tests use a fixture directory through `TIDYSHOT_RELEASE_DIR` and
+//! fake the machine architecture through `TIDYSHOT_UNAME`, so they need no
+//! network access. The lease has no GitHub egress; the default release URL is
+//! exercised only by real installs, never by these tests.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -15,6 +20,11 @@ const NOBODY: (u32, u32) = (65534, 65534);
 
 /// The install stub the fixture uses in place of the real Rust build.
 const INSTALL: &str = r#"printf 'install ran in %s\n' "$PWD" >>"$SETUP_LOG.install"
+if [ -z "${TIDYSHOT_PREBUILT:-}" ]; then
+  cargo build --release --offline
+else
+  printf 'prebuilt %s\n' "${TIDYSHOT_PREBUILT}" >>"$SETUP_LOG.prebuilt"
+fi
 mkdir -p native .venv backups/stamp
 printf built >native/helper.so
 printf venv >.venv/marker
@@ -44,6 +54,7 @@ struct Fixture {
     bin: PathBuf,
     log: PathBuf,
     install_log: PathBuf,
+    prebuilt_log: PathBuf,
     head: String,
     /// Uid/gid to run scripts as, or `None` when the test user is unprivileged.
     drop: Option<(u32, u32)>,
@@ -107,7 +118,7 @@ impl Fixture {
         let bin = base.join("bin");
         fs::create_dir_all(&bin).unwrap();
         use std::os::unix::fs::PermissionsExt as _;
-        for stub in ["omarchy", "hyprctl", "pgrep", "setsid"] {
+        for stub in ["omarchy", "hyprctl", "pgrep", "setsid", "cargo"] {
             let path = bin.join(stub);
             fs::write(&path, STUB).unwrap();
             let mut perms = fs::metadata(&path).unwrap().permissions();
@@ -125,6 +136,7 @@ impl Fixture {
 
         Self {
             install_log: base.join("commands.jsonl.install"),
+            prebuilt_log: base.join("commands.jsonl.prebuilt"),
             log: base.join("commands.jsonl"),
             runtime: data.join("tidyshot-app"),
             base,
@@ -153,6 +165,13 @@ impl Fixture {
             ),
         ));
         env.push(("SETUP_LOG".into(), self.log.display().to_string()));
+        // Keep every fixture off the network and on one architecture; release
+        // tests override these with their own release directory.
+        env.push((
+            "TIDYSHOT_RELEASE_DIR".into(),
+            self.base.join("no-release").display().to_string(),
+        ));
+        env.push(("TIDYSHOT_UNAME".into(), "x86_64".into()));
         env.push(("WAYLAND_DISPLAY".into(), "test".into()));
         env.push(("HYPRLAND_INSTANCE_SIGNATURE".into(), "test".into()));
         env
@@ -245,12 +264,97 @@ impl Fixture {
         fs::read_to_string(&self.install_log).unwrap_or_default()
     }
 
+    fn prebuilt_log(&self) -> String {
+        fs::read_to_string(&self.prebuilt_log).unwrap_or_default()
+    }
+
+    fn release(&self, commit: &str) -> Release {
+        Release::write(self, commit, ReleaseFlaw::None)
+    }
+
+    fn release_with(&self, commit: &str, flaw: ReleaseFlaw) -> Release {
+        Release::write(self, commit, flaw)
+    }
+
     /// Give a path the same ownership the scripts will run with, so a test
     /// that stages files before running them is writable when uid is dropped.
     fn own(&self, path: &Path) {
         if let Some((uid, gid)) = self.drop {
             chown_recursive(path, uid, gid);
         }
+    }
+}
+
+const RELEASE_VERSION: &str = "0.1.0";
+const RELEASE_ARCHIVE: &str = "tidyshot-0.1.0-x86_64.tar.gz";
+
+#[derive(Clone, Copy)]
+enum ReleaseFlaw {
+    None,
+    Checksum,
+    OmitTarball,
+}
+
+/// A fake release directory in the shape `bin/make-release-artifacts` writes:
+/// a tarball rooted at the runtime layout (build/tidyshot plus the source
+/// commit stamp) and a checksums.txt naming it.
+struct Release {
+    dir: PathBuf,
+}
+
+impl Release {
+    fn write(fixture: &Fixture, commit: &str, flaw: ReleaseFlaw) -> Self {
+        let dir = fixture.base.join("release");
+        let stage = fixture.base.join("release-stage");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&stage);
+        fs::create_dir_all(stage.join("build")).unwrap();
+        fs::write(stage.join("build/tidyshot"), "#!/bin/sh\necho prebuilt\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        let binary = stage.join("build/tidyshot");
+        let mut perms = fs::metadata(&binary).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&binary, perms).unwrap();
+        fs::write(stage.join(".tidyshot-source"), format!("{commit}\n")).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        if !matches!(flaw, ReleaseFlaw::OmitTarball) {
+            let archive = dir.join(RELEASE_ARCHIVE);
+            let status = Command::new("tar")
+                .args(["--owner=0", "--group=0", "--numeric-owner", "-czf"])
+                .arg(&archive)
+                .args(["-C", &stage.display().to_string(), "."])
+                .status()
+                .unwrap();
+            assert!(status.success(), "could not create the fixture tarball");
+        }
+        let digest = if matches!(flaw, ReleaseFlaw::Checksum) {
+            "0".repeat(64)
+        } else if matches!(flaw, ReleaseFlaw::OmitTarball) {
+            "1".repeat(64)
+        } else {
+            let output = Command::new("sha256sum")
+                .arg(dir.join(RELEASE_ARCHIVE))
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        fs::write(
+            dir.join("checksums.txt"),
+            format!("{digest}  {RELEASE_ARCHIVE}\n"),
+        )
+        .unwrap();
+        fixture.own(&dir);
+        Self { dir }
+    }
+
+    fn env<'a>(&'a self) -> (&'a str, String) {
+        ("TIDYSHOT_RELEASE_DIR", self.dir.display().to_string())
     }
 }
 
@@ -828,4 +932,115 @@ fn parse_layout(text: &str, section: &str) -> Vec<String> {
             after[..end].to_owned()
         })
         .collect()
+}
+
+fn run_release(fixture: &Fixture, release: &Release, extra: &[(&str, &str)]) -> Output {
+    let (key, value) = release.env();
+    let mut env: Vec<(&str, &str)> = vec![(key, value.as_str()), ("TIDYSHOT_SKIP_PACKAGES", "1")];
+    env.extend_from_slice(extra);
+    fixture.run("setup.sh", &env)
+}
+
+fn cargo_called(fixture: &Fixture) -> bool {
+    fixture
+        .calls()
+        .iter()
+        .any(|call| call.first().map(String::as_str) == Some("cargo"))
+}
+
+#[test]
+fn head_match_installs_the_prebuilt_release_without_cargo() {
+    let fixture = Fixture::new("release-match");
+    let release = fixture.release(&fixture.head);
+    let result = run_release(&fixture, &release, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("prebuilt"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.runtime.join("build/tidyshot")).unwrap(),
+        "#!/bin/sh\necho prebuilt\n"
+    );
+    assert!(!fixture.prebuilt_log().is_empty());
+    assert!(!cargo_called(&fixture), "the source build must not run");
+    assert_eq!(
+        fs::read_to_string(fixture.runtime.join(".tidyshot-source"))
+            .unwrap()
+            .trim(),
+        fixture.head
+    );
+}
+
+#[test]
+fn head_mismatch_falls_back_to_the_source_build() {
+    let fixture = Fixture::new("release-mismatch");
+    let release = fixture.release(&"d".repeat(40));
+    let result = run_release(&fixture, &release, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("not the checkout HEAD"), "{stderr}");
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
+}
+
+#[test]
+fn checksum_mismatch_falls_back_and_does_not_stage_the_release() {
+    let fixture = Fixture::new("release-checksum");
+    let release = fixture.release_with(&fixture.head, ReleaseFlaw::Checksum);
+    let result = run_release(&fixture, &release, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("checksum mismatch"), "{stderr}");
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
+}
+
+#[test]
+fn a_missing_tarball_falls_back_to_the_source_build() {
+    let fixture = Fixture::new("release-missing");
+    let release = fixture.release_with(&fixture.head, ReleaseFlaw::OmitTarball);
+    let result = run_release(&fixture, &release, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains(RELEASE_ARCHIVE), "{stderr}");
+    assert!(stderr.contains("unavailable"), "{stderr}");
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
+}
+
+#[test]
+fn another_architecture_falls_back_to_the_source_build() {
+    let fixture = Fixture::new("release-arch");
+    let release = fixture.release(&fixture.head);
+    let result = run_release(&fixture, &release, &[("TIDYSHOT_UNAME", "aarch64")]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("no prebuilt binary for aarch64"),
+        "{stderr}"
+    );
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
 }

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# bin/make-release-artifacts — build the release binary and package the files
+# scripts/setup.sh installs from a release: build/tidyshot, build/generate-icon,
+# the generated icon, and the source commit stamp. Upload is intentionally not
+# part of this script; publishing stays a separate, explicit step.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+task_root=$PWD
+mkdir -p dist
+
+task_version=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)".*/\1/p' manifest.json | head -n1)
+[[ -n $task_version ]] || { echo "manifest.json has no version" >&2; exit 1; }
+task_commit=$(git rev-parse HEAD) || { echo "could not read the source commit" >&2; exit 1; }
+
+bin/build
+
+task_stage=$(mktemp -d)
+trap 'rm -rf "$task_stage"' EXIT
+mkdir -p "$task_stage/build"
+cp -- build/tidyshot "$task_stage/build/tidyshot"
+[[ -x build/generate-icon ]] && cp -- build/generate-icon "$task_stage/build/generate-icon"
+[[ -f build/tidyshot.svg ]] && cp -- build/tidyshot.svg "$task_stage/build/tidyshot.svg"
+printf '%s\n' "$task_commit" >"$task_stage/.tidyshot-source"
+
+task_archive="dist/tidyshot-$task_version-x86_64.tar.gz"
+tar --owner=0 --group=0 --numeric-owner -czf "$task_archive.tmp" -C "$task_stage" .
+mv -- "$task_archive.tmp" "$task_archive"
+(cd dist && sha256sum "$(basename "$task_archive")" >checksums.txt)
+printf 'wrote %s and dist/checksums.txt for %s\n' "$task_archive" "$task_commit"

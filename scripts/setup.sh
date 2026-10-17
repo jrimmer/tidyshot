@@ -32,7 +32,7 @@ if [[ -z ${TIDYSHOT_SKIP_PACKAGES:-} ]]; then
   # libraries and QML build tools that install.sh and bin/build need.
   omarchy pkg add git rust qt6-base qt6-declarative python gcc pkgconf \
     wayland wayland-protocols \
-    cairo libxkbcommon libglvnd lua54 grim slurp wl-clipboard ffmpeg \
+    curl cairo libxkbcommon libglvnd lua54 grim slurp wl-clipboard ffmpeg \
     tesseract tesseract-data-eng tesseract-data-osd zbar gpu-screen-recorder libpulse \
     desktop-file-utils shared-mime-info xdg-utils libnotify
 fi
@@ -55,11 +55,110 @@ fi
 task_previous_build=""
 [[ -f $tidyshot_stamp ]] && task_previous_build=$(<"$tidyshot_stamp")
 
+# A release tarball is used only when the checkout is exactly the released
+# commit, the host can run the published x86_64 binary, and its checksum
+# matches. Everything else builds from source, as before. The release is staged
+# outside the runtime so a failed download, checksum or archive leaves the
+# installed app untouched.
+task_release_stage=""
+task_release_reason=""
+task_release_archive=""
+task_release_version=""
+task_release_tmp=""
+task_release_cleanup() {
+  [[ -n $task_release_tmp ]] && rm -rf -- "$task_release_tmp"
+}
+trap task_release_cleanup EXIT
+
+task_release_source() {
+  local task_name=$1 task_dest=$2
+  if [[ -n ${TIDYSHOT_RELEASE_DIR:-} ]]; then
+    [[ -f $TIDYSHOT_RELEASE_DIR/$task_name ]] || return 1
+    cp -a -- "$TIDYSHOT_RELEASE_DIR/$task_name" "$task_dest"
+    return 0
+  fi
+  local task_base=${TIDYSHOT_RELEASE_URL:-https://github.com/jrimmer/tidyshot/releases/download}
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -fsSL --proto '=https' --connect-timeout 5 --max-time 300 \
+    --output "$task_dest" "$task_base/v$task_release_version/$task_name"
+}
+
+task_prepare_release() {
+  task_release_version=$(sed -n 's/^[[:space:]]*"version": "\\([^"\]*\\)".*/\1/p' "$task_source/manifest.json" | head -n1)
+  [[ -n $task_release_version ]] || {
+    task_release_reason="the plugin manifest has no version"
+    return 0
+  }
+  local task_arch=${TIDYSHOT_UNAME:-$(uname -m)}
+  if [[ $task_arch != x86_64 ]]; then
+    task_release_reason="no prebuilt binary for $task_arch"
+    return 0
+  fi
+  local task_archive="tidyshot-$task_release_version-x86_64.tar.gz"
+  task_release_tmp=$(mktemp -d)
+  local task_checksums="$task_release_tmp/checksums.txt"
+  local task_tarball="$task_release_tmp/$task_archive"
+  if ! task_release_source checksums.txt "$task_checksums"; then
+    task_release_reason="release checksums are unavailable"
+    return 0
+  fi
+  if ! task_release_source "$task_archive" "$task_tarball"; then
+    task_release_reason="release tarball $task_archive is unavailable"
+    return 0
+  fi
+  local task_expected
+  task_expected=$(awk -v name="$task_archive" '$2 == name || $2 == "*" name { print $1; exit }' "$task_checksums")
+  if [[ ! $task_expected =~ ^[0-9a-fA-F]{64}$ ]]; then
+    task_release_reason="release checksums do not name $task_archive"
+    return 0
+  fi
+  local task_actual
+  task_actual=$(sha256sum -- "$task_tarball" | awk '{ print $1 }')
+  if [[ ${task_expected,,} != "$task_actual" ]]; then
+    task_release_reason="release checksum mismatch for $task_archive"
+    return 0
+  fi
+  task_release_stage="$task_release_tmp/unpacked"
+  mkdir -p -- "$task_release_stage"
+  if ! tar -xzf "$task_tarball" -C "$task_release_stage" --no-same-owner --no-same-permissions; then
+    task_release_reason="release tarball $task_archive could not be unpacked"
+    return 0
+  fi
+  local task_released_commit=""
+  [[ -f $task_release_stage/.tidyshot-source ]] &&
+    task_released_commit=$(head -n1 "$task_release_stage/.tidyshot-source")
+  if [[ -z $task_released_commit ]]; then
+    task_release_reason="release tarball $task_archive has no source commit"
+    return 0
+  fi
+  if [[ $task_released_commit != "$task_commit" ]]; then
+    task_release_reason="release $task_release_version was built from ${task_released_commit:0:12}, not the checkout HEAD ${task_commit:0:12}"
+    return 0
+  fi
+  if [[ ! -x $task_release_stage/build/tidyshot ]]; then
+    task_release_reason="release tarball $task_archive has no executable"
+    return 0
+  fi
+  task_release_archive="$task_archive"
+}
+
+task_prepare_release
+if [[ -n $task_release_reason ]]; then
+  printf 'TidyShot setup: not using the prebuilt release: %s; building from source.\n' "$task_release_reason" >&2
+fi
+
 mkdir -p -- "$tidyshot_runtime"
 # Remove the stamp first so an interrupted setup reads as unfinished.
 rm -f -- "$tidyshot_stamp"
 tidyshot_mirror "$task_source" "$tidyshot_runtime"
-(cd -- "$tidyshot_runtime" && bash install.sh)
+if [[ -n $task_release_stage ]]; then
+  mkdir -p -- "$tidyshot_runtime/build"
+  cp -a -- "$task_release_stage/build/." "$tidyshot_runtime/build/"
+  printf 'TidyShot setup: installing the prebuilt %s release.\n' "$task_release_archive"
+  (cd -- "$tidyshot_runtime" && TIDYSHOT_PREBUILT=1 bash install.sh)
+else
+  (cd -- "$tidyshot_runtime" && bash install.sh)
+fi
 printf '%s\n' "$task_commit" >"$tidyshot_stamp"
 
 # The shell hot-reloads a changed plugin but can keep serving the previous

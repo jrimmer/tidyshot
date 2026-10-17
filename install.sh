@@ -43,7 +43,28 @@ cp -r -- "$task_root/manifest.json" "$task_root/plugin" "$task_plugin_check/"
 omarchy plugin validate "$task_plugin_check" || { rm -rf -- "$task_plugin_check"; exit 1; }
 rm -rf -- "$task_plugin_check"
 
-bash "$task_root/bin/build"
+# scripts/setup.sh stages a release binary in build/. It already carries the
+# executable, so skip the cargo build but never the local scroll helper: that
+# helper targets the running compositor's Wayland protocol.
+if [[ -n ${TIDYSHOT_PREBUILT:-} ]]; then
+  if [[ ! -x $task_root/build/tidyshot ]]; then
+    printf 'The prebuilt TidyShot binary is missing from %s/build.\n' "$task_root" >&2
+    exit 1
+  fi
+  bash "$task_root/bin/native"
+  if [[ ! -x $task_root/native/scroll-helper ]]; then
+    printf 'The prebuilt TidyShot install has no auto-scroll helper; install wayland-scanner and wayland-client headers.\n' >&2
+    exit 1
+  fi
+  mkdir -p -- "$task_root/build/native"
+  cp -- "$task_root/native/scroll-helper" "$task_root/build/native/scroll-helper"
+  if [[ -x $task_root/build/generate-icon && -n ${HOME:-} ]]; then
+    "$task_root/build/generate-icon" "$task_root/build/tidyshot.svg" >/dev/null
+  fi
+  printf 'installed prebuilt build/tidyshot with a locally built auto-scroll helper\n' >&2
+else
+  bash "$task_root/bin/build"
+fi
 
 TIDYSHOT_SOURCE="$task_root" python3 "$task_root/scripts/install_user.py"
 hyprctl reload

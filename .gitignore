@@ -15,6 +15,9 @@ Cargo.lock.bak
 /.venv/
 /backups/
 
+# Release artifacts, built by bin/make-release-artifacts.
+/dist/
+
 # makepkg workspace and package artifacts, built by bin/install.
 /pkgbuild/pkg/
 /pkgbuild/src/
