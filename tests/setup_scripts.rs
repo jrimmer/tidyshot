@@ -285,6 +285,16 @@ impl Fixture {
     }
 }
 
+/// Absolute path of a command, so a test can keep it reachable after
+/// replacing PATH.
+fn command_path(name: &str) -> String {
+    let output = Command::new("sh")
+        .args(["-c", &format!("command -v {name}")])
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
 /// The version in the repository's own `manifest.json`, read the way the
 /// release tests need it: straight from the bytes `scripts/setup.sh` parses.
 fn manifest_version() -> String {
@@ -1120,4 +1130,110 @@ fn another_architecture_falls_back_to_the_source_build() {
     );
     assert!(cargo_called(&fixture));
     assert!(fixture.prebuilt_log().is_empty());
+}
+
+/// A PATH with the stubs `install.sh` needs and the system utilities it calls,
+/// but no Rust or Qt toolchain, so a test proves the prebuilt branch never
+/// reaches for one.
+fn toolchain_free_path(fixture: &Fixture) -> PathBuf {
+    let dir = fixture.base.join("release-bin");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    // A root test process spawns through setpriv, so it must stay reachable
+    // inside the stripped PATH.
+    for name in [
+        "bash", "cat", "chmod", "cp", "dirname", "find", "grep", "head", "id", "mkdir", "mktemp",
+        "pgrep", "python3", "rm", "sed", "setpriv", "sleep", "sort", "tar", "tr", "uname", "wc",
+    ] {
+        let target = command_path(name);
+        symlink(&target, dir.join(name)).unwrap();
+    }
+    for name in ["omarchy", "hyprctl", "setsid"] {
+        symlink(fixture.bin.join(name), dir.join(name)).unwrap();
+    }
+    for name in [
+        "omarchy-shell",
+        "grim",
+        "slurp",
+        "wl-copy",
+        "ffmpeg",
+        "ffprobe",
+        "tesseract",
+        "zbarimg",
+        "gpu-screen-recorder",
+        "update-desktop-database",
+        "update-mime-database",
+        "xdg-mime",
+        "notify-send",
+        "gcc",
+        "pkg-config",
+        "wayland-scanner",
+    ] {
+        symlink("/bin/true", dir.join(name)).unwrap();
+    }
+    let mut perms = fs::metadata(&dir).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&dir, perms).unwrap();
+    fixture.own(&dir);
+    dir
+}
+
+/// The real `install.sh`, not the fixture stub: a staged release must install
+/// with the auto-scroll helper built locally and no cargo or qmake on PATH.
+#[test]
+fn the_real_install_script_takes_a_prebuilt_release_without_the_toolchain() {
+    let fixture = Fixture::new("prebuilt-install");
+    let repo = repo_root();
+    fs::copy(repo.join("install.sh"), fixture.source.join("install.sh")).unwrap();
+    fs::create_dir_all(fixture.source.join("bin")).unwrap();
+    fs::write(
+        fixture.source.join("bin/native"),
+        "#!/bin/sh\nmkdir -p native\nprintf helper >native/scroll-helper\nchmod +x native/scroll-helper\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.source.join("scripts/install_user.py"),
+        "open(__import__('os').environ['SETUP_LOG'] + '.user', 'a').write('installed\\n')\n",
+    )
+    .unwrap();
+    fs::create_dir_all(fixture.source.join("build")).unwrap();
+    fs::write(
+        fixture.source.join("build/tidyshot"),
+        "#!/bin/sh\necho prebuilt\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    for path in [
+        fixture.source.join("bin/native"),
+        fixture.source.join("build/tidyshot"),
+    ] {
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+    }
+    fixture.own(&fixture.source);
+
+    let path = toolchain_free_path(&fixture);
+    let bash = command_path("bash");
+    let mut command = Command::new(&bash);
+    command.arg(fixture.source.join("install.sh"));
+    command.stdin(Stdio::null());
+    let result = fixture.execute(
+        command,
+        &[("PATH", path.to_str().unwrap()), ("TIDYSHOT_PREBUILT", "1")],
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(stderr.contains("prebuilt"), "{stderr}");
+    assert!(fixture.source.join("native/scroll-helper").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.source.join("build/native/scroll-helper")).unwrap(),
+        "helper"
+    );
+    assert!(!cargo_called(&fixture), "the source build must not run");
+    assert_eq!(
+        fs::read_to_string(fixture.base.join("commands.jsonl.user")).unwrap(),
+        "installed\n"
+    );
 }
