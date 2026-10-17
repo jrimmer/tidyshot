@@ -55,4 +55,4 @@ Omarchy.
   never modified.
 - The single-instance socket is user-only.
 
-[0.1.0]: https://git.lacy.casa/jrimmer/tidyshot/releases/tag/v0.1.0
+[0.1.0]: https://github.com/jrimmer/tidyshot/releases/tag/v0.1.0

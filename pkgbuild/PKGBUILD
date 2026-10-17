@@ -4,7 +4,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Native screenshots, scrolling capture, annotation, recording and capture history"
 arch=('x86_64' 'aarch64')
-url="https://git.lacy.casa/jrimmer/tidyshot"
+url="https://github.com/jrimmer/tidyshot"
 license=('MIT')
 depends=('qt6-declarative' 'qt6-quickcontrols2' 'ffmpeg' 'grim' 'slurp' 'wl-clipboard'
          'tesseract' 'zbar' 'gpu-screen-recorder' 'libpulse' 'desktop-file-utils'

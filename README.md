@@ -53,7 +53,7 @@ omarchy pkg add git rust qt6-base qt6-declarative python gcc pkgconf \
   libnotify
 
 mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}"
-git clone ssh://git@git.lacy.casa/jrimmer/tidyshot.git "${XDG_DATA_HOME:-$HOME/.local/share}/tidyshot-app"
+git clone https://github.com/jrimmer/tidyshot "${XDG_DATA_HOME:-$HOME/.local/share}/tidyshot-app"
 cd "${XDG_DATA_HOME:-$HOME/.local/share}/tidyshot-app"
 bash install.sh
 tidyshot menu
@@ -109,10 +109,16 @@ and settings are kept.
 
 The repository root is a complete Omarchy plugin: `manifest.json` declares it
 as `io.github.joshdaws.tidyshot`, with `plugin/BarWidget.qml` as the bar widget
-entry point. Installation mirrors OmniShot's plugin flow:
+entry point. Install it with:
 
-- `omarchy plugin add <repo> --enable` clones the checkout into
-  `$XDG_CONFIG_HOME/omarchy/plugins/io.github.joshdaws.tidyshot`.
+```sh
+omarchy plugin add https://github.com/jrimmer/tidyshot --enable
+```
+
+Each install step mirrors OmniShot's plugin flow:
+
+- `omarchy plugin add https://github.com/jrimmer/tidyshot --enable` clones the
+  checkout into `$XDG_CONFIG_HOME/omarchy/plugins/io.github.joshdaws.tidyshot`.
 - The widget offers **Finish setup**, which runs `scripts/setup.sh`: it installs
   packages through `omarchy pkg add`, mirrors the checkout into
   `$XDG_DATA_HOME/tidyshot-app`, builds the Rust binary there, and stamps
