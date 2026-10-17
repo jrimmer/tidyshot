@@ -131,8 +131,11 @@ Each install step mirrors OmniShot's plugin flow:
   checkout into `$XDG_CONFIG_HOME/omarchy/plugins/io.github.joshdaws.tidyshot`.
 - The widget offers **Finish setup**, which runs `scripts/setup.sh`: it installs
   packages through `omarchy pkg add`, mirrors the checkout into
-  `$XDG_DATA_HOME/tidyshot-app`, builds the Rust binary there, and stamps
-  `.tidyshot-source` with the plugin commit.
+  `$XDG_DATA_HOME/tidyshot-app`, installs the Rust binary there, and stamps
+  `.tidyshot-source` with the plugin commit. It first tries the prebuilt
+  release for this commit and falls back to building from source when the
+  release is missing, its sha256 does not match, the host is not x86_64, or the
+  checkout is not the released commit.
 - A later `omarchy plugin update` moves HEAD; the widget offers **Apply update**
   when the checkout's commit no longer matches the stamp. Setup mirrors the
   checkout again, keeping build outputs (`target/`, `build/`, `native/`,
@@ -145,6 +148,22 @@ Each install step mirrors OmniShot's plugin flow:
 The installer writes configuration backups under `backups/<timestamp>/` and
 refuses to touch an app folder it did not create. The repository tracks no
 symlinks, as `omarchy plugin validate` requires.
+
+### Releases
+
+A tag publishes a prebuilt binary so setup does not need the Rust and Qt
+build toolchain. `bash bin/make-release-artifacts` builds the app, packs
+`build/tidyshot`, the icon command, the generated icon and the source commit
+stamp into `dist/tidyshot-<version>-x86_64.tar.gz`, and writes
+`dist/checksums.txt`. The version comes from `manifest.json`. Upload both files
+to the `v<version>` GitHub release named in `manifest.json`; publishing is
+deliberately not part of the script. The auto-scroll helper is never shipped:
+install.sh builds it against the running compositor's Wayland protocol.
+
+Setup only trusts a download whose checksum matches `checksums.txt`, whose
+source stamp equals the checkout HEAD, and whose archive holds no absolute or
+parent-climbing paths. Anything else prints one line naming the reason and
+builds from source as before.
 
 ## Bar popup
 
