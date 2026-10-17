@@ -238,12 +238,16 @@ struct Server {
 impl Server {
     /// Start `tidyshot` with no arguments; it binds the socket instead of
     /// exiting as a client.
+    ///
+    /// Stdio is null, not piped: an offscreen server that wrote more than a
+    /// pipe buffer to an undrained pipe would block before it served, and a
+    /// bounded poll cannot rescue a process stuck on write.
     fn launch(home: &Home) -> Self {
         let child = home
             .command()
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         Self { child }
