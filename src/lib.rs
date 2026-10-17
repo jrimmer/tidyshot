@@ -87,6 +87,10 @@ pub fn run_with(argv: &[String]) {
         std::process::exit(2);
     }
     let mut app = cxx_qt_lib::QGuiApplication::new();
+    // The icon follows the live theme; refresh the user copy before QML loads
+    // so the desktop entry matches the running shell. A failed write is
+    // reported but never blocks the GUI.
+    refresh_startup_icon();
     // Bind the socket after the application exists so a forwarded `quit`
     // reaches a live event loop.
     start_instance();
@@ -137,6 +141,21 @@ fn start_instance() {
             true
         });
     });
+}
+
+/// Rewrite the installed icon when the live Omarchy accent differs.
+///
+/// The theme is read through the same parser the UI scale uses, so a machine
+/// with no theme writes nothing.
+fn refresh_startup_icon() {
+    let accent = ui_scale::accent_from(&ui_scale::accent_files());
+    if let Err(error) = icon::refresh_installed(
+        &icon::system_path(),
+        &icon::default_path(),
+        accent.as_deref(),
+    ) {
+        eprintln!("tidyshot: could not refresh the app icon: {error}");
+    }
 }
 
 /// Record a startup OCR request before QML loads.

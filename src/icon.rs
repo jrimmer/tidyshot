@@ -28,7 +28,8 @@ pub fn render(accent: &str) -> String {
     format!(
         concat!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{size}\" height=\"{size}\" ",
-            "viewBox=\"0 0 {size} {size}\" role=\"img\" aria-label=\"TidyShot\">\n",
+            "viewBox=\"0 0 {size} {size}\" role=\"img\" aria-label=\"TidyShot\" ",
+            "data-accent=\"{tile}\">\n",
             "  <rect width=\"{size}\" height=\"{size}\" rx=\"{radius}\" fill=\"{tile}\"/>\n",
             "  <g fill=\"none\" stroke=\"{mark}\" stroke-width=\"3.5\" ",
             "stroke-linejoin=\"round\" stroke-linecap=\"round\">\n",
@@ -63,6 +64,58 @@ pub fn default_path() -> std::path::PathBuf {
             home.join(".local/share")
         });
     data.join("icons/hicolor/scalable/apps/tidyshot.svg")
+}
+
+/// The system-wide installed icon, owned by the native package.
+///
+/// Startup reads this copy first because a package install is the copy the
+/// desktop entry lookup resolves when the user has none of their own.
+#[must_use]
+pub fn system_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/usr/share/icons/hicolor/scalable/apps/tidyshot.svg")
+}
+
+/// The raw `data-accent` attribute of an SVG, if it carries one.
+///
+/// The value is returned as written, so a caller can tell a corrupt value
+/// from an absent attribute; a file without the attribute has no accent to
+/// compare and must be left alone.
+#[must_use]
+pub fn data_accent(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let (_, rest) = text.split_once("data-accent=\"")?;
+    let (value, _) = rest.split_once('"')?;
+    Some(value.to_owned())
+}
+
+/// Rewrite `user` when the installed icon was generated for another accent.
+///
+/// `system` is preferred for reading and may live under `/usr`; only `user`
+/// is ever written. A `None` accent means no theme was read, so nothing is
+/// written. An icon without a `data-accent` marker is not ours to replace and
+/// round-trips unchanged. Returns whether the user icon was written.
+pub fn refresh_installed(system: &Path, user: &Path, accent: Option<&str>) -> io::Result<bool> {
+    let Some(accent) = accent else {
+        return Ok(false);
+    };
+    let installed = if system.is_file() { system } else { user };
+    let Some(existing) = data_accent(installed) else {
+        return Ok(false);
+    };
+    if normalize(&existing) == normalize(accent) {
+        return Ok(false);
+    }
+    if let Some(parent) = user.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write(user, accent)?;
+    Ok(true)
+}
+
+/// Normalize a color string to the `#RRGGBB` form [`render`] writes.
+fn normalize(value: &str) -> Option<String> {
+    crate::color::Rgba::from_hex(value)
+        .map(|color| format!("#{:02X}{:02X}{:02X}", color.red, color.green, color.blue))
 }
 
 #[cfg(test)]
@@ -132,5 +185,65 @@ mod tests {
             Rgba::from_hex(DEFAULT_ACCENT).unwrap().rgb(),
             [0xFF, 0xD6, 0x0A]
         );
+    }
+
+    #[test]
+    fn a_different_accent_rewrites_the_user_icon() {
+        let dir = scratch("refresh-differs");
+        let system = dir.join("system.svg");
+        let user = dir.join("user.svg");
+        std::fs::write(&system, render("#89b4fa")).unwrap();
+        std::fs::write(&user, render("#89b4fa")).unwrap();
+        assert!(refresh_installed(&system, &user, Some("#FFD60A")).unwrap());
+        // Only the user copy changes; the system copy is never touched.
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), render("#FFD60A"));
+        assert_eq!(std::fs::read_to_string(&system).unwrap(), render("#89b4fa"));
+    }
+
+    #[test]
+    fn a_matching_accent_writes_nothing() {
+        let dir = scratch("refresh-same");
+        let system = dir.join("system.svg");
+        let user = dir.join("user.svg");
+        std::fs::write(&system, render("#89B4FA")).unwrap();
+        std::fs::write(&user, render("#000000")).unwrap();
+        assert!(!refresh_installed(&system, &user, Some("#89b4fa")).unwrap());
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), render("#000000"));
+    }
+
+    #[test]
+    fn no_theme_writes_nothing() {
+        let dir = scratch("refresh-notheme");
+        let system = dir.join("system.svg");
+        let user = dir.join("user.svg");
+        std::fs::write(&system, render("#89b4fa")).unwrap();
+        std::fs::write(&user, render("#000000")).unwrap();
+        assert!(!refresh_installed(&system, &user, None).unwrap());
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), render("#000000"));
+    }
+
+    #[test]
+    fn a_corrupt_accent_is_treated_as_different() {
+        let dir = scratch("refresh-corrupt");
+        let system = dir.join("system.svg");
+        let user = dir.join("user.svg");
+        let corrupt =
+            render("#89b4fa").replace("data-accent=\"#89B4FA\"", "data-accent=\"nonsense\"");
+        std::fs::write(&system, &corrupt).unwrap();
+        std::fs::write(&user, &corrupt).unwrap();
+        assert!(refresh_installed(&system, &user, Some("#FFD60A")).unwrap());
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), render("#FFD60A"));
+    }
+
+    #[test]
+    fn content_without_an_accent_round_trips() {
+        let dir = scratch("refresh-plain");
+        let system = dir.join("system.svg");
+        let user = dir.join("user.svg");
+        let plain = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>\n";
+        std::fs::write(&system, plain).unwrap();
+        std::fs::write(&user, plain).unwrap();
+        assert!(!refresh_installed(&system, &user, Some("#FFD60A")).unwrap());
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), plain);
     }
 }
