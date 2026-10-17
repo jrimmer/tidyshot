@@ -285,14 +285,33 @@ impl Fixture {
     }
 }
 
-const RELEASE_VERSION: &str = "0.1.0";
-const RELEASE_ARCHIVE: &str = "tidyshot-0.1.0-x86_64.tar.gz";
+/// The version in the repository's own `manifest.json`, read the way the
+/// release tests need it: straight from the bytes `scripts/setup.sh` parses.
+fn manifest_version() -> String {
+    let text = fs::read_to_string(repo_root().join("manifest.json")).unwrap();
+    let key = "\"version\"";
+    let start = text.find(key).expect("manifest.json names a version");
+    let rest = &text[start + key.len()..];
+    let open = rest.find('"').expect("the version key has a value");
+    let rest = &rest[open + 1..];
+    let close = rest.find('"').expect("the version value is closed");
+    rest[..close].to_owned()
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn release_archive(version: &str) -> String {
+    format!("tidyshot-{version}-x86_64.tar.gz")
+}
 
 #[derive(Clone, Copy)]
 enum ReleaseFlaw {
     None,
     Checksum,
     OmitTarball,
+    UnsafePath,
 }
 
 /// A fake release directory in the shape `bin/make-release-artifacts` writes:
@@ -304,6 +323,8 @@ struct Release {
 
 impl Release {
     fn write(fixture: &Fixture, commit: &str, flaw: ReleaseFlaw) -> Self {
+        let version = manifest_version();
+        let archive_name = release_archive(&version);
         let dir = fixture.base.join("release");
         let stage = fixture.base.join("release-stage");
         let _ = fs::remove_dir_all(&dir);
@@ -318,10 +339,16 @@ impl Release {
         fs::write(stage.join(".tidyshot-source"), format!("{commit}\n")).unwrap();
         fs::create_dir_all(&dir).unwrap();
         if !matches!(flaw, ReleaseFlaw::OmitTarball) {
-            let archive = dir.join(RELEASE_ARCHIVE);
-            let status = Command::new("tar")
+            let archive = dir.join(&archive_name);
+            let mut command = Command::new("tar");
+            command
                 .args(["--owner=0", "--group=0", "--numeric-owner", "-czf"])
-                .arg(&archive)
+                .arg(&archive);
+            if matches!(flaw, ReleaseFlaw::UnsafePath) {
+                // Rewrite one member to climb out of the extraction directory.
+                command.arg(r"--transform=s|^\./build/tidyshot$|../escaped|");
+            }
+            let status = command
                 .args(["-C", &stage.display().to_string(), "."])
                 .status()
                 .unwrap();
@@ -333,7 +360,7 @@ impl Release {
             "1".repeat(64)
         } else {
             let output = Command::new("sha256sum")
-                .arg(dir.join(RELEASE_ARCHIVE))
+                .arg(dir.join(&archive_name))
                 .output()
                 .unwrap();
             assert!(output.status.success());
@@ -346,7 +373,7 @@ impl Release {
         };
         fs::write(
             dir.join("checksums.txt"),
-            format!("{digest}  {RELEASE_ARCHIVE}\n"),
+            format!("{digest}  {archive_name}\n"),
         )
         .unwrap();
         fixture.own(&dir);
@@ -958,10 +985,13 @@ fn head_match_installs_the_prebuilt_release_without_cargo() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(
-        String::from_utf8_lossy(&result.stderr).contains("prebuilt"),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
+        stdout.contains(&format!(
+            "installing the prebuilt {}",
+            release_archive(&manifest_version())
+        )),
+        "{stdout}"
     );
     assert_eq!(
         fs::read_to_string(fixture.runtime.join("build/tidyshot")).unwrap(),
@@ -1020,10 +1050,57 @@ fn a_missing_tarball_falls_back_to_the_source_build() {
         String::from_utf8_lossy(&result.stderr)
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains(RELEASE_ARCHIVE), "{stderr}");
+    assert!(
+        stderr.contains(&release_archive(&manifest_version())),
+        "{stderr}"
+    );
     assert!(stderr.contains("unavailable"), "{stderr}");
     assert!(cargo_called(&fixture));
     assert!(fixture.prebuilt_log().is_empty());
+}
+
+/// The plugin manifest is the only source of the release version, so setup
+/// must read it from the real bytes. A fixture release named for the version
+/// in the repository's own manifest only installs when that read works.
+#[test]
+fn version_comes_from_the_real_manifest_bytes() {
+    let fixture = Fixture::new("release-version");
+    let release = fixture.release(&fixture.head);
+    let result = run_release(&fixture, &release, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let version = manifest_version();
+    assert!(!version.is_empty());
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        stdout.contains(&release_archive(&version)),
+        "setup must name the manifest version's archive: {stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.runtime.join("build/tidyshot")).unwrap(),
+        "#!/bin/sh\necho prebuilt\n"
+    );
+    assert!(!cargo_called(&fixture), "the source build must not run");
+}
+
+#[test]
+fn a_tarball_member_commanding_a_parent_path_falls_back() {
+    let fixture = Fixture::new("release-traversal");
+    let release = fixture.release_with(&fixture.head, ReleaseFlaw::UnsafePath);
+    let result = run_release(&fixture, &release, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
+    assert!(!fixture.base.join("escaped").exists());
 }
 
 #[test]

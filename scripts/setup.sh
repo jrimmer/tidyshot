@@ -66,7 +66,7 @@ task_release_archive=""
 task_release_version=""
 task_release_tmp=""
 task_release_cleanup() {
-  [[ -n $task_release_tmp ]] && rm -rf -- "$task_release_tmp"
+  [[ -z $task_release_tmp ]] || rm -rf -- "$task_release_tmp"
 }
 trap task_release_cleanup EXIT
 
@@ -84,7 +84,7 @@ task_release_source() {
 }
 
 task_prepare_release() {
-  task_release_version=$(sed -n 's/^[[:space:]]*"version": "\\([^"\]*\\)".*/\1/p' "$task_source/manifest.json" | head -n1)
+  task_release_version=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)".*/\1/p' "$task_source/manifest.json" | head -n1)
   [[ -n $task_release_version ]] || {
     task_release_reason="the plugin manifest has no version"
     return 0
@@ -118,15 +118,29 @@ task_prepare_release() {
     task_release_reason="release checksum mismatch for $task_archive"
     return 0
   fi
-  task_release_stage="$task_release_tmp/unpacked"
-  mkdir -p -- "$task_release_stage"
-  if ! tar -xzf "$task_tarball" -C "$task_release_stage" --no-same-owner --no-same-permissions; then
+  # The checksum only proves the archive arrived intact, not that it is safe to
+  # unpack: reject absolute or parent-climbing members (and symlink targets)
+  # before anything is written.
+  local task_member task_unsafe=0
+  while IFS= read -r task_member; do
+    case $task_member in
+      /* | .. | ../* | */../* | */.. ) task_unsafe=1 ;;
+    esac
+    [[ $task_unsafe == 1 ]] && break
+  done < <(tar -tzf "$task_tarball")
+  if (( task_unsafe )); then
+    task_release_reason="release tarball $task_archive has an unsafe path"
+    return 0
+  fi
+  local task_stage="$task_release_tmp/unpacked"
+  mkdir -p -- "$task_stage"
+  if ! tar -xzf "$task_tarball" -C "$task_stage" --no-same-owner --no-same-permissions; then
     task_release_reason="release tarball $task_archive could not be unpacked"
     return 0
   fi
   local task_released_commit=""
-  [[ -f $task_release_stage/.tidyshot-source ]] &&
-    task_released_commit=$(head -n1 "$task_release_stage/.tidyshot-source")
+  [[ -f $task_stage/.tidyshot-source ]] &&
+    task_released_commit=$(head -n1 "$task_stage/.tidyshot-source")
   if [[ -z $task_released_commit ]]; then
     task_release_reason="release tarball $task_archive has no source commit"
     return 0
@@ -135,10 +149,11 @@ task_prepare_release() {
     task_release_reason="release $task_release_version was built from ${task_released_commit:0:12}, not the checkout HEAD ${task_commit:0:12}"
     return 0
   fi
-  if [[ ! -x $task_release_stage/build/tidyshot ]]; then
+  if [[ ! -x $task_stage/build/tidyshot ]]; then
     task_release_reason="release tarball $task_archive has no executable"
     return 0
   fi
+  task_release_stage="$task_stage"
   task_release_archive="$task_archive"
 }
 
