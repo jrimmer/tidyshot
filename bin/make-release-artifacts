@@ -5,10 +5,10 @@
 # part of this script; publishing stays a separate, explicit step.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-task_root=$PWD
+source scripts/manifest.sh
 mkdir -p dist
 
-task_version=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)".*/\1/p' manifest.json | head -n1)
+task_version=$(tidyshot_manifest_version manifest.json)
 [[ -n $task_version ]] || { echo "manifest.json has no version" >&2; exit 1; }
 task_commit=$(git rev-parse HEAD) || { echo "could not read the source commit" >&2; exit 1; }
 
@@ -17,9 +17,12 @@ bin/build
 task_stage=$(mktemp -d)
 trap 'rm -rf "$task_stage"' EXIT
 mkdir -p "$task_stage/build"
-cp -- build/tidyshot "$task_stage/build/tidyshot"
-[[ -x build/generate-icon ]] && cp -- build/generate-icon "$task_stage/build/generate-icon"
-[[ -f build/tidyshot.svg ]] && cp -- build/tidyshot.svg "$task_stage/build/tidyshot.svg"
+# A release is exactly these members: setup.sh rejects anything else, so a
+# missing build output fails here rather than shipping an incomplete archive.
+for task_file in build/tidyshot build/generate-icon build/tidyshot.svg; do
+  [[ -e $task_file ]] || { echo "bin/build did not produce $task_file" >&2; exit 1; }
+  cp -- "$task_file" "$task_stage/$task_file"
+done
 printf '%s\n' "$task_commit" >"$task_stage/.tidyshot-source"
 
 task_archive="dist/tidyshot-$task_version-x86_64.tar.gz"

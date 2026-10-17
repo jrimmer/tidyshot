@@ -68,6 +68,10 @@ if [[ -n ${TIDYSHOT_PREBUILT:-} ]]; then
   fi
   mkdir -p -- "$task_root/build/native"
   cp -- "$task_root/native/scroll-helper" "$task_root/build/native/scroll-helper"
+  # generate-icon comes from the same release as build/tidyshot: scripts/setup.sh
+  # only stages a tarball whose sha256 matches checksums.txt and whose members
+  # pass its path, link and special-file checks, so running it here carries the
+  # same provenance as the binary.
   if [[ -x $task_root/build/generate-icon && -n ${HOME:-} ]]; then
     "$task_root/build/generate-icon" "$task_root/build/tidyshot.svg" >/dev/null
   fi

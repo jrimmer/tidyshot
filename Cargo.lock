@@ -930,6 +930,7 @@ dependencies = [
  "getrandom",
  "idna",
  "libc",
+ "serde_json",
  "url",
 ]
 

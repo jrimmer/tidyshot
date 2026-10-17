@@ -42,6 +42,14 @@ if name == 'pgrep':
     sys.exit(0 if os.environ.get('APP_RUNNING') else 1)
 if name == 'omarchy' and sys.argv[1:3] == ['plugin', 'remove']:
     shutil.rmtree(pathlib.Path(os.environ['XDG_CONFIG_HOME']) / 'omarchy/plugins' / sys.argv[3])
+if name == 'curl':
+    # Serve the path below TIDYSHOT_RELEASE_URL from a local directory, so a
+    # test exercises the URL setup builds without any network access.
+    url = sys.argv[-1]
+    base = os.environ['TIDYSHOT_RELEASE_URL'].rstrip('/')
+    assert url.startswith(base + '/'), url
+    output = sys.argv[sys.argv.index('--output') + 1]
+    shutil.copy(os.path.join(base, url[len(base) + 1:]), output)
 "#;
 
 struct Fixture {
@@ -90,6 +98,7 @@ impl Fixture {
             "setup.sh",
             "uninstall.sh",
             "runtime.sh",
+            "manifest.sh",
             "uninstall_user.py",
         ] {
             fs::copy(
@@ -118,7 +127,7 @@ impl Fixture {
         let bin = base.join("bin");
         fs::create_dir_all(&bin).unwrap();
         use std::os::unix::fs::PermissionsExt as _;
-        for stub in ["omarchy", "hyprctl", "pgrep", "setsid", "cargo"] {
+        for stub in ["omarchy", "hyprctl", "pgrep", "setsid", "cargo", "curl"] {
             let path = bin.join(stub);
             fs::write(&path, STUB).unwrap();
             let mut perms = fs::metadata(&path).unwrap().permissions();
@@ -295,17 +304,14 @@ fn command_path(name: &str) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// The version in the repository's own `manifest.json`, read the way the
-/// release tests need it: straight from the bytes `scripts/setup.sh` parses.
+/// The version in the repository's own `manifest.json`, read from the real
+/// bytes that `scripts/setup.sh` parses. Parsing it as JSON here keeps this
+/// side independent of the shell `sed`; the release-name coupling then proves
+/// both readers agree when the fixture archive is named from this value.
 fn manifest_version() -> String {
-    let text = fs::read_to_string(repo_root().join("manifest.json")).unwrap();
-    let key = "\"version\"";
-    let start = text.find(key).expect("manifest.json names a version");
-    let rest = &text[start + key.len()..];
-    let open = rest.find('"').expect("the version key has a value");
-    let rest = &rest[open + 1..];
-    let close = rest.find('"').expect("the version value is closed");
-    rest[..close].to_owned()
+    let bytes = fs::read(repo_root().join("manifest.json")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    manifest["version"].as_str().unwrap().to_owned()
 }
 
 fn repo_root() -> PathBuf {
@@ -323,6 +329,12 @@ enum ReleaseFlaw {
     OmitTarball,
     UnsafePath,
     Symlink,
+    /// Links front-loaded ahead of a blob, so a check that stops reading the
+    /// listing kills tar with SIGPIPE instead of seeing the links.
+    ManySymlinks,
+    Hardlink,
+    Fifo,
+    Setuid,
 }
 
 /// A fake release directory in the shape `bin/make-release-artifacts` writes:
@@ -351,6 +363,31 @@ impl Release {
         if matches!(flaw, ReleaseFlaw::Symlink) {
             std::os::unix::fs::symlink("/etc/passwd", stage.join("build/escape")).unwrap();
         }
+        if matches!(flaw, ReleaseFlaw::Hardlink) {
+            fs::hard_link(stage.join("build/tidyshot"), stage.join("build/escape")).unwrap();
+        }
+        if matches!(flaw, ReleaseFlaw::Fifo) {
+            let status = Command::new("mkfifo")
+                .arg(stage.join("build/fifo"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "could not create the fixture fifo");
+        }
+        if matches!(flaw, ReleaseFlaw::Setuid) {
+            let mut perms = fs::metadata(&binary).unwrap().permissions();
+            perms.set_mode(0o4755);
+            fs::set_permissions(&binary, perms).unwrap();
+        }
+        if matches!(flaw, ReleaseFlaw::ManySymlinks) {
+            // Front-load hundreds of links, then a multi-megabyte file: a
+            // correctness check that reads the whole listing sees the links,
+            // while one that stops early lets tar die of SIGPIPE.
+            for index in 0..300 {
+                std::os::unix::fs::symlink("/etc/passwd", stage.join(format!("link-{index}")))
+                    .unwrap();
+            }
+            fs::write(stage.join("build/blob"), vec![b'x'; 4 * 1024 * 1024]).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         if !matches!(flaw, ReleaseFlaw::OmitTarball) {
             let archive = dir.join(&archive_name);
@@ -368,6 +405,8 @@ impl Release {
                 .unwrap();
             assert!(status.success(), "could not create the fixture tarball");
         }
+        // The tarball is fetched before any comparison runs, so the digest for
+        // a missing tarball is never read; it only has to be shaped like one.
         let digest = if matches!(flaw, ReleaseFlaw::Checksum) {
             "0".repeat(64)
         } else if matches!(flaw, ReleaseFlaw::OmitTarball) {
@@ -1256,4 +1295,99 @@ fn a_tarball_member_that_is_a_symlink_falls_back() {
     assert!(stderr.contains("unsafe path"), "{stderr}");
     assert!(cargo_called(&fixture));
     assert!(fixture.prebuilt_log().is_empty());
+}
+
+/// A link check that stops reading the listing lets tar die of SIGPIPE; under
+/// pipefail that pipeline failure must not read as "safe". The archive holds
+/// hundreds of links ahead of a multi-megabyte blob, which overflows the pipe.
+#[test]
+fn links_ahead_of_a_large_member_are_still_rejected() {
+    let fixture = Fixture::new("release-many-links");
+    let release = fixture.release_with(&fixture.head, ReleaseFlaw::ManySymlinks);
+    let result = run_release(&fixture, &release, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
+    assert!(!fixture.runtime.join("link-0").exists());
+}
+
+#[test]
+fn a_hardlink_member_falls_back() {
+    let fixture = Fixture::new("release-hardlink");
+    let release = fixture.release_with(&fixture.head, ReleaseFlaw::Hardlink);
+    let result = run_release(&fixture, &release, &[]);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
+}
+
+#[test]
+fn a_fifo_member_falls_back() {
+    let fixture = Fixture::new("release-fifo");
+    let release = fixture.release_with(&fixture.head, ReleaseFlaw::Fifo);
+    let result = run_release(&fixture, &release, &[]);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
+    assert!(!fixture.runtime.join("build/fifo").exists());
+}
+
+#[test]
+fn a_setuid_member_falls_back() {
+    let fixture = Fixture::new("release-setuid");
+    let release = fixture.release_with(&fixture.head, ReleaseFlaw::Setuid);
+    let result = run_release(&fixture, &release, &[]);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
+}
+
+/// `TIDYSHOT_RELEASE_URL` overrides the release download root. Until now only
+/// the local-dir override was covered, so the URL setup builds (including the
+/// `v<version>` path segment) was never exercised.
+#[test]
+fn the_release_url_override_supplies_the_download_root() {
+    let fixture = Fixture::new("release-url");
+    let release = fixture.release(&fixture.head);
+    // Arrange the local directory as a release host: v<version>/<file>.
+    let root = fixture.base.join("release-host");
+    let versioned = root.join(format!("v{}", manifest_version()));
+    fs::create_dir_all(&versioned).unwrap();
+    for name in [
+        "checksums.txt".to_owned(),
+        release_archive(&manifest_version()),
+    ] {
+        fs::copy(release.dir.join(&name), versioned.join(name)).unwrap();
+    }
+    fixture.own(&root);
+    let url = root.display().to_string();
+    let result = run_release(
+        &fixture,
+        &release,
+        &[("TIDYSHOT_RELEASE_URL", &url), ("TIDYSHOT_RELEASE_DIR", "")],
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&result.stdout).contains(&format!(
+            "installing the prebuilt {}",
+            release_archive(&manifest_version())
+        )),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert!(!cargo_called(&fixture), "the source build must not run");
+    assert!(!fixture.prebuilt_log().is_empty());
 }

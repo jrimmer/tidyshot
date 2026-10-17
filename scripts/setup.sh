@@ -5,6 +5,7 @@
 set -euo pipefail
 task_source=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$task_source/scripts/runtime.sh"
+source "$task_source/scripts/manifest.sh"
 
 fail() {
   printf 'TidyShot setup: %s\n' "$*" >&2
@@ -84,7 +85,7 @@ task_release_source() {
 }
 
 task_prepare_release() {
-  task_release_version=$(sed -n 's/^[[:space:]]*"version": "\([^"]*\)".*/\1/p' "$task_source/manifest.json" | head -n1)
+  task_release_version=$(tidyshot_manifest_version "$task_source/manifest.json")
   [[ -n $task_release_version ]] || {
     task_release_reason="the plugin manifest has no version"
     return 0
@@ -119,20 +120,34 @@ task_prepare_release() {
     return 0
   fi
   # The checksum only proves the archive arrived intact, not that it is safe to
-  # unpack: reject absolute or parent-climbing members (and symlink targets)
-  # before anything is written.
-  local task_member task_unsafe=0
-  while IFS= read -r task_member; do
+  # unpack. One verbose listing drives every check, and the loop drains tar to
+  # EOF: a grep that stops at the first match would kill tar with SIGPIPE and
+  # pipefail would then read the failed pipeline as "no unsafe member".
+  local task_line task_mode task_member task_unsafe=0
+  while IFS= read -r task_line; do
+    # mode, owner/group, size, timestamp, then the member name; the name is the
+    # rest of the line so spaces in it stay intact.
+    if [[ ! $task_line =~ ^([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+(.*)$ ]]; then
+      task_unsafe=1
+      break
+    fi
+    task_mode=${BASH_REMATCH[1]}
+    task_member=${BASH_REMATCH[2]}
+    # A release holds plain files and directories only: no links, devices or
+    # fifos, and no setuid, setgid or sticky bits.
+    case $task_mode in
+      -*) ;;
+      d*) ;;
+      *) task_unsafe=1 ;;
+    esac
+    case ${task_mode:3:1}${task_mode:6:1}${task_mode:9:1} in
+      *s* | *S* | *t* | *T* ) task_unsafe=1 ;;
+    esac
     case $task_member in
       /* | .. | ../* | */../* | */.. ) task_unsafe=1 ;;
     esac
-    [[ $task_unsafe == 1 ]] && break
-  done < <(tar -tzf "$task_tarball")
-  # A release holds files only. Links could point anywhere, and an executable
-  # link would run outside the staged tree.
-  if tar -tvzf "$task_tarball" | grep -q '^[lh]'; then
-    task_unsafe=1
-  fi
+    (( task_unsafe )) && break
+  done < <(LC_ALL=C tar --numeric-owner --full-time --quoting-style=escape -tvzf "$task_tarball")
   if (( task_unsafe )); then
     task_release_reason="release tarball $task_archive has an unsafe path"
     return 0

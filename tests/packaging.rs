@@ -85,6 +85,12 @@ fn the_release_artifact_script_packages_the_layout_setup_expects() {
         base.join("bin/make-release-artifacts"),
     )
     .unwrap();
+    fs::create_dir_all(base.join("scripts")).unwrap();
+    fs::copy(
+        repo().join("scripts/manifest.sh"),
+        base.join("scripts/manifest.sh"),
+    )
+    .unwrap();
     fs::write(
         base.join("manifest.json"),
         "{\n  \"version\": \"9.8.7\",\n  \"name\": \"TidyShot\"\n}\n",
@@ -169,16 +175,37 @@ printf helper >build/native/scroll-helper
         .output()
         .unwrap();
     let listing = String::from_utf8(listing.stdout).unwrap();
+    // Compare member names after stripping the leading `./` tar records when
+    // packing `.`, so a change in that convention does not fail the test.
+    let members: Vec<&str> = listing
+        .lines()
+        .map(|line| line.trim_start_matches("./").trim_end_matches('/'))
+        .filter(|member| !member.is_empty())
+        .collect();
     for member in [
         ".tidyshot-source",
-        "./build/tidyshot",
-        "./build/generate-icon",
+        "build/tidyshot",
+        "build/generate-icon",
+        "build/tidyshot.svg",
     ] {
         assert!(
-            listing.contains(member),
-            "archive lacks {member}: {listing}"
+            members.contains(&member),
+            "archive lacks {member}: {members:?}"
         );
     }
+    // A release carries exactly the staged layout; an unexpected member would
+    // have to pass setup.sh's checks, so the contract is exact here.
+    let mut expected = vec![
+        ".tidyshot-source",
+        "build",
+        "build/tidyshot",
+        "build/generate-icon",
+        "build/tidyshot.svg",
+    ];
+    expected.sort_unstable();
+    let mut sorted = members.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, expected, "the release layout changed: {listing}");
     let extracted = base.join("extracted");
     fs::create_dir_all(&extracted).unwrap();
     assert!(
@@ -196,5 +223,6 @@ printf helper >build/native/scroll-helper
         head
     );
     assert!(extracted.join("build/tidyshot").exists());
+    assert!(extracted.join("build/generate-icon").exists());
     let _ = fs::remove_dir_all(&base);
 }
