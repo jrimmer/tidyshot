@@ -69,15 +69,24 @@ pub fn paths() -> (PathBuf, PathBuf) {
     paths_for(&config, &state)
 }
 
-/// The theme file for one config and state root.
+/// The theme directory for one config and state root, in precedence order.
 ///
 /// The state-dir theme wins; the config dir is the documented fallback when
 /// it is absent, so a machine that keeps its theme under the config dir still
 /// follows the Omarchy appearance.
+fn theme_dirs_for(config: &Path, state: &Path) -> [PathBuf; 2] {
+    [
+        state.join("omarchy/current/theme"),
+        config.join("omarchy/current/theme"),
+    ]
+}
+
+/// The theme file for one config and state root.
 fn paths_for(config: &Path, state: &Path) -> (PathBuf, PathBuf) {
-    let mut theme = state.join("omarchy/current/theme/shell.toml");
+    let [state_theme, config_theme] = theme_dirs_for(config, state);
+    let mut theme = state_theme.join("shell.toml");
     if !theme.exists() {
-        theme = config.join("omarchy/current/theme/shell.toml");
+        theme = config_theme.join("shell.toml");
     }
     (theme, config.join("omarchy/shell.toml"))
 }
@@ -396,14 +405,13 @@ pub fn theme_files() -> Vec<PathBuf> {
 /// override file is last so a user edit wins.
 #[must_use]
 pub fn accent_files() -> Vec<PathBuf> {
-    let (theme, override_path) = paths();
-    let mut files = Vec::new();
-    if let Some(dir) = theme.parent() {
-        files.push(dir.join("colors.toml"));
-    }
-    files.push(theme);
-    files.push(override_path);
-    files
+    let config = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home().join(".config"));
+    let state = std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home().join(".local/state"));
+    accent_files_for(&config, &state)
 }
 
 /// The active Omarchy accent as `#RRGGBB`.
@@ -432,6 +440,19 @@ pub fn accent_from(files: &[PathBuf]) -> Option<String> {
         }
     }
     found
+}
+
+/// The accent candidates for one config and state root, for tests.
+#[must_use]
+pub fn accent_files_for(config: &Path, state: &Path) -> Vec<PathBuf> {
+    let (theme, override_path) = paths_for(config, state);
+    let mut files = Vec::new();
+    for dir in theme_dirs_for(config, state) {
+        files.push(dir.join("colors.toml"));
+    }
+    files.push(theme);
+    files.push(override_path);
+    files
 }
 
 /// Normalize the `accent` key from the parsed sections to `#RRGGBB`.
@@ -608,6 +629,25 @@ mod tests {
             None,
             "a missing file is skipped"
         );
+    }
+
+    #[test]
+    fn accent_candidates_span_both_theme_directories() {
+        // The state theme wins over the config fallback, and both
+        // colors.toml files are considered before shell.toml.
+        let config = Path::new("/cfg");
+        let state = Path::new("/state");
+        let files = accent_files_for(config, state);
+        assert_eq!(
+            files[0],
+            Path::new("/state/omarchy/current/theme/colors.toml")
+        );
+        assert_eq!(
+            files[1],
+            Path::new("/cfg/omarchy/current/theme/colors.toml")
+        );
+        assert!(files.iter().any(|f| f.ends_with("shell.toml")));
+        assert!(files.iter().any(|f| f.ends_with("omarchy/shell.toml")));
     }
 
     #[test]
