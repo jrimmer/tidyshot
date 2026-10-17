@@ -1,9 +1,7 @@
 //! `tidyshot doctor`: check that this machine can run TidyShot, and say how to fix what can't.
 // Ported from omnishot/doctor.py
 //!
-//! Checks are read-only. The clean-mirror load test is the one exception, and
-//! it only runs with `--load-test` because it loads a plugin into the running
-//! compositor.
+//! Checks are read-only.
 
 use crate::commands::{CommandRunner, CommandSpec, SystemRunner};
 use crate::json::Value;
@@ -65,17 +63,12 @@ impl CheckResult {
     }
 }
 
-/// Everything install.sh builds into `native/` that the app loads or runs.
-pub const NATIVE_FILES: &[&str] = &[
-    "clean-capture.so",
-    "clean-mirror.so",
-    "drag-status.so",
-    "recording-guard.so",
-    "clipboard-helper",
-    "scroll-helper",
-    "window-helper",
-    "live-selector",
-];
+/// The native helpers TidyShot builds into `native/` and loads or runs.
+///
+/// `build.rs` and `bin/native` build `scroll-helper`; nothing else in this
+/// tree produces a native binary. The OmniShot plugin libraries have no build
+/// here, so they are not checked.
+pub const NATIVE_FILES: &[&str] = &["scroll-helper"];
 
 /// Commands the app runs, with the Omarchy package that provides each.
 pub const RUNTIME_COMMANDS: &[(&str, &str)] = &[
@@ -95,9 +88,6 @@ pub const RUNTIME_COMMANDS: &[(&str, &str)] = &[
 pub const BINDINGS_MARKER: &str = "-- TidyShot managed bindings";
 /// The module the user's Hyprland configuration requires for window rules.
 pub const RULES_REQUIRE: &str = "require(\"hypr.tidyshot\")";
-/// The running compositor's plugin Lua namespace.
-const PLUGIN_NAMESPACE: &str = "omnishot";
-
 /// The Hyprland Lua directory under an Omarchy config directory.
 ///
 /// Omarchy 4 keeps `hyprland.lua` and `bindings.lua` at the top of
@@ -321,12 +311,10 @@ pub enum Check {
     Versions,
     Headers,
     Native,
-    BuildAbi,
     Commands,
     Launcher,
     HyprlandConfig,
     Shell,
-    LoadTest,
 }
 
 impl Check {
@@ -339,12 +327,10 @@ impl Check {
             Check::Versions => "versions",
             Check::Headers => "headers",
             Check::Native => "native",
-            Check::BuildAbi => "build-abi",
             Check::Commands => "commands",
             Check::Launcher => "launcher",
             Check::HyprlandConfig => "hyprland-config",
             Check::Shell => "shell",
-            Check::LoadTest => "load-test",
         }
     }
 
@@ -357,12 +343,10 @@ impl Check {
             Check::Versions => "Version check",
             Check::Headers => "Hyprland header check",
             Check::Native => "Native helper check",
-            Check::BuildAbi => "Build ABI check",
             Check::Commands => "Command check",
             Check::Launcher => "Launcher check",
             Check::HyprlandConfig => "Hyprland configuration check",
             Check::Shell => "Bar widget check",
-            Check::LoadTest => "Load test",
         }
     }
 }
@@ -375,7 +359,6 @@ const CHECKS: &[(Check, CheckFn)] = &[
     (Check::Versions, check_versions),
     (Check::Headers, check_headers),
     (Check::Native, check_native),
-    (Check::BuildAbi, check_build_abi),
     (Check::Commands, check_commands),
     (Check::Launcher, check_launcher),
     (Check::HyprlandConfig, check_hyprland_config),
@@ -383,12 +366,7 @@ const CHECKS: &[(Check, CheckFn)] = &[
 ];
 
 /// These compare against or talk to the running compositor and shell.
-const NEEDS_SESSION: &[Check] = &[
-    Check::Headers,
-    Check::BuildAbi,
-    Check::Shell,
-    Check::LoadTest,
-];
+const NEEDS_SESSION: &[Check] = &[Check::Headers, Check::Shell];
 
 // Ported from omnishot/doctor.py (check_session)
 fn check_session(system: &dyn System) -> CheckResult {
@@ -532,7 +510,6 @@ fn check_headers(system: &dyn System) -> CheckResult {
 // Ported from omnishot/doctor.py (check_native)
 fn check_native(system: &dyn System) -> CheckResult {
     let native = system.native();
-    // `exists()` follows clean-mirror.so's symlink into .clean-mirrors/.
     let missing: Vec<&str> = NATIVE_FILES
         .iter()
         .copied()
@@ -550,65 +527,6 @@ fn check_native(system: &dyn System) -> CheckResult {
         "native",
         Status::Ok,
         format!("Native helpers built in {}", native.display()),
-        "",
-    )
-}
-
-// Ported from omnishot/doctor.py (check_build_abi)
-fn check_build_abi(system: &dyn System) -> CheckResult {
-    let native = system.native();
-    let stamp = native.join("clean-mirror.abi");
-    if !native.join("clean-mirror.so").exists() {
-        return CheckResult::new(
-            "build-abi",
-            Status::Warn,
-            "clean-mirror.so is not built, so its ABI was not checked",
-            "",
-        );
-    }
-    if !stamp.is_file() {
-        return CheckResult::new(
-            "build-abi",
-            Status::Warn,
-            "No record of which Hyprland clean-mirror.so was built for",
-            format!("Rebuild TidyShot to record it: {}", installer(system)),
-        );
-    }
-    let Some(info) = system.hyprland() else {
-        return CheckResult::new(
-            "build-abi",
-            Status::Warn,
-            "The running compositor's ABI is unknown",
-            "",
-        );
-    };
-    if info.abi_hash.is_empty() {
-        return CheckResult::new(
-            "build-abi",
-            Status::Warn,
-            "The running compositor's ABI is unknown",
-            "",
-        );
-    }
-    let recorded = std::fs::read_to_string(&stamp)
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    if recorded != info.abi_hash {
-        return CheckResult::new(
-            "build-abi",
-            Status::Fail,
-            "clean-mirror.so was built for a different Hyprland than the one running",
-            format!(
-                "If you updated Hyprland, restart your desktop session first. Then rebuild TidyShot: {}",
-                installer(system)
-            ),
-        );
-    }
-    CheckResult::new(
-        "build-abi",
-        Status::Ok,
-        "clean-mirror.so was built for the running Hyprland",
         "",
     )
 }
@@ -735,64 +653,10 @@ fn check_shell(system: &dyn System) -> CheckResult {
     CheckResult::new("shell", Status::Ok, "The TidyShot bar widget responds", "")
 }
 
-/// Load clean-mirror.so, confirm it registered, and unload it again.
-// Ported from omnishot/doctor.py (load_test)
-pub fn load_test(system: &dyn System) -> CheckResult {
-    let native = system.native();
-    let path = native.join("clean-mirror.so");
-    let path = std::fs::canonicalize(&path).unwrap_or(path);
-    if !path.is_file() {
-        return CheckResult::new(
-            "load-test",
-            Status::Fail,
-            "clean-mirror.so is not built",
-            format!("Rebuild TidyShot: {}", installer(system)),
-        );
-    }
-    if system.hyprland().is_none() {
-        return CheckResult::new(
-            "load-test",
-            Status::Fail,
-            "hyprctl cannot reach the running compositor",
-            "",
-        );
-    }
-    let probe =
-        format!("return tostring(hl.plugin ~= nil and hl.plugin.{PLUGIN_NAMESPACE} ~= nil)");
-    if system.run(&["hyprctl", "repl", &probe]).as_deref() == Some("true") {
-        return CheckResult::new(
-            "load-test",
-            Status::Ok,
-            "clean-mirror.so is already loaded and registered",
-            "",
-        );
-    }
-    // `hyprctl plugin load` can exit 0 even when the plugin fails to start, so
-    // the probe, not the exit code, decides.
-    let path_text = path.to_string_lossy().into_owned();
-    system.run(&["hyprctl", "plugin", "load", &path_text]);
-    let registered = system.run(&["hyprctl", "repl", &probe]).as_deref() == Some("true");
-    system.run(&["hyprctl", "plugin", "unload", &path_text]);
-    if registered {
-        return CheckResult::new(
-            "load-test",
-            Status::Ok,
-            "clean-mirror.so loads into the running compositor and registers",
-            "",
-        );
-    }
-    CheckResult::new(
-        "load-test",
-        Status::Fail,
-        "Hyprland did not accept clean-mirror.so",
-        "Check `hyprctl plugin load` output and the Hyprland log. Without it, TidyShot cannot hide its own windows from recordings. On aarch64, Hyprland cannot install the function hooks it needs.",
-    )
-}
-
 /// Run every check, skipping compositor checks outside a session.
 // Ported from omnishot/doctor.py (diagnose)
 #[must_use]
-pub fn diagnose(system: &dyn System, load: bool) -> Vec<CheckResult> {
+pub fn diagnose(system: &dyn System) -> Vec<CheckResult> {
     let mut results = vec![check_session(system)];
     let in_session = results[0].status == Status::Ok;
     for (check, function) in CHECKS.iter().skip(1) {
@@ -805,21 +669,6 @@ pub fn diagnose(system: &dyn System, load: bool) -> Vec<CheckResult> {
             ));
         } else {
             results.push(function(system));
-        }
-    }
-    if load {
-        if in_session {
-            results.push(load_test(system));
-        } else {
-            results.push(CheckResult::new(
-                Check::LoadTest.id(),
-                Status::Skip,
-                format!(
-                    "{} skipped: needs the running compositor",
-                    Check::LoadTest.label()
-                ),
-                "",
-            ));
         }
     }
     results
@@ -883,7 +732,7 @@ pub fn json_report(system: &dyn System, results: &[CheckResult]) -> String {
     Value::Object(report).to_string_pretty()
 }
 
-/// Parse `--json` / `--load-test`, run the checks, and return the exit code.
+/// Parse `--json`, run the checks, and return the exit code.
 // Ported from omnishot/doctor.py (main)
 pub fn main(argv: &[String], system: &dyn System) -> i32 {
     main_writer(argv, system, &mut std::io::stdout())
@@ -892,18 +741,16 @@ pub fn main(argv: &[String], system: &dyn System) -> i32 {
 /// The same, writing the report to `out` so callers can capture it.
 pub fn main_writer(argv: &[String], system: &dyn System, out: &mut dyn std::io::Write) -> i32 {
     let mut json = false;
-    let mut load = false;
     for argument in argv {
         match argument.as_str() {
             "--json" => json = true,
-            "--load-test" => load = true,
             other => {
                 eprintln!("tidyshot doctor: unrecognized argument: {other}");
                 return 2;
             }
         }
     }
-    let results = diagnose(system, load);
+    let results = diagnose(system);
     let rendered = if json {
         json_report(system, &results)
     } else {
@@ -924,7 +771,7 @@ mod tests {
     #[test]
     fn skipped_check_labels_are_stable() {
         assert_eq!(Check::Headers.id(), "headers");
-        assert_eq!(Check::LoadTest.label(), "Load test");
+        assert_eq!(Check::Shell.label(), "Bar widget check");
         assert_eq!(mark(Status::Fail), "✗");
     }
 

@@ -20,12 +20,6 @@ const VERSION_H: &str = r#"#pragma once
 #define HYPRCURSOR_VERSION   "0.1.13"
 #define HYPRGRAPHICS_VERSION "0.5.1"
 "#;
-const PROBE: &[&str] = &[
-    "hyprctl",
-    "repl",
-    "return tostring(hl.plugin ~= nil and hl.plugin.omnishot ~= nil)",
-];
-
 /// A healthy install; tests break one thing at a time.
 struct Machine {
     env: Mutex<BTreeMap<String, String>>,
@@ -37,9 +31,6 @@ struct Machine {
     omarchy: Mutex<String>,
     missing: Mutex<BTreeSet<String>>,
     widget: Mutex<bool>,
-    registered: Mutex<bool>,
-    accepts_plugin: Mutex<bool>,
-    calls: Mutex<Vec<Vec<String>>>,
 }
 
 impl Machine {
@@ -51,7 +42,6 @@ impl Machine {
         for name in doctor::NATIVE_FILES {
             std::fs::write(native.join(name), b"built").unwrap();
         }
-        std::fs::write(native.join("clean-mirror.abi"), format!("{ABI}\n")).unwrap();
         let hypr = config.join("hypr");
         std::fs::create_dir_all(&hypr).unwrap();
         std::fs::write(
@@ -72,8 +62,7 @@ impl Machine {
         std::fs::write(
             &launcher,
             format!(
-                "#!/bin/sh\nexport LD_PRELOAD={}\nexec {}\n",
-                native.join("drag-status.so").display(),
+                "#!/bin/sh\nexec {}\n",
                 root.join("app/build/tidyshot").display()
             ),
         )
@@ -98,9 +87,6 @@ impl Machine {
             omarchy: Mutex::new("4.0.2-1".to_owned()),
             missing: Mutex::new(BTreeSet::new()),
             widget: Mutex::new(true),
-            registered: Mutex::new(false),
-            accepts_plugin: Mutex::new(true),
-            calls: Mutex::new(Vec::new()),
         };
         // The launcher check wants this installation's built binary path.
         std::fs::create_dir_all(root.join("app/build")).unwrap();
@@ -129,33 +115,6 @@ impl Machine {
     fn set_widget(&self, value: bool) {
         *self.widget.lock().unwrap() = value;
     }
-
-    fn set_accepts_plugin(&self, value: bool) {
-        *self.accepts_plugin.lock().unwrap() = value;
-    }
-
-    fn set_registered(&self, value: bool) {
-        *self.registered.lock().unwrap() = value;
-    }
-
-    fn registered(&self) -> bool {
-        *self.registered.lock().unwrap()
-    }
-
-    fn calls(&self) -> Vec<Vec<String>> {
-        self.calls.lock().unwrap().clone()
-    }
-
-    fn plugin_calls(&self) -> Vec<String> {
-        self.calls()
-            .into_iter()
-            .filter(|call| {
-                call.first().is_some_and(|p| p == "hyprctl")
-                    && call.get(1).is_some_and(|a| a == "plugin")
-            })
-            .filter_map(|call| call.get(2).cloned())
-            .collect()
-    }
 }
 
 impl System for Machine {
@@ -164,25 +123,8 @@ impl System for Machine {
     }
 
     fn run(&self, args: &[&str]) -> Option<String> {
-        let call: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
-        self.calls.lock().unwrap().push(call.clone());
         if args == ["omarchy", "version"] {
             return Some(self.omarchy.lock().unwrap().clone());
-        }
-        if args == PROBE {
-            return Some(if self.registered() {
-                "true".to_owned()
-            } else {
-                "false".to_owned()
-            });
-        }
-        if args.len() >= 3 && args[0] == "hyprctl" && args[1] == "plugin" && args[2] == "load" {
-            *self.registered.lock().unwrap() = *self.accepts_plugin.lock().unwrap();
-            return Some("ok".to_owned());
-        }
-        if args.len() >= 3 && args[0] == "hyprctl" && args[1] == "plugin" && args[2] == "unload" {
-            *self.registered.lock().unwrap() = false;
-            return Some("ok".to_owned());
         }
         None
     }
@@ -220,8 +162,8 @@ impl System for Machine {
     }
 }
 
-fn results(machine: &Machine, load: bool) -> BTreeMap<String, CheckResult> {
-    doctor::diagnose(machine, load)
+fn results(machine: &Machine) -> BTreeMap<String, CheckResult> {
+    doctor::diagnose(machine)
         .into_iter()
         .map(|result| (result.id.clone(), result))
         .collect()
@@ -238,10 +180,7 @@ fn temp_root(name: &str) -> PathBuf {
 fn healthy_machine_passes_every_check() {
     let root = temp_root("healthy");
     let machine = Machine::healthy(&root);
-    let statuses: BTreeSet<&str> = results(&machine, false)
-        .values()
-        .map(|r| r.status.id())
-        .collect();
+    let statuses: BTreeSet<&str> = results(&machine).values().map(|r| r.status.id()).collect();
     assert_eq!(statuses, BTreeSet::from(["ok"]));
     let mut out = Vec::new();
     assert_eq!(doctor::main_writer(&[], &machine, &mut out), 0);
@@ -264,7 +203,7 @@ fn outside_a_session_fails_first() {
     let root = temp_root("session");
     let machine = Machine::healthy(&root);
     machine.set_env(&[]);
-    let session = results(&machine, false)["session"].clone();
+    let session = results(&machine)["session"].clone();
     assert_eq!(session.status.id(), "fail");
     assert!(session.fix.contains("Omarchy desktop session"));
 
@@ -273,7 +212,7 @@ fn outside_a_session_fails_first() {
         ("HYPRLAND_INSTANCE_SIGNATURE", "x"),
     ]);
     machine.set_info(None);
-    assert_eq!(results(&machine, false)["session"].status.id(), "fail");
+    assert_eq!(results(&machine)["session"].status.id(), "fail");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -286,7 +225,7 @@ fn untested_versions_warn_without_failing() {
         version: "0.57.0".to_owned(),
         abi_hash: ABI.to_owned(),
     }));
-    let versions = results(&machine, false)["versions"].clone();
+    let versions = results(&machine)["versions"].clone();
     assert_eq!(versions.status.id(), "warn");
     assert!(
         versions
@@ -305,12 +244,12 @@ fn upgraded_hyprland_asks_for_a_session_restart() {
     let root = temp_root("upgraded");
     let machine = Machine::healthy(&root);
     std::fs::write(&machine.headers, VERSION_H.replace("0.15.0", "0.16.0")).unwrap();
-    let headers = results(&machine, false)["headers"].clone();
+    let headers = results(&machine)["headers"].clone();
     assert_eq!(headers.status.id(), "fail");
     assert!(headers.fix.contains("Restart your desktop session"));
     std::fs::remove_file(&machine.headers).unwrap();
     assert!(
-        results(&machine, false)["headers"]
+        results(&machine)["headers"]
             .fix
             .contains("omarchy pkg add hyprland")
     );
@@ -318,27 +257,15 @@ fn upgraded_hyprland_asks_for_a_session_restart() {
 }
 
 #[test]
-fn stale_or_unrecorded_build_abi() {
-    let root = temp_root("abi");
-    let machine = Machine::healthy(&root);
-    std::fs::write(machine.native.join("clean-mirror.abi"), "older-hyprland\n").unwrap();
-    let stale = results(&machine, false)["build-abi"].clone();
-    assert_eq!(stale.status.id(), "fail");
-    assert!(stale.fix.contains("install.sh"));
-    std::fs::remove_file(machine.native.join("clean-mirror.abi")).unwrap();
-    assert_eq!(results(&machine, false)["build-abi"].status.id(), "warn");
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
 fn missing_helpers_and_commands_name_the_fix() {
     let root = temp_root("missing");
     let machine = Machine::healthy(&root);
-    std::fs::remove_file(machine.native.join("live-selector")).unwrap();
+    std::fs::remove_file(machine.native.join("scroll-helper")).unwrap();
     machine.set_missing(&["ffmpeg", "ffprobe", "wl-copy"]);
-    let found = results(&machine, false);
+    let found = results(&machine);
     assert_eq!(found["native"].status.id(), "fail");
-    assert!(found["native"].summary.contains("live-selector"));
+    assert!(found["native"].summary.contains("scroll-helper"));
+    assert!(found["native"].fix.contains("install.sh"));
     assert_eq!(
         found["commands"].fix,
         "Install them with: omarchy pkg add wl-clipboard ffmpeg"
@@ -352,13 +279,13 @@ fn launcher_and_desktop_integration() {
     let machine = Machine::healthy(&root);
     let launcher = machine.home.join(".local/bin/tidyshot");
     std::fs::write(&launcher, "#!/bin/sh\nexec /elsewhere/build/tidyshot\n").unwrap();
-    assert_eq!(results(&machine, false)["launcher"].status.id(), "warn");
+    assert_eq!(results(&machine)["launcher"].status.id(), "warn");
     std::fs::remove_file(&launcher).unwrap();
-    assert_eq!(results(&machine, false)["launcher"].status.id(), "fail");
+    assert_eq!(results(&machine)["launcher"].status.id(), "fail");
 
     std::fs::write(machine.config.join("hypr/bindings.lua"), "-- mine\n").unwrap();
     std::fs::remove_file(machine.config.join("hypr/tidyshot.lua")).unwrap();
-    let config = results(&machine, false)["hyprland-config"].clone();
+    let config = results(&machine)["hyprland-config"].clone();
     assert_eq!(config.status.id(), "warn");
     assert!(
         config
@@ -368,49 +295,7 @@ fn launcher_and_desktop_integration() {
         config.summary
     );
     machine.set_widget(false);
-    assert_eq!(results(&machine, false)["shell"].status.id(), "warn");
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn load_test_only_runs_when_asked() {
-    let root = temp_root("optin");
-    let machine = Machine::healthy(&root);
-    let _ = results(&machine, false);
-    assert!(machine.plugin_calls().is_empty());
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn load_test_loads_probes_and_unloads() {
-    let root = temp_root("load");
-    let machine = Machine::healthy(&root);
-    assert_eq!(results(&machine, true)["load-test"].status.id(), "ok");
-    assert_eq!(machine.plugin_calls(), ["load", "unload"]);
-    assert!(!machine.registered());
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn load_test_reports_a_rejected_plugin_and_still_unloads() {
-    let root = temp_root("rejected");
-    let machine = Machine::healthy(&root);
-    machine.set_accepts_plugin(false);
-    let result = results(&machine, true)["load-test"].clone();
-    assert_eq!(result.status.id(), "fail");
-    assert!(result.fix.contains("aarch64"));
-    assert_eq!(machine.plugin_calls(), ["load", "unload"]);
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn load_test_leaves_an_already_loaded_plugin_alone() {
-    let root = temp_root("already");
-    let machine = Machine::healthy(&root);
-    machine.set_registered(true);
-    assert_eq!(results(&machine, true)["load-test"].status.id(), "ok");
-    assert!(machine.plugin_calls().is_empty());
-    assert!(machine.registered());
+    assert_eq!(results(&machine)["shell"].status.id(), "warn");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -452,7 +337,7 @@ fn nested_hyprland_layout_passes_config_and_rules() {
         std::fs::rename(top.join(name), nested.join(name)).unwrap();
     }
     std::fs::remove_dir(&top).unwrap();
-    let found = results(&machine, false);
+    let found = results(&machine);
     assert_eq!(found["config"].status.id(), "ok");
     assert_eq!(found["hyprland-config"].status.id(), "ok");
     let _ = std::fs::remove_dir_all(&root);
@@ -468,7 +353,7 @@ fn top_level_layout_wins_when_both_are_present() {
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(nested.join("hyprland.lua"), "-- stale\n").unwrap();
     std::fs::write(nested.join("bindings.lua"), "-- stale\n").unwrap();
-    let found = results(&machine, false);
+    let found = results(&machine);
     assert_eq!(found["config"].status.id(), "ok");
     assert_eq!(found["hyprland-config"].status.id(), "ok");
     let _ = std::fs::remove_dir_all(&root);
@@ -479,7 +364,7 @@ fn missing_hyprland_config_fails_the_config_check() {
     let root = temp_root("nohypr");
     let machine = Machine::healthy(&root);
     std::fs::remove_file(machine.config.join("hypr/hyprland.lua")).unwrap();
-    let config = results(&machine, false)["config"].clone();
+    let config = results(&machine)["config"].clone();
     assert_eq!(config.status.id(), "fail");
     assert!(config.summary.contains("hypr/hyprland.lua"));
     let _ = std::fs::remove_dir_all(&root);
@@ -551,17 +436,13 @@ fn compositor_checks_are_skipped_outside_a_session() {
     let machine = Machine::healthy(&root);
     machine.set_env(&[]);
     machine.set_widget(false);
-    let found = results(&machine, true);
+    let found = results(&machine);
     let skipped: BTreeSet<&str> = found
         .iter()
         .filter(|(_, r)| r.status.id() == "skip")
         .map(|(id, _)| id.as_str())
         .collect();
-    assert_eq!(
-        skipped,
-        BTreeSet::from(["headers", "build-abi", "shell", "load-test"])
-    );
-    assert!(machine.plugin_calls().is_empty());
+    assert_eq!(skipped, BTreeSet::from(["headers", "shell"]));
     let mut out = Vec::new();
     doctor::main_writer(&[], &machine, &mut out);
     assert!(

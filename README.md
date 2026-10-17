@@ -199,9 +199,9 @@ the socket, so they work when the display or the running app is broken.
 The corner preview overlay is `qml/Overlay.qml` for layout and `src/overlay.rs`
 for behavior: auto-close and the save-on-timeout action, dismiss and restore,
 pin, and drag-out with the close-after-drag and Alt-to-keep rules. `src/drag.rs`
-tracks definitive Wayland drag completion through the `drag-status` preload.
-`src/ui_scale.rs` reflows UI measurements to the Omarchy theme without touching
-captured pixels.
+tracks definitive Wayland drag completion through a `drag-status` preload when
+one is present, and falls back to Qt's own action otherwise. `src/ui_scale.rs`
+reflows UI measurements to the Omarchy theme without touching captured pixels.
 
 `cargo run --release --bin bench [reps]` is a fixed-workload timing harness for
 the scroll stitcher and the annotation effects. It is not a gate; the unit
