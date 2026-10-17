@@ -63,3 +63,138 @@ fn the_install_script_runs_makepkg_from_the_pkgbuild_directory() {
     // Running makepkg as root is forbidden, and the script checks first.
     assert!(text.contains("EUID == 0"));
 }
+
+/// `bin/make-release-artifacts` must produce the layout `scripts/setup.sh`
+/// consumes: a tarball named from the manifest version whose members are the
+/// executable, the source commit stamp, and the icon helper.
+#[test]
+fn the_release_artifact_script_packages_the_layout_setup_expects() {
+    use std::process::Command;
+
+    let base = std::env::temp_dir().join(format!(
+        "tidyshot-release-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("bin")).unwrap();
+    fs::copy(
+        repo().join("bin/make-release-artifacts"),
+        base.join("bin/make-release-artifacts"),
+    )
+    .unwrap();
+    fs::write(
+        base.join("manifest.json"),
+        "{\n  \"version\": \"9.8.7\",\n  \"name\": \"TidyShot\"\n}\n",
+    )
+    .unwrap();
+    // A build stub stands in for the cargo and Wayland toolchain.
+    fs::write(
+        base.join("bin/build"),
+        r#"#!/usr/bin/env bash
+set -eu
+mkdir -p build/native
+printf '#!/bin/sh\n' >build/tidyshot
+printf icon >build/generate-icon
+printf svg >build/tidyshot.svg
+chmod +x build/tidyshot build/generate-icon
+printf helper >build/native/scroll-helper
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    for name in ["build", "make-release-artifacts"] {
+        let path = base.join("bin").join(name);
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&base)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "one"]);
+    let head = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&base)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+
+    let result = Command::new("bash")
+        .arg(base.join("bin/make-release-artifacts"))
+        .env("HOME", "")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let archive = base.join("dist/tidyshot-9.8.7-x86_64.tar.gz");
+    assert!(archive.exists(), "the archive takes the manifest version");
+    let checksums = fs::read_to_string(base.join("dist/checksums.txt")).unwrap();
+    let mut fields = checksums.split_whitespace();
+    let digest = fields.next().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert_eq!(fields.next().unwrap(), "tidyshot-9.8.7-x86_64.tar.gz");
+    let actual = Command::new("sha256sum").arg(&archive).output().unwrap();
+    assert_eq!(
+        String::from_utf8(actual.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap(),
+        digest
+    );
+
+    let listing = Command::new("tar")
+        .args(["-tzf"])
+        .arg(&archive)
+        .output()
+        .unwrap();
+    let listing = String::from_utf8(listing.stdout).unwrap();
+    for member in [
+        ".tidyshot-source",
+        "./build/tidyshot",
+        "./build/generate-icon",
+    ] {
+        assert!(
+            listing.contains(member),
+            "archive lacks {member}: {listing}"
+        );
+    }
+    let extracted = base.join("extracted");
+    fs::create_dir_all(&extracted).unwrap();
+    assert!(
+        Command::new("tar")
+            .args(["-xzf"])
+            .arg(&archive)
+            .arg("-C")
+            .arg(&extracted)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(extracted.join(".tidyshot-source")).unwrap(),
+        head
+    );
+    assert!(extracted.join("build/tidyshot").exists());
+    let _ = fs::remove_dir_all(&base);
+}
