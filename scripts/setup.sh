@@ -120,13 +120,21 @@ task_prepare_release() {
     return 0
   fi
   # The checksum only proves the archive arrived intact, not that it is safe to
-  # unpack. One verbose listing drives every check, and the loop drains tar to
-  # EOF: a grep that stops at the first match would kill tar with SIGPIPE and
-  # pipefail would then read the failed pipeline as "no unsafe member".
+  # unpack. One verbose listing drives every check. Read it whole instead of
+  # piping into a loop that may stop early: a reader that exits while tar is
+  # still writing kills tar with SIGPIPE, and pipefail would then treat the
+  # failed pipeline as "no unsafe member". The listing also fails closed when
+  # tar itself errors.
+  local task_listing
+  if ! task_listing=$(LC_ALL=C tar --numeric-owner --full-time --quoting-style=escape -tvzf "$task_tarball"); then
+    task_release_reason="release tarball $task_archive could not be listed"
+    return 0
+  fi
   local task_line task_mode task_member task_unsafe=0
   while IFS= read -r task_line; do
     # mode, owner/group, size, timestamp, then the member name; the name is the
-    # rest of the line so spaces in it stay intact.
+    # rest of the line so spaces in it stay intact. Escape quoting keeps a name
+    # with a newline on one line.
     if [[ ! $task_line =~ ^([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+(.*)$ ]]; then
       task_unsafe=1
       break
@@ -147,7 +155,7 @@ task_prepare_release() {
       /* | .. | ../* | */../* | */.. ) task_unsafe=1 ;;
     esac
     (( task_unsafe )) && break
-  done < <(LC_ALL=C tar --numeric-owner --full-time --quoting-style=escape -tvzf "$task_tarball")
+  done <<<"$task_listing"
   if (( task_unsafe )); then
     task_release_reason="release tarball $task_archive has an unsafe member"
     return 0
