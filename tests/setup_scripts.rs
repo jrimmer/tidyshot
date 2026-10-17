@@ -322,6 +322,7 @@ enum ReleaseFlaw {
     Checksum,
     OmitTarball,
     UnsafePath,
+    Symlink,
 }
 
 /// A fake release directory in the shape `bin/make-release-artifacts` writes:
@@ -347,6 +348,9 @@ impl Release {
         perms.set_mode(0o755);
         fs::set_permissions(&binary, perms).unwrap();
         fs::write(stage.join(".tidyshot-source"), format!("{commit}\n")).unwrap();
+        if matches!(flaw, ReleaseFlaw::Symlink) {
+            std::os::unix::fs::symlink("/etc/passwd", stage.join("build/escape")).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         if !matches!(flaw, ReleaseFlaw::OmitTarball) {
             let archive = dir.join(&archive_name);
@@ -1236,4 +1240,20 @@ fn the_real_install_script_takes_a_prebuilt_release_without_the_toolchain() {
         fs::read_to_string(fixture.base.join("commands.jsonl.user")).unwrap(),
         "installed\n"
     );
+}
+
+#[test]
+fn a_tarball_member_that_is_a_symlink_falls_back() {
+    let fixture = Fixture::new("release-symlink");
+    let release = fixture.release_with(&fixture.head, ReleaseFlaw::Symlink);
+    let result = run_release(&fixture, &release, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("unsafe path"), "{stderr}");
+    assert!(cargo_called(&fixture));
+    assert!(fixture.prebuilt_log().is_empty());
 }

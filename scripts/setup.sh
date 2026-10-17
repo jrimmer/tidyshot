@@ -128,6 +128,11 @@ task_prepare_release() {
     esac
     [[ $task_unsafe == 1 ]] && break
   done < <(tar -tzf "$task_tarball")
+  # A release holds files only. Links could point anywhere, and an executable
+  # link would run outside the staged tree.
+  if tar -tvzf "$task_tarball" | grep -q '^[lh]'; then
+    task_unsafe=1
+  fi
   if (( task_unsafe )); then
     task_release_reason="release tarball $task_archive has an unsafe path"
     return 0
