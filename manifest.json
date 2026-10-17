@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.joshdaws.tidyshot",
+  "id": "com.jasonrimmer.tidyshot",
   "name": "TidyShot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "TidyShot contributors",
   "license": "MIT",
   "description": "Native screenshots, scrolling capture, annotation, recording and capture history.",

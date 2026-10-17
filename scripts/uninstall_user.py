@@ -20,7 +20,7 @@ def hypr_dir():
     nested=config/"omarchy/hypr"
     if (nested/"hyprland.lua").is_file() and (nested/"bindings.lua").is_file():return nested
     return top
-plugin_ids=("io.github.joshdaws.tidyshot","local.tidyshot")
+plugin_ids=("com.jasonrimmer.tidyshot","io.github.joshdaws.tidyshot","local.tidyshot")
 desktop_id="org.omarchy.TidyShot.desktop"
 MARKER="-- TidyShot managed bindings";END="-- End TidyShot managed bindings"
 REQUIRE='require("hypr.tidyshot")'

@@ -4,6 +4,15 @@ All notable changes to TidyShot are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-10-17
+
+### Changed
+
+- The Omarchy plugin id is now `com.jasonrimmer.tidyshot`. The installer,
+  uninstaller and doctor still recognize the previous
+  `io.github.joshdaws.tidyshot` checkout and bar widget, so an existing install
+  keeps working and migrates in place.
+
 ## [0.1.0] - 2026-10-16
 
 The first release: a Rust and Qt Quick rebuild of the OmniShot workflow for
@@ -60,4 +69,5 @@ Omarchy.
   never modified.
 - The single-instance socket is user-only.
 
+[0.1.1]: https://github.com/jrimmer/tidyshot/releases/tag/v0.1.1
 [0.1.0]: https://github.com/jrimmer/tidyshot/releases/tag/v0.1.0

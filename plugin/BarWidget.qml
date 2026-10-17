@@ -13,8 +13,8 @@ import qs.Ui
 // because the plugin validator rejects the build's output files.
 Panel {
     id: root
-    moduleName: "io.github.joshdaws.tidyshot"
-    ipcTarget: "io.github.joshdaws.tidyshot"
+    moduleName: "com.jasonrimmer.tidyshot"
+    ipcTarget: "com.jasonrimmer.tidyshot"
     manageIpc: false
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight

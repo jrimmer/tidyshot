@@ -86,6 +86,11 @@ pub const RUNTIME_COMMANDS: &[(&str, &str)] = &[
 
 /// The marker TidyShot writes into the user's Hyprland bindings.
 pub const BINDINGS_MARKER: &str = "-- TidyShot managed bindings";
+/// The plugin id this build registers with the Omarchy shell.
+pub const PLUGIN_ID: &str = "com.jasonrimmer.tidyshot";
+/// The plugin id used before the rename, kept so doctor still finds an
+/// existing install until the user updates the plugin.
+pub const LEGACY_PLUGIN_ID: &str = "io.github.joshdaws.tidyshot";
 /// The module the user's Hyprland configuration requires for window rules.
 pub const RULES_REQUIRE: &str = "require(\"hypr.tidyshot\")";
 /// The Hyprland Lua directory under an Omarchy config directory.
@@ -215,11 +220,7 @@ impl System for RealSystem {
     }
 
     fn shell_widget(&self) -> bool {
-        let state = self.run(&["omarchy-shell", "io.github.joshdaws.tidyshot", "state"]);
-        state
-            .and_then(|text| crate::json::parse(&text).ok())
-            .and_then(|value| value.get("panelApi").and_then(Value::as_f64))
-            .is_some_and(|api| api == 1.0)
+        shell_widget_state(|id| self.run(&["omarchy-shell", id, "state"]))
     }
 
     fn home(&self) -> PathBuf {
@@ -233,6 +234,22 @@ impl System for RealSystem {
     fn native(&self) -> PathBuf {
         self.native.clone()
     }
+}
+
+/// Whether an `omarchy-shell <id> state` reply comes from a compatible widget.
+fn widget_responds(state: Option<String>) -> bool {
+    state
+        .and_then(|text| crate::json::parse(&text).ok())
+        .and_then(|value| value.get("panelApi").and_then(Value::as_f64))
+        .is_some_and(|api| api == 1.0)
+}
+
+/// Probe the widget by its current id, then the pre-rename id so an install
+/// whose plugin has not been updated yet still reports a live bar widget.
+fn shell_widget_state(mut probe: impl FnMut(&str) -> Option<String>) -> bool {
+    [PLUGIN_ID, LEGACY_PLUGIN_ID]
+        .iter()
+        .any(|id| widget_responds(probe(id)))
 }
 
 /// Find the checkout or installation root from the source env or executable.
@@ -773,6 +790,32 @@ mod tests {
         assert_eq!(Check::Headers.id(), "headers");
         assert_eq!(Check::Shell.label(), "Bar widget check");
         assert_eq!(mark(Status::Fail), "✗");
+    }
+
+    #[test]
+    fn the_shell_probe_tries_the_current_id_before_the_legacy_id() {
+        assert_eq!(PLUGIN_ID, "com.jasonrimmer.tidyshot");
+        assert_eq!(LEGACY_PLUGIN_ID, "io.github.joshdaws.tidyshot");
+
+        let mut asked = Vec::new();
+        let found = shell_widget_state(|id| {
+            asked.push(id.to_owned());
+            (id == LEGACY_PLUGIN_ID).then(|| r#"{"panelApi": 1}"#.to_owned())
+        });
+        assert!(found, "the legacy widget answers for an existing install");
+        assert_eq!(asked, [PLUGIN_ID, LEGACY_PLUGIN_ID]);
+
+        let mut asked = Vec::new();
+        let found = shell_widget_state(|id| {
+            asked.push(id.to_owned());
+            (id == PLUGIN_ID).then(|| r#"{"panelApi": 1}"#.to_owned())
+        });
+        assert!(found);
+        assert_eq!(
+            asked,
+            [PLUGIN_ID],
+            "a current widget stops after the first probe"
+        );
     }
 
     #[test]

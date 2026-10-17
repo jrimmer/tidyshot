@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build and install TidyShot from its Omarchy plugin checkout
-# (~/.config/omarchy/plugins/io.github.joshdaws.tidyshot). The bar widget runs
+# (~/.config/omarchy/plugins/com.jasonrimmer.tidyshot). The bar widget runs
 # this for first-time setup and after `omarchy plugin update`; rerunning it is safe.
 set -euo pipefail
 task_source=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)

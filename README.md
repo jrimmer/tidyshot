@@ -118,7 +118,7 @@ and settings are kept.
 ## Omarchy plugin
 
 The repository root is a complete Omarchy plugin: `manifest.json` declares it
-as `io.github.joshdaws.tidyshot`, with `plugin/BarWidget.qml` as the bar widget
+as `com.jasonrimmer.tidyshot`, with `plugin/BarWidget.qml` as the bar widget
 entry point. Install it with:
 
 ```sh
@@ -128,7 +128,7 @@ omarchy plugin add https://github.com/jrimmer/tidyshot --enable
 Each install step mirrors OmniShot's plugin flow:
 
 - `omarchy plugin add https://github.com/jrimmer/tidyshot --enable` clones the
-  checkout into `$XDG_CONFIG_HOME/omarchy/plugins/io.github.joshdaws.tidyshot`.
+  checkout into `$XDG_CONFIG_HOME/omarchy/plugins/com.jasonrimmer.tidyshot`.
 - The widget offers **Finish setup**, which runs `scripts/setup.sh`: it installs
   packages through `omarchy pkg add`, mirrors the checkout into
   `$XDG_DATA_HOME/tidyshot-app`, installs the Rust binary there, and stamps

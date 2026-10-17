@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-const PLUGIN_ID: &str = "io.github.joshdaws.tidyshot";
+const PLUGIN_ID: &str = "com.jasonrimmer.tidyshot";
 const NOBODY: (u32, u32) = (65534, 65534);
 
 /// The install stub the fixture uses in place of the real Rust build.

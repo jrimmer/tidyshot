@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const PLUGIN_ID: &str = "io.github.joshdaws.tidyshot";
+const PLUGIN_ID: &str = "com.jasonrimmer.tidyshot";
 
 /// Stub the desktop commands the installer probes; record every call.
 const STUB: &str = r#"#!/usr/bin/env python3

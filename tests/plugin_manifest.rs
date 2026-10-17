@@ -5,10 +5,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PLUGIN_ID: &str = "io.github.joshdaws.tidyshot";
+const PLUGIN_ID: &str = "com.jasonrimmer.tidyshot";
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn plugin_id_is_pinned() {
+    assert_eq!(PLUGIN_ID, "com.jasonrimmer.tidyshot");
 }
 
 #[test]
