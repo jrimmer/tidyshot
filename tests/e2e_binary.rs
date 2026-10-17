@@ -1,12 +1,22 @@
 //! End-to-end behavior of the real `tidyshot` binary.
 //!
 //! Flow 1: headless CLI subcommands with a throwaway HOME and their exit
-//! codes. Flow 3: the single-instance socket, driven by real processes:
-//! launch offscreen, wait for the socket, forward a command, signal the
-//! server, and watch a relaunch take over.
+//! codes. Flow 2: the interactive OCR capture path with stubbed `slurp`,
+//! `grim` and `hyprctl` on a temp PATH, driven until the reachable prefix is
+//! done. Flow 3: the single-instance socket, driven by real processes: launch
+//! offscreen, wait for the socket, forward a command, signal the server, and
+//! watch a relaunch take over. Flow 4: a `.omnishot` project created by the
+//! library and accepted by the binary's headless surface.
 //!
 //! Every wait is bounded and a missing binary skips the test rather than
 //! failing, so the file is safe to run on a machine without a build.
+//!
+//! Flows 2 and 4 stop at the GUI boundary. Flow 2 runs the real capture
+//! prefix (slurp selection, grim grab, OCR) with stubbed commands and then
+//! tears the dialog process down; it never asserts on the QML dialog, because
+//! a headless e2e run cannot drive a real GUI. Flow 4 exercises the CLI
+//! parse, route and forward of a library-created project; the editor window
+//! that would open it is outside the headless surface.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,6 +67,83 @@ impl Home {
     }
 
     /// The instance socket this HOME/XDG pair would create, if present.
+    /// A marker file the stub commands append to, so one test can observe
+    /// which real capture commands the binary ran, in order.
+    fn marker(&self) -> PathBuf {
+        self.root.join("commands.log")
+    }
+
+    /// The temp directory of stub `grim`/`slurp`/`hyprctl` executables.
+    fn stub_bin(&self) -> PathBuf {
+        self.root.join("stub-bin")
+    }
+
+    /// A native directory holding the mirror plugin, so a grab proceeds
+    /// instead of failing the component check up front.
+    fn native_dir(&self) -> PathBuf {
+        self.root.join("native")
+    }
+
+    /// Install stubs for every command the interactive capture path reaches
+    /// and return the directory to prepend to PATH.
+    ///
+    /// `hyprctl` reports the aarch64 degrade (the plugin cannot hook), so the
+    /// clean mirror is unavailable and the grab still reaches grim. `slurp`
+    /// returns a fixed region and `grim` returns placeholder PNG bytes; both
+    /// append their argv to the marker. `tesseract` yields text and `zbarimg`
+    /// declines, matching a screen with OCR text and no QR code.
+    fn install_capture_stubs(&self) -> PathBuf {
+        let bin = self.stub_bin();
+        fs::create_dir_all(&bin).unwrap();
+        let native = self.native_dir();
+        fs::create_dir_all(&native).unwrap();
+        fs::write(native.join("clean-mirror.so"), b"plugin").unwrap();
+
+        write_stub(
+            &bin,
+            "slurp",
+            "echo \"slurp $*\" >> \"$TIDYSHOT_E2E_MARKER\"\necho '10,20 100x200'",
+        );
+        write_stub(
+            &bin,
+            "grim",
+            "echo \"grim $*\" >> \"$TIDYSHOT_E2E_MARKER\"\nprintf 'PNG'",
+        );
+        write_stub(
+            &bin,
+            "hyprctl",
+            "if [ \"$1\" = \"-j\" ] && [ \"$2\" = \"plugin list\" ]; then\n  echo '[]'\nelif [ \"$1\" = \"plugin\" ] && [ \"$2\" = \"load\" ]; then\n  echo 'Could not hook IElementRenderer::preDrawSurface'\nelif [ \"$1\" = \"repl\" ]; then\n  echo 'false'\nelse\n  echo 'ok'\nfi",
+        );
+        write_stub(
+            &bin,
+            "tesseract",
+            "echo \"tesseract $*\" >> \"$TIDYSHOT_E2E_MARKER\"\necho 'Recognized text'",
+        );
+        write_stub(
+            &bin,
+            "zbarimg",
+            "echo \"zbarimg $*\" >> \"$TIDYSHOT_E2E_MARKER\"\nexit 4",
+        );
+        write_stub(
+            &bin,
+            "wl-copy",
+            "cat >/dev/null\necho 'wl-copy' >> \"$TIDYSHOT_E2E_MARKER\"",
+        );
+        write_stub(
+            &bin,
+            "notify-send",
+            "echo 'notify-send' >> \"$TIDYSHOT_E2E_MARKER\"",
+        );
+        bin
+    }
+
+    /// PATH with the stub directory in front of the inherited one.
+    fn path_with_stubs(&self, bin: &Path) -> String {
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        format!("{}:{inherited}", bin.display())
+    }
+
+    /// The instance socket this HOME/XDG pair would create, if present.
     fn socket(&self) -> Option<PathBuf> {
         for entry in fs::read_dir(self.state_dir()).ok()?.flatten() {
             let path = entry.path();
@@ -84,6 +171,59 @@ impl Home {
 impl Drop for Home {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Write an executable stub script.
+fn write_stub(dir: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).unwrap();
+}
+
+/// Poll until `path` contains `needle`, bounded. Returns the file text.
+fn wait_for_marker(path: &Path, needle: &str, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && text.contains(needle)
+        {
+            return Some(text);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// A background process a test starts and always reaps.
+///
+/// Stdin, stdout and stderr are null rather than piped: an offscreen GUI that
+/// fills an undrained pipe would block before it reaches the code under test.
+struct Background {
+    child: Child,
+}
+
+impl Background {
+    fn spawn(mut command: Command) -> Self {
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        Self { child }
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -315,4 +455,139 @@ fn a_relaunch_replaces_the_socket_and_serves_again() {
     assert!(second.running(), "the relaunched server stopped early");
 
     second.terminate();
+}
+
+/// Flow 2: the interactive `ocr` capture runs slurp, grim and OCR through the
+/// command runner before the result dialog.
+///
+/// The dialog itself is the GUI boundary: a headless run cannot dismiss it,
+/// so the test stops after the reachable prefix and never claims the dialog
+/// worked. The stubbed commands prove the binary reached the real capture
+/// pipeline rather than merely validating the arguments.
+#[test]
+fn the_ocr_capture_reaches_stubbed_slurp_grim_and_ocr() {
+    if missing_binary() {
+        return;
+    }
+    let home = Home::new("capture");
+    let bin = home.install_capture_stubs();
+    let marker = home.marker();
+
+    let process = Background::spawn({
+        let mut command = home.command();
+        command
+            .env("PATH", home.path_with_stubs(&bin))
+            .env("TIDYSHOT_E2E_MARKER", &marker)
+            .env("TIDYSHOT_NATIVE_DIR", home.native_dir())
+            .args(["ocr"]);
+        command
+    });
+
+    let text = wait_for_marker(&marker, "tesseract", Duration::from_secs(15))
+        .expect("the capture prefix never reached OCR");
+    drop(process);
+
+    let slurp = text
+        .lines()
+        .position(|line| line.starts_with("slurp "))
+        .unwrap_or_else(|| panic!("slurp did not run; marker was:\n{text}"));
+    let grim = text
+        .lines()
+        .position(|line| line.starts_with("grim "))
+        .unwrap_or_else(|| panic!("grim did not run; marker was:\n{text}"));
+    assert!(slurp < grim, "slurp must select before grim grabs: {text}");
+
+    // The grab used slurp's fixed region and grim's PNG output; tesseract then
+    // read the captured frame. The QML dialog is where a real run continues.
+    assert!(
+        text.contains("grim -g 10,20 100x200 -t png -"),
+        "grim did not grab the selected region: {text}"
+    );
+    assert!(
+        text.contains("tesseract ") && text.contains(" stdout "),
+        "OCR did not run over the captured frame: {text}"
+    );
+}
+
+/// Flow 4: a `.omnishot` project written by the library is accepted by the
+/// binary's headless surface.
+///
+/// The project is built with the same public API the app uses, so the fixture
+/// is a genuine editable archive. The binary then parses the bare path, sees a
+/// file, routes it to the editor command and forwards it to the running
+/// instance; the sender is headless and its exit code is the observable. The
+/// editor window that would open the project is outside this surface.
+#[test]
+fn a_library_project_is_forwarded_by_the_headless_surface() {
+    if missing_binary() {
+        return;
+    }
+    let home = Home::new("project");
+    let project = editable_project_path(&home);
+    let project_arg = project.to_str().unwrap().to_owned();
+
+    // A missing project path is not a file, so the CLI rejects it as an
+    // unknown command before it ever reaches the GUI.
+    let absent = home.root.join("absent.omnishot");
+    let absent = run_bounded(&home, &[absent.to_str().unwrap()], EXIT_TIMEOUT);
+    assert_eq!(
+        absent.status.code(),
+        Some(2),
+        "a missing project must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&absent.stderr);
+    assert!(stderr.contains("unknown command"), "stderr was: {stderr}");
+
+    // A real archive is recognized as a local file and delivered to the
+    // running instance; the sender exits 0 and the instance survives.
+    let mut server = Server::launch(&home);
+    wait_for_listening(&home, START_TIMEOUT)
+        .expect("the offscreen instance never bound its socket");
+    let forwarded = run_bounded(&home, &[&project_arg], EXIT_TIMEOUT);
+    assert_eq!(
+        forwarded.status.code(),
+        Some(0),
+        "a library project must be forwarded, stderr: {}",
+        String::from_utf8_lossy(&forwarded.stderr)
+    );
+    assert!(
+        server.running(),
+        "the instance stopped on the project command"
+    );
+    server.terminate();
+}
+
+/// Create a version-2 `.omnishot` archive with one annotation.
+fn editable_project_path(home: &Home) -> PathBuf {
+    use tidyshot::annotation::{Annotation, Props};
+    use tidyshot::editor::Document;
+    use tidyshot::json::Value;
+    use tidyshot::pngzip::Image;
+
+    let mut data = vec![0u8; 64 * 48 * 4];
+    for (index, pixel) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        pixel.copy_from_slice(&[(index % 255) as u8, 200, 120, 255]);
+    }
+    let mut document = Document::new(Image::new(64, 48, data), None, false);
+    let props: Props = [
+        ("kind".to_owned(), Value::String("rect".to_owned())),
+        ("x".to_owned(), Value::Number(4.0)),
+        ("y".to_owned(), Value::Number(4.0)),
+        ("w".to_owned(), Value::Number(20.0)),
+        ("h".to_owned(), Value::Number(12.0)),
+        ("color".to_owned(), Value::String("#ffd60a".to_owned())),
+        ("width".to_owned(), Value::Number(3.0)),
+    ]
+    .into_iter()
+    .collect();
+    document.objects.push(Annotation::new(props));
+    document.commit();
+
+    let path = home.root.join("editable.omnishot");
+    document.save(&path).unwrap();
+    // The fixture must round-trip through the project codec, not just exist.
+    let reopened = tidyshot::project::Project::open(&path).unwrap();
+    assert_eq!(reopened.version, 2);
+    assert_eq!(reopened.objects.len(), 1);
+    path
 }
