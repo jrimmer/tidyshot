@@ -23,9 +23,9 @@ def hypr_dir():
     hinted=os.environ.get("TIDYSHOT_HYPR_DIR")
     if hinted:return Path(hinted)
     top=config/"hypr"
-    if (top/"hyprland.lua").is_file() or (top/"bindings.lua").is_file():return top
+    if (top/"hyprland.lua").is_file() and (top/"bindings.lua").is_file():return top
     nested=config/"omarchy/hypr"
-    if (nested/"hyprland.lua").is_file() or (nested/"bindings.lua").is_file():return nested
+    if (nested/"hyprland.lua").is_file() and (nested/"bindings.lua").is_file():return nested
     return top
 bindings=hypr_dir()/"bindings.lua";old=bindings.read_text()
 hypr=hypr_dir()/"hyprland.lua";hypr_text=hypr.read_text()

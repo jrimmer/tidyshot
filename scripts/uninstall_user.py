@@ -16,9 +16,9 @@ def hypr_dir():
     hinted=os.environ.get("TIDYSHOT_HYPR_DIR")
     if hinted:return Path(hinted)
     top=config/"hypr"
-    if (top/"hyprland.lua").is_file() or (top/"bindings.lua").is_file():return top
+    if (top/"hyprland.lua").is_file() and (top/"bindings.lua").is_file():return top
     nested=config/"omarchy/hypr"
-    if (nested/"hyprland.lua").is_file() or (nested/"bindings.lua").is_file():return nested
+    if (nested/"hyprland.lua").is_file() and (nested/"bindings.lua").is_file():return nested
     return top
 plugin_ids=("io.github.joshdaws.tidyshot","local.tidyshot")
 desktop_id="org.omarchy.TidyShot.desktop"
