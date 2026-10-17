@@ -12,14 +12,24 @@ if (( EUID == 0 )); then
   exit 1
 fi
 
-# Fail before changing user configuration when prerequisites are missing.
+# Fail before changing user configuration when prerequisites are missing. A
+# prebuilt install needs no Rust or Qt toolchain: it only rebuilds the
+# auto-scroll helper, which is plain C against the running compositor.
 task_missing=()
-for task_command in cargo hyprctl omarchy omarchy-shell grim slurp wl-copy ffmpeg ffprobe tesseract zbarimg gpu-screen-recorder update-desktop-database update-mime-database xdg-mime notify-send; do
+task_commands=(hyprctl omarchy omarchy-shell grim slurp wl-copy ffmpeg ffprobe tesseract
+  zbarimg gpu-screen-recorder update-desktop-database update-mime-database xdg-mime notify-send)
+if [[ -n ${TIDYSHOT_PREBUILT:-} ]]; then
+  task_commands+=(gcc pkg-config wayland-scanner)
+else
+  task_commands+=(cargo)
+fi
+for task_command in "${task_commands[@]}"; do
   command -v "$task_command" >/dev/null 2>&1 || task_missing+=("$task_command")
 done
 # cxx-qt-build finds Qt through the `QMAKE` override or a `qmake`/`qmake6`
 # binary on PATH; do not insist on the distro-specific `qmake6` name.
-if [[ -z ${QMAKE:-} ]] && ! command -v qmake6 >/dev/null 2>&1 && ! command -v qmake >/dev/null 2>&1; then
+if [[ -z ${TIDYSHOT_PREBUILT:-} && -z ${QMAKE:-} ]] &&
+  ! command -v qmake6 >/dev/null 2>&1 && ! command -v qmake >/dev/null 2>&1; then
   task_missing+=(qmake6)
 fi
 if (( ${#task_missing[@]} )); then
