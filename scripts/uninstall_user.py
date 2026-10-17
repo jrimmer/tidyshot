@@ -9,6 +9,17 @@ from datetime import datetime
 
 home=Path.home();config=Path(os.environ.get("XDG_CONFIG_HOME",home/".config"))
 data_home=Path(os.environ.get("XDG_DATA_HOME",home/".local/share"))
+# Match the layout the guard accepted: top-level ~/.config/hypr first, then the
+# older nested ~/.config/omarchy/hypr. TIDYSHOT_HYPR_DIR is authoritative when
+# setup exported it.
+def hypr_dir():
+    hinted=os.environ.get("TIDYSHOT_HYPR_DIR")
+    if hinted:return Path(hinted)
+    top=config/"hypr"
+    if (top/"hyprland.lua").is_file() or (top/"bindings.lua").is_file():return top
+    nested=config/"omarchy/hypr"
+    if (nested/"hyprland.lua").is_file() or (nested/"bindings.lua").is_file():return nested
+    return top
 plugin_ids=("io.github.joshdaws.tidyshot","local.tidyshot")
 desktop_id="org.omarchy.TidyShot.desktop"
 MARKER="-- TidyShot managed bindings";END="-- End TidyShot managed bindings"
@@ -88,11 +99,11 @@ if icon_hook.exists():
         rewrite(icon_hook,rewritten)
 mimeapps=config/"mimeapps.list"
 if mimeapps.exists():rewrite(mimeapps,without_desktop(mimeapps.read_text()))
-bindings=config/"hypr/bindings.lua"
+bindings=hypr_dir()/"bindings.lua"
 if bindings.exists():rewrite(bindings,without_bindings(bindings.read_text()))
-hypr=config/"hypr/hyprland.lua"
+hypr=hypr_dir()/"hyprland.lua"
 if hypr.exists():rewrite(hypr,without_require(hypr.read_text()))
-remove(config/"hypr/tidyshot.lua")
+remove(hypr_dir()/"tidyshot.lua")
 if data is not None:
     layout=data.get("bar",{}).get("layout",{})
     for section in ("left","center","right"):

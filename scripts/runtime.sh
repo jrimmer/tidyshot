@@ -32,12 +32,30 @@ tidyshot_stop() {
   return 1
 }
 
+# The Hyprland configuration directory TidyShot writes into. Omarchy 4 keeps
+# the Lua configuration at the top of ~/.config/hypr; the older layout nested
+# it under ~/.config/omarchy/hypr. Prefer the top-level layout and fall back to
+# the nested one, so the guard, the writer and `tidyshot doctor` agree on where
+# hyprland.lua and bindings.lua live.
+tidyshot_hypr_dir() {
+  if [[ -f "$tidyshot_config/hypr/hyprland.lua" && -f "$tidyshot_config/hypr/bindings.lua" ]]; then
+    printf '%s\n' "$tidyshot_config/hypr"
+  elif [[ -f "$tidyshot_config/omarchy/hypr/hyprland.lua" && -f "$tidyshot_config/omarchy/hypr/bindings.lua" ]]; then
+    printf '%s\n' "$tidyshot_config/omarchy/hypr"
+  fi
+}
+
+# The path the installer and launcher write Hyprland bindings to, exported so
+# the Python installer and uninstaller use the same layout the guard accepted.
+tidyshot_hypr="$(tidyshot_hypr_dir)"
+export TIDYSHOT_HYPR_DIR="$tidyshot_hypr"
+
 tidyshot_require_session() {
   if (( EUID == 0 )); then
     printf 'Run this as your desktop user, without sudo.\n' >&2
     return 1
   fi
-  if [[ ! -f "$tidyshot_config/hypr/hyprland.lua" || ! -f "$tidyshot_config/hypr/bindings.lua" || ! -f "$tidyshot_config/omarchy/shell.json" ]]; then
+  if [[ -z $tidyshot_hypr || ! -f "$tidyshot_config/omarchy/shell.json" ]]; then
     printf 'TidyShot requires Omarchy with Lua Hyprland configuration and the shell plugin API.\n' >&2
     return 1
   fi

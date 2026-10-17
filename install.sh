@@ -27,7 +27,7 @@ if (( ${#task_missing[@]} )); then
   exit 1
 fi
 
-if [[ ! -f "$tidyshot_config/hypr/hyprland.lua" || ! -f "$tidyshot_config/hypr/bindings.lua" || ! -f "$tidyshot_config/omarchy/shell.json" ]]; then
+if [[ -z $tidyshot_hypr || ! -f "$tidyshot_config/omarchy/shell.json" ]]; then
   printf 'This release requires Omarchy with Lua Hyprland configuration and the shell plugin API.\n' >&2
   exit 1
 fi

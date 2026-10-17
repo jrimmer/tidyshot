@@ -98,6 +98,33 @@ pub const RULES_REQUIRE: &str = "require(\"hypr.tidyshot\")";
 /// The running compositor's plugin Lua namespace.
 const PLUGIN_NAMESPACE: &str = "omnishot";
 
+/// The Hyprland Lua directory under an Omarchy config directory.
+///
+/// Omarchy 4 keeps `hyprland.lua` and `bindings.lua` at the top of
+/// `~/.config/hypr`; the older layout nests them under
+/// `~/.config/omarchy/hypr`. Prefer the top-level layout and fall back to the
+/// nested one, matching `tidyshot_hypr_dir` in scripts/runtime.sh and the
+/// installer that writes bindings.
+#[must_use]
+pub fn hypr_dir(config: &Path) -> Option<PathBuf> {
+    let top = config.join("hypr");
+    if top.join("hyprland.lua").is_file() && top.join("bindings.lua").is_file() {
+        return Some(top);
+    }
+    let nested = config.join("omarchy/hypr");
+    if nested.join("hyprland.lua").is_file() && nested.join("bindings.lua").is_file() {
+        return Some(nested);
+    }
+    None
+}
+
+/// The shell plugin API settings file, which lives directly under
+/// `~/.config/omarchy` in both layouts.
+#[must_use]
+pub fn shell_settings(config: &Path) -> PathBuf {
+    config.join("omarchy/shell.json")
+}
+
 /// The version and plugin ABI of the running compositor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HyprlandInfo {
@@ -398,16 +425,14 @@ fn check_session(system: &dyn System) -> CheckResult {
 
 // Ported from omnishot/doctor.py (check_config)
 fn check_config(system: &dyn System) -> CheckResult {
-    let needed = [
-        "hypr/hyprland.lua",
-        "hypr/bindings.lua",
-        "omarchy/shell.json",
-    ];
     let config = system.config();
-    let missing: Vec<&str> = needed
-        .into_iter()
-        .filter(|name| !config.join(name).is_file())
-        .collect();
+    let mut missing = Vec::new();
+    if hypr_dir(&config).is_none() {
+        missing.push("hypr/hyprland.lua");
+    }
+    if !shell_settings(&config).is_file() {
+        missing.push("omarchy/shell.json");
+    }
     if !missing.is_empty() {
         return CheckResult::new(
             "config",
@@ -660,13 +685,20 @@ fn check_launcher(system: &dyn System) -> CheckResult {
 
 // Ported from omnishot/doctor.py (check_hyprland_config)
 fn check_hyprland_config(system: &dyn System) -> CheckResult {
-    let hypr_dir = system.config().join("hypr");
-    let bindings = hypr_dir.join("bindings.lua");
-    let hypr = hypr_dir.join("hyprland.lua");
-    let rules = hypr_dir.join("tidyshot.lua");
+    let Some(directory) = hypr_dir(&system.config()) else {
+        return CheckResult::new(
+            "hyprland-config",
+            Status::Warn,
+            "TidyShot keyboard shortcuts and window rules are not installed",
+            format!("Reinstall TidyShot: {}", installer(system)),
+        );
+    };
+    let bindings = directory.join("bindings.lua");
+    let hypr = directory.join("hyprland.lua");
+    let rules = directory.join("tidyshot.lua");
     let mut missing = Vec::new();
     let bindings_text = std::fs::read_to_string(&bindings).unwrap_or_default();
-    if !bindings.is_file() || !bindings_text.contains(BINDINGS_MARKER) {
+    if !bindings_text.contains(BINDINGS_MARKER) {
         missing.push("keyboard shortcuts");
     }
     let hypr_text = std::fs::read_to_string(&hypr).unwrap_or_default();
