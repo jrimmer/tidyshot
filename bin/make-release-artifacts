@@ -17,8 +17,8 @@ bin/build
 task_stage=$(mktemp -d)
 trap 'rm -rf "$task_stage"' EXIT
 mkdir -p "$task_stage/build"
-# A release is exactly these members: setup.sh rejects anything else, so a
-# missing build output fails here rather than shipping an incomplete archive.
+# Pack exactly the members setup.sh consumes. A missing build output fails
+# here instead of shipping an archive that installs without its icon.
 for task_file in build/tidyshot build/generate-icon build/tidyshot.svg; do
   [[ -e $task_file ]] || { echo "bin/build did not produce $task_file" >&2; exit 1; }
   cp -- "$task_file" "$task_stage/$task_file"
