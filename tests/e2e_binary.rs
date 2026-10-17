@@ -221,9 +221,14 @@ impl Background {
 
 impl Drop for Background {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        kill_and_reap(&mut self.child);
     }
+}
+
+/// Kill and reap a child process, tolerating one that has already exited.
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// A GUI process started offscreen that owns the instance socket.
@@ -297,10 +302,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        if self.running() {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
+        kill_and_reap(&mut self.child);
     }
 }
 
@@ -509,8 +511,12 @@ fn the_ocr_capture_reaches_stubbed_slurp_grim_and_ocr() {
         command
     });
 
-    let text = wait_for_marker(&marker, "tesseract", Duration::from_secs(15))
-        .expect("the capture prefix never reached OCR");
+    // Poll for the recognition pass itself, not just the first `tesseract`
+    // line: the OSD script probe (`-l osd --psm 0`) writes a tesseract marker
+    // milliseconds before the `--psm 3` recognition pass, so matching on
+    // "tesseract" would decide on whichever phase the first read landed in.
+    let text = wait_for_marker(&marker, "--psm 3", Duration::from_secs(15))
+        .expect("the capture prefix never reached the OCR recognition pass");
     drop(process);
 
     let slurp = text
@@ -596,7 +602,11 @@ fn a_library_project_is_forwarded_by_the_headless_surface() {
     // unknown payload makes the same server-side router log a rejection,
     // proving the instance runs the router over socket commands; the silent
     // project therefore means it routed cleanly.
-    assert!(send_raw_command(&home, &["frobnicate"]));
+    let written = send_raw_command(&home, &["frobnicate"]);
+    assert!(
+        written,
+        "the raw payload could not be written to the instance socket"
+    );
     let logged = wait_for_marker(&server_stderr, "unknown command", EXIT_TIMEOUT)
         .expect("the server never logged the raw unknown command");
     assert!(
