@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# bin/install — build and install TidyShot as a native Arch package.
+#
+# Runs `makepkg -fsi` in pkgbuild/, which builds the release binary and
+# installs it to /usr/bin/tidyshot together with the desktop entry, MIME
+# definition and theme icon. makepkg handles elevation through its usual
+# prompt (or the caller's sudo); run this as a normal user, never as root.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if (( EUID == 0 )); then
+  printf 'Run bin/install as your desktop user; makepkg refuses to build as root.\n' >&2
+  exit 1
+fi
+if ! command -v makepkg >/dev/null 2>&1; then
+  printf 'makepkg is required. Install base-devel with: omarchy pkg add base-devel\n' >&2
+  exit 1
+fi
+
+cd pkgbuild
+exec makepkg -fsi "$@"

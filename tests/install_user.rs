@@ -52,6 +52,11 @@ impl Home {
             source.join("packaging/tidyshot.xml"),
         )
         .unwrap();
+        fs::copy(
+            repo.join("packaging/tidyshot.svg"),
+            source.join("packaging/tidyshot.svg"),
+        )
+        .unwrap();
         fs::write(source.join("build/tidyshot"), b"binary").unwrap();
 
         let home = base.join("home");
@@ -268,6 +273,16 @@ fn installs_desktop_files_into_xdg_data_home() {
     );
     assert!(home.data.join("mime/packages/tidyshot.xml").is_file());
     assert!(
+        home.data
+            .join("icons/hicolor/scalable/apps/tidyshot.svg")
+            .is_file(),
+        "the theme icon is installed"
+    );
+    let desktop =
+        fs::read_to_string(home.data.join("applications/org.omarchy.TidyShot.desktop")).unwrap();
+    assert!(desktop.contains("Icon=tidyshot"), "{desktop}");
+    assert!(desktop.contains("Actions=Capture;Scroll;History;"));
+    assert!(
         !home.home.join(".local/share").exists(),
         "XDG_DATA_HOME is respected"
     );
@@ -284,6 +299,40 @@ fn installs_desktop_files_into_xdg_data_home() {
         "update-mime-database".to_owned(),
         home.data.join("mime").display().to_string()
     ]));
+}
+
+#[test]
+fn installs_a_theme_set_hook_that_keeps_foreign_lines() {
+    let home = Home::new("iconhook");
+    copy_scripts(&home);
+    let hooks = home.config.join("omarchy/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    fs::write(hooks.join("theme-set"), "#!/bin/sh\necho user-hook\n").unwrap();
+    assert!(home.install().status.success());
+    let hook = fs::read_to_string(hooks.join("theme-set")).unwrap();
+    assert!(
+        hook.contains("# TidyShot theme icon"),
+        "the icon refresh is registered: {hook}"
+    );
+    assert!(hook.contains("generate-icon"), "{hook}");
+    assert!(
+        hook.contains("echo user-hook"),
+        "the user hook survives: {hook}"
+    );
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = fs::metadata(hooks.join("theme-set"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o111, 0o111, "the hook stays executable");
+    // A rerun replaces its own block instead of appending a second one.
+    assert!(home.install().status.success());
+    let rerun = fs::read_to_string(hooks.join("theme-set")).unwrap();
+    assert_eq!(rerun.matches("# TidyShot theme icon").count(), 1, "{rerun}");
+    assert!(home.uninstall().status.success());
+    let after = fs::read_to_string(hooks.join("theme-set")).unwrap();
+    assert!(!after.contains("TidyShot"), "{after}");
+    assert!(after.contains("echo user-hook"), "{after}");
 }
 
 #[test]
@@ -395,6 +444,12 @@ fn uninstall_restores_configuration_and_keeps_captures() {
         !home
             .data
             .join("applications/org.omarchy.TidyShot.desktop")
+            .exists()
+    );
+    assert!(
+        !home
+            .data
+            .join("icons/hicolor/scalable/apps/tidyshot.svg")
             .exists()
     );
     assert!(!home.config.join("hypr/tidyshot.lua").exists());

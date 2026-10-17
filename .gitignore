@@ -15,3 +15,8 @@ Cargo.lock.bak
 /.venv/
 /backups/
 
+# makepkg workspace and package artifacts, built by bin/install.
+/pkgbuild/pkg/
+/pkgbuild/src/
+/pkgbuild/*.pkg.tar.*
+

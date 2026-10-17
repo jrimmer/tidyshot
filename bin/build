@@ -15,5 +15,10 @@ if [ ! -x native/scroll-helper ]; then
     exit 1
 fi
 cp target/release/tidyshot build/tidyshot
+cp target/release/generate-icon build/generate-icon
 cp native/scroll-helper build/native/scroll-helper
+# The icon follows the live theme; regenerate it for the checkout too.
+if [ -n "${HOME:-}" ]; then
+    build/generate-icon build/tidyshot.svg >/dev/null
+fi
 echo "built build/tidyshot"

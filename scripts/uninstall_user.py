@@ -65,10 +65,27 @@ def without_desktop(text):
         out.append(line)
     return "".join(out)
 
+def without_icon_hook(text):
+    lines=text.splitlines(keepends=True);out=[];skip=False
+    for line in lines:
+        if line.rstrip()=="# TidyShot theme icon":skip=True;continue
+        if line.rstrip()=="# End TidyShot theme icon":skip=False;continue
+        if skip:continue
+        out.append(line)
+    return "".join(out)
+
 launcher=home/".local/bin/tidyshot"
 if launcher.is_file() and "build/tidyshot" in launcher.read_text(errors="replace"):remove(launcher)
 remove(data_home/"applications"/desktop_id)
+remove(data_home/"icons/hicolor/scalable/apps/tidyshot.svg")
 remove(data_home/"mime/packages/tidyshot.xml")
+icon_hook=config/"omarchy/hooks/theme-set"
+if icon_hook.exists():
+    rewritten=without_icon_hook(icon_hook.read_text())
+    if rewritten.strip() in ("", "#!/bin/sh"):
+        preserve(icon_hook);icon_hook.unlink()
+    else:
+        rewrite(icon_hook,rewritten)
 mimeapps=config/"mimeapps.list"
 if mimeapps.exists():rewrite(mimeapps,without_desktop(mimeapps.read_text()))
 bindings=config/"hypr/bindings.lua"

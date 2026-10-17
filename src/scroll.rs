@@ -564,6 +564,10 @@ pub fn native_candidates() -> Vec<PathBuf> {
     {
         candidates.push(dir.join("native"));
         candidates.push(dir.to_path_buf());
+        // A system package keeps the helper under the library, not `/usr/bin`.
+        if let Some(prefix) = dir.parent() {
+            candidates.push(prefix.join("lib/tidyshot/native"));
+        }
     }
     candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("native"));
     candidates

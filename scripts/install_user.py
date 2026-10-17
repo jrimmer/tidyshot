@@ -26,11 +26,39 @@ def preserve(path,name=None):
 bin_dir=home/".local/bin";bin_dir.mkdir(parents=True,exist_ok=True)
 launcher=bin_dir/"tidyshot";preserve(launcher)
 launcher.write_text("#!/bin/sh\nexec "+shlex.quote(str(source/"build/tidyshot"))+" \"$@\"\n");launcher.chmod(0o755)
+# The icon is regenerated from the live Omarchy accent; the checked-in SVG is
+# the accent-neutral fallback for a checkout without a built generator.
+icon_dir=data_home/"icons/hicolor/scalable/apps";icon_dir.mkdir(parents=True,exist_ok=True)
+icon=icon_dir/"tidyshot.svg";preserve(icon)
+shutil.copy2(source/"packaging/tidyshot.svg",icon)
+generator=source/"build/generate-icon"
+if generator.is_file():
+    subprocess.run([str(generator),str(icon)],check=False)
 applications=data_home/"applications";applications.mkdir(parents=True,exist_ok=True)
 mime_dir=data_home/"mime";mime_packages=mime_dir/"packages";mime_packages.mkdir(parents=True,exist_ok=True)
 preserve(mime_packages/"tidyshot.xml");shutil.copy2(source/"packaging/tidyshot.xml",mime_packages/"tidyshot.xml")
 desktop=applications/"org.omarchy.TidyShot.desktop";preserve(desktop)
-desktop.write_text('[Desktop Entry]\nType=Application\nName=TidyShot\nComment=Capture, scroll, annotate and record\nExec="'+str(launcher)+'" %u\nIcon=camera-photo\nTerminal=false\nCategories=Graphics;Utility;\nMimeType=image/png;image/jpeg;image/webp;image/heic;image/heif;image/gif;video/mp4;video/webm;video/quicktime;video/x-matroska;application/x-tidyshot;application/x-tidyshot-video;x-scheme-handler/tidyshot;\nActions=Capture;Scroll;History;\n\n[Desktop Action Capture]\nName=Capture\nExec="'+str(launcher)+'" menu\n\n[Desktop Action Scroll]\nName=Scrolling Capture\nExec="'+str(launcher)+'" scroll\n\n[Desktop Action History]\nName=Capture History\nExec="'+str(launcher)+'" history\n')
+desktop.write_text('[Desktop Entry]\nType=Application\nName=TidyShot\nComment=Capture, scroll, annotate and record\nExec="'+str(launcher)+'" %u\nIcon=tidyshot\nTerminal=false\nCategories=Graphics;Utility;\nMimeType=image/png;image/jpeg;image/webp;image/heic;image/heif;image/gif;video/mp4;video/webm;video/quicktime;video/x-matroska;application/x-tidyshot;application/x-tidyshot-video;x-scheme-handler/tidyshot;\nActions=Capture;Scroll;History;\n\n[Desktop Action Capture]\nName=Capture\nExec="'+str(launcher)+'" menu\n\n[Desktop Action Scroll]\nName=Scrolling Capture\nExec="'+str(launcher)+'" scroll\n\n[Desktop Action History]\nName=Capture History\nExec="'+str(launcher)+'" history\n')
+# Omarchy runs executable hooks in $XDG_CONFIG_HOME/omarchy/hooks after the
+# matching event. `theme-set` is the documented extension point for a theme
+# change, so refreshing the icon needs no daemon or polling. A marker block
+# keeps the user's own hook content intact.
+hooks=config/"omarchy/hooks";hooks.mkdir(parents=True,exist_ok=True)
+hook=hooks/"theme-set";preserve(hook)
+icon_marker="# TidyShot theme icon";icon_end="# End TidyShot theme icon"
+def without_icon_hook(text):
+    lines=text.splitlines(keepends=True);out=[];skip=False
+    for line in lines:
+        if line.rstrip()==icon_marker:skip=True;continue
+        if line.rstrip()==icon_end:skip=False;continue
+        if skip:continue
+        out.append(line)
+    return "".join(out)
+# Replace the block on every install so a moved checkout points at its new
+# generator; the user's own hook lines are preserved.
+hook_text=without_icon_hook(hook.read_text()) if hook.exists() else "#!/bin/sh\n"
+hook_text=hook_text.rstrip("\n")+"\n\n"+icon_marker+"\n\""+str(generator)+"\" >/dev/null 2>&1 || true\n"+icon_end+"\n"
+hook.write_text(hook_text);hook.chmod(0o755)
 plugins=config/"omarchy/plugins";plugin=plugins/plugin_id
 # `omarchy plugin add` owns a git checkout here and updates it itself; never
 # write into it. Manual installs get a plain copy with the same layout.

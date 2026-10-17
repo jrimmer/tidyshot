@@ -30,16 +30,29 @@ use crate::storage;
 /// The directory holding the native helper libraries, the source's `native/`.
 ///
 /// Installed builds keep the guard and capture plugins beside the executable;
+/// a system package keeps them under `/usr/lib/tidyshot/native`, and
 /// `TIDYSHOT_NATIVE_DIR` points at them for a source tree or a test.
 #[must_use]
 pub fn native_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("TIDYSHOT_NATIVE_DIR") {
         return PathBuf::from(dir);
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|parent| parent.join("native")))
-        .unwrap_or_else(|| PathBuf::from("native"))
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let beside = dir.join("native");
+        if beside.is_dir() {
+            return beside;
+        }
+        if let Some(prefix) = dir.parent() {
+            let packaged = prefix.join("lib/tidyshot/native");
+            if packaged.is_dir() {
+                return packaged;
+            }
+        }
+        return beside;
+    }
+    PathBuf::from("native")
 }
 
 /// The on-disk layout a recording lives in.

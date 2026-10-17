@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=TidyShot
+Comment=Capture, scroll, annotate and record
+Exec=tidyshot %u
+Icon=tidyshot
+Terminal=false
+Categories=Graphics;Utility;
+MimeType=image/png;image/jpeg;image/webp;image/heic;image/heif;image/gif;video/mp4;video/webm;video/quicktime;video/x-matroska;application/x-tidyshot;application/x-tidyshot-video;x-scheme-handler/tidyshot;
+Actions=Capture;Scroll;History;
+
+[Desktop Action Capture]
+Name=Capture
+Exec=tidyshot menu
+
+[Desktop Action Scroll]
+Name=Scrolling Capture
+Exec=tidyshot scroll
+
+[Desktop Action History]
+Name=Capture History
+Exec=tidyshot history

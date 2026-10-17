@@ -1,0 +1,46 @@
+# Maintainer: TidyShot contributors
+pkgname=tidyshot
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Native screenshots, scrolling capture, annotation, recording and capture history"
+arch=('x86_64' 'aarch64')
+url="https://git.lacy.casa/jrimmer/tidyshot"
+license=('MIT')
+depends=('qt6-declarative' 'qt6-quickcontrols2' 'ffmpeg' 'grim' 'slurp' 'wl-clipboard'
+         'tesseract' 'zbar' 'gpu-screen-recorder' 'libpulse' 'desktop-file-utils'
+         'shared-mime-info' 'xdg-utils' 'libnotify')
+makedepends=('rust' 'cargo' 'wayland' 'wayland-protocols' 'gcc' 'pkgconf')
+options=('!lto')
+source=()
+sha256sums=()
+
+# The PKGBUILD lives in the checkout it packages, so `pkgbuild/..` is the
+# source tree. `makepkg` runs this from the pkgbuild directory.
+_srcdir="$startdir/.."
+_target="${CARGO_TARGET_DIR:-$_srcdir/target}"
+
+prepare() {
+    cd "$_srcdir"
+}
+
+build() {
+    cd "$_srcdir"
+    cargo build --release --offline
+    # The auto-scroll helper is a standalone Wayland program; build it so the
+    # packaged app can advance a page without synthesising key events.
+    bin/native
+}
+
+package() {
+    cd "$_srcdir"
+    install -Dm755 "$_target/release/tidyshot" "$pkgdir/usr/bin/tidyshot"
+    install -Dm644 packaging/tidyshot.desktop \
+        "$pkgdir/usr/share/applications/org.omarchy.TidyShot.desktop"
+    install -Dm644 packaging/tidyshot.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/tidyshot.svg"
+    install -Dm644 packaging/tidyshot.xml \
+        "$pkgdir/usr/share/mime/packages/tidyshot.xml"
+    # The app looks for its native helpers beside the executable.
+    install -Dm755 native/scroll-helper \
+        "$pkgdir/usr/lib/tidyshot/native/scroll-helper"
+}
