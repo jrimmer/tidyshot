@@ -569,7 +569,10 @@ mod tests {
         let dir = scratch("accent");
         let colors = dir.join("colors.toml");
         std::fs::write(&colors, "accent = \"#89b4fa\"\nbackground = \"#1e1e1e\"\n").unwrap();
-        assert_eq!(accent_from(&[colors.clone()]), Some("#89B4FA".to_owned()));
+        assert_eq!(
+            accent_from(std::slice::from_ref(&colors)),
+            Some("#89B4FA".to_owned())
+        );
         // An `accent` under a section is read too.
         std::fs::write(&colors, "[colors]\naccent = \"#ff5b61\"\n").unwrap();
         assert_eq!(accent_from(&[colors]), Some("#FF5B61".to_owned()));
