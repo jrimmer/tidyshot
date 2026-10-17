@@ -66,7 +66,6 @@ impl Home {
         self.run().join("tidyshot")
     }
 
-    /// The instance socket this HOME/XDG pair would create, if present.
     /// A marker file the stub commands append to, so one test can observe
     /// which real capture commands the binary ran, in order.
     fn marker(&self) -> PathBuf {
@@ -243,13 +242,20 @@ impl Server {
     /// pipe buffer to an undrained pipe would block before it served, and a
     /// bounded poll cannot rescue a process stuck on write.
     fn launch(home: &Home) -> Self {
-        let child = home
-            .command()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        Self::launch_with_stderr(home, None)
+    }
+
+    /// Start `tidyshot` with its stderr captured to `path`, so a server-side
+    /// routing decision (an unknown command) is observable without a GUI.
+    fn launch_with_stderr(home: &Home, stderr: Option<&Path>) -> Self {
+        let mut command = home.command();
+        command.stdin(Stdio::null()).stdout(Stdio::null());
+        if let Some(path) = stderr {
+            command.stderr(Stdio::from(fs::File::create(path).unwrap()));
+        } else {
+            command.stderr(Stdio::null());
+        }
+        let child = command.spawn().unwrap();
         Self { child }
     }
 
@@ -350,6 +356,22 @@ fn missing_binary() -> bool {
         eprintln!("skipping e2e: tidyshot binary not built at {BIN}");
         true
     }
+}
+
+/// Send one raw argument vector over the instance socket, bypassing the
+/// sender's CLI validation, so the server-side router's decision is what the
+/// test observes. Returns false when no instance is listening.
+fn send_raw_command(home: &Home, argv: &[&str]) -> bool {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+    let Some(socket) = home.socket() else {
+        return false;
+    };
+    let Ok(mut stream) = UnixStream::connect(&socket) else {
+        return false;
+    };
+    let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_owned()).collect();
+    stream.write_all(&tidyshot::instance::encode(&argv)).is_ok()
 }
 
 #[test]
@@ -501,15 +523,19 @@ fn the_ocr_capture_reaches_stubbed_slurp_grim_and_ocr() {
         .unwrap_or_else(|| panic!("grim did not run; marker was:\n{text}"));
     assert!(slurp < grim, "slurp must select before grim grabs: {text}");
 
-    // The grab used slurp's fixed region and grim's PNG output; tesseract then
-    // read the captured frame. The QML dialog is where a real run continues.
+    // The grab used slurp's fixed region and grim's PNG output; tesseract
+    // then ran its real recognition pass, distinct from the OSD script probe
+    // that uses `-l osd --psm 0`. The QML dialog is where a real run
+    // continues.
     assert!(
         text.contains("grim -g 10,20 100x200 -t png -"),
         "grim did not grab the selected region: {text}"
     );
     assert!(
-        text.contains("tesseract ") && text.contains(" stdout "),
-        "OCR did not run over the captured frame: {text}"
+        text.lines().any(|line| line.starts_with("tesseract ")
+            && line.contains(" stdout ")
+            && line.contains("--psm 3")),
+        "tesseract ran no recognition pass over the captured frame: {text}"
     );
 }
 
@@ -520,7 +546,10 @@ fn the_ocr_capture_reaches_stubbed_slurp_grim_and_ocr() {
 /// is a genuine editable archive. The binary then parses the bare path, sees a
 /// file, routes it to the editor command and forwards it to the running
 /// instance; the sender is headless and its exit code is the observable. The
-/// editor window that would open the project is outside this surface.
+/// server's own stderr records the routing decision it made for the forwarded
+/// payload, which pins that the instance, not just the sender, recognized the
+/// project. The editor window that would open the project is outside this
+/// surface.
 #[test]
 fn a_library_project_is_forwarded_by_the_headless_surface() {
     if missing_binary() {
@@ -543,8 +572,10 @@ fn a_library_project_is_forwarded_by_the_headless_surface() {
     assert!(stderr.contains("unknown command"), "stderr was: {stderr}");
 
     // A real archive is recognized as a local file and delivered to the
-    // running instance; the sender exits 0 and the instance survives.
-    let mut server = Server::launch(&home);
+    // running instance; the sender exits 0 and the instance survives. The
+    // server's stderr log is captured so its side of the routing is visible.
+    let server_stderr = home.root.join("server.stderr");
+    let mut server = Server::launch_with_stderr(&home, Some(&server_stderr));
     wait_for_listening(&home, START_TIMEOUT)
         .expect("the offscreen instance never bound its socket");
     let forwarded = run_bounded(&home, &[&project_arg], EXIT_TIMEOUT);
@@ -558,6 +589,25 @@ fn a_library_project_is_forwarded_by_the_headless_surface() {
         server.running(),
         "the instance stopped on the project command"
     );
+
+    // The forwarded project must be routed to the editor, not merely
+    // accepted. A project command is well understood, so the server stays
+    // silent for it while logging no error that names the project. A raw
+    // unknown payload makes the same server-side router log a rejection,
+    // proving the instance runs the router over socket commands; the silent
+    // project therefore means it routed cleanly.
+    assert!(send_raw_command(&home, &["frobnicate"]));
+    let logged = wait_for_marker(&server_stderr, "unknown command", EXIT_TIMEOUT)
+        .expect("the server never logged the raw unknown command");
+    assert!(
+        logged.contains("frobnicate"),
+        "the raw rejection did not name the command: {logged}"
+    );
+    assert!(
+        !logged.contains(&project_arg),
+        "the server rejected the forwarded project: {logged}"
+    );
+    assert!(server.running(), "the instance stopped on the raw command");
     server.terminate();
 }
 
