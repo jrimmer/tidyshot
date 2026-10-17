@@ -156,8 +156,8 @@ build toolchain. `bash bin/make-release-artifacts` builds the app, packs
 `build/tidyshot`, the icon command, the generated icon and the source commit
 stamp into `dist/tidyshot-<version>-x86_64.tar.gz`, and writes
 `dist/checksums.txt`. The version comes from `manifest.json`. Upload both files
-to the `v<version>` GitHub release named in `manifest.json`; publishing is
-deliberately not part of the script. The auto-scroll helper is never shipped:
+to the matching `v<version>` GitHub release; publishing is deliberately not part
+of the script. The auto-scroll helper is never shipped:
 install.sh builds it against the running compositor's Wayland protocol.
 
 Setup only trusts a download whose checksum matches `checksums.txt`, whose
