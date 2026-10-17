@@ -45,6 +45,9 @@ Omarchy.
   the running app is broken.
 - Offscreen QML tests and a fixed-workload timing harness for the scroll
   stitcher and annotation effects.
+- A native Arch package (`pkgbuild/PKGBUILD`, `bin/install`) that installs the
+  release binary, desktop entry, MIME definition, auto-scroll helper, and a
+  theme-reflective icon generated from the live Omarchy accent.
 
 ### Security
 

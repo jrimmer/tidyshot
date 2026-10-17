@@ -69,6 +69,20 @@ A development checkout uses `bash install.sh` directly. A plugin checkout
 installed with `omarchy plugin add` is built and updated from the bar widget;
 see [Omarchy plugin](#omarchy-plugin).
 
+On Arch, `bash bin/install` builds the same release binary and installs it as a
+native package through `makepkg -fsi`: the binary lands in `/usr/bin/tidyshot`,
+the desktop entry in `/usr/share/applications`, the MIME definition in
+`/usr/share/mime/packages`, the icon in
+`/usr/share/icons/hicolor/scalable/apps`, and the auto-scroll helper in
+`/usr/lib/tidyshot/native`. `bin/install` refuses to run as root, as makepkg
+requires.
+
+The app icon follows the active Omarchy accent. `packaging/tidyshot.svg` is
+the accent-neutral fallback; `generate-icon` reads the accent through the same
+theme parser the UI scale uses and rewrites the SVG, and the user installer
+registers that command as an Omarchy `theme-set` hook so the icon follows a
+theme change without polling.
+
 The launcher is `~/.local/bin/tidyshot`. Capture history, projects and settings
 live under `$XDG_DATA_HOME/tidyshot` (normally `~/.local/share/tidyshot`) and
 are separate from the checkout. The binary is built at
