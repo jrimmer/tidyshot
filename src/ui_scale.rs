@@ -54,6 +54,9 @@ impl fmt::Display for AppearanceError {
 
 impl std::error::Error for AppearanceError {}
 
+/// The built-in accent, used when the theme does not name one.
+pub const DEFAULT_ACCENT: &str = "#FFD60A";
+
 /// The theme file first, then the user override, matching [`paths`].
 #[must_use]
 pub fn paths() -> (PathBuf, PathBuf) {
@@ -324,8 +327,10 @@ impl TomlValue {
 type TomlSections = Vec<(String, Vec<(String, TomlValue)>)>;
 
 fn parse_toml(text: &str) -> Result<TomlSections, AppearanceError> {
-    let mut sections: TomlSections = Vec::new();
-    let mut current: Option<usize> = None;
+    // Values before the first header belong to the unnamed default section,
+    // which is how Omarchy's `colors.toml` stores `accent`.
+    let mut sections: TomlSections = vec![(String::new(), Vec::new())];
+    let mut current: usize = 0;
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -333,7 +338,7 @@ fn parse_toml(text: &str) -> Result<TomlSections, AppearanceError> {
         }
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             sections.push((name.trim().to_owned(), Vec::new()));
-            current = Some(sections.len() - 1);
+            current = sections.len() - 1;
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -341,12 +346,7 @@ fn parse_toml(text: &str) -> Result<TomlSections, AppearanceError> {
                 message: format!("invalid TOML line: {line}"),
             });
         };
-        let Some(index) = current else {
-            return Err(AppearanceError {
-                message: format!("value before any section: {line}"),
-            });
-        };
-        sections[index]
+        sections[current]
             .1
             .push((key.trim().to_owned(), parse_value(value.trim())?));
     }
@@ -388,6 +388,69 @@ fn parse_value(value: &str) -> Result<TomlValue, AppearanceError> {
 pub fn theme_files() -> Vec<PathBuf> {
     let (theme, override_path) = paths();
     vec![theme, override_path]
+}
+
+/// The files that may carry the Omarchy accent, in precedence order.
+///
+/// Omarchy keeps the palette in `colors.toml` beside `shell.toml`; the
+/// override file is last so a user edit wins.
+#[must_use]
+pub fn accent_files() -> Vec<PathBuf> {
+    let (theme, override_path) = paths();
+    let mut files = Vec::new();
+    if let Some(dir) = theme.parent() {
+        files.push(dir.join("colors.toml"));
+    }
+    files.push(theme);
+    files.push(override_path);
+    files
+}
+
+/// The active Omarchy accent as `#RRGGBB`.
+#[must_use]
+pub fn accent() -> String {
+    accent_from(&accent_files()).unwrap_or_else(|| DEFAULT_ACCENT.to_owned())
+}
+
+/// The accent read from an explicit candidate list, for tests.
+///
+/// The last parseable file that names a valid `accent` color wins, so the
+/// user override at the end of [`accent_files`] takes precedence. A
+/// malformed file is skipped so one bad theme cannot hide the next.
+#[must_use]
+pub fn accent_from(files: &[PathBuf]) -> Option<String> {
+    let mut found = None;
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(parsed) = parse_toml(&text) else {
+            continue;
+        };
+        if let Some(value) = accent_value(&parsed) {
+            found = Some(value);
+        }
+    }
+    found
+}
+
+/// Normalize the `accent` key from the parsed sections to `#RRGGBB`.
+fn accent_value(sections: &TomlSections) -> Option<String> {
+    for (name, entries) in sections {
+        if !matches!(name.as_str(), "" | "colors" | "color" | "theme") {
+            continue;
+        }
+        let Some(TomlValue::Text(text)) = get(entries, "accent") else {
+            continue;
+        };
+        if let Some(color) = crate::color::Rgba::from_hex(text) {
+            return Some(format!(
+                "#{:02X}{:02X}{:02X}",
+                color.red, color.green, color.blue
+            ));
+        }
+    }
+    None
 }
 
 /// The `[font] base-size` from a file, used by tests as a tiny parser probe.
@@ -499,6 +562,49 @@ mod tests {
                 "{value} must be false"
             );
         }
+    }
+
+    #[test]
+    fn accent_reads_the_default_section_used_by_omarchy_colors() {
+        let dir = scratch("accent");
+        let colors = dir.join("colors.toml");
+        std::fs::write(&colors, "accent = \"#89b4fa\"\nbackground = \"#1e1e1e\"\n").unwrap();
+        assert_eq!(accent_from(&[colors.clone()]), Some("#89B4FA".to_owned()));
+        // An `accent` under a section is read too.
+        std::fs::write(&colors, "[colors]\naccent = \"#ff5b61\"\n").unwrap();
+        assert_eq!(accent_from(&[colors]), Some("#FF5B61".to_owned()));
+    }
+
+    #[test]
+    fn accent_walks_candidates_and_lets_the_last_one_win() {
+        let dir = scratch("accent-order");
+        let broken = dir.join("broken.toml");
+        let good = dir.join("good.toml");
+        std::fs::write(&broken, "this is not toml\n").unwrap();
+        std::fs::write(&good, "[colors]\naccent = \"#53d49b\"\n").unwrap();
+        assert_eq!(
+            accent_from(&[broken, good.clone()]),
+            Some("#53D49B".to_owned())
+        );
+        let override_file = dir.join("override.toml");
+        std::fs::write(&override_file, "[colors]\naccent = \"#ffffff\"\n").unwrap();
+        assert_eq!(
+            accent_from(&[good, override_file]),
+            Some("#FFFFFF".to_owned())
+        );
+    }
+
+    #[test]
+    fn accent_falls_back_when_no_candidate_names_a_color() {
+        let dir = scratch("accent-missing");
+        let file = dir.join("colors.toml");
+        std::fs::write(&file, "[colors]\naccent = \"not-a-color\"\n").unwrap();
+        assert_eq!(accent_from(&[file]), None);
+        assert_eq!(
+            accent_from(&[dir.join("absent.toml")]),
+            None,
+            "a missing file is skipped"
+        );
     }
 
     #[test]

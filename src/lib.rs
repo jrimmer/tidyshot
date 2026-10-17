@@ -22,6 +22,7 @@ pub mod filenames;
 pub mod geometry;
 pub mod gif;
 pub mod hover_keys;
+pub mod icon;
 pub mod instance;
 pub mod json;
 pub mod media_import;
