@@ -429,6 +429,7 @@ fn check_config(system: &dyn System) -> CheckResult {
     let mut missing = Vec::new();
     if hypr_dir(&config).is_none() {
         missing.push("hypr/hyprland.lua");
+        missing.push("hypr/bindings.lua");
     }
     if !shell_settings(&config).is_file() {
         missing.push("omarchy/shell.json");
