@@ -521,6 +521,61 @@ pub fn target_name(value: &Value, rect: Option<Rect>) -> Result<Option<String>, 
         .and_then(|target| target.name))
 }
 
+/// One capture at a time across every UI entry point.
+///
+/// The GUI reports busy immediately, but two rows pressed in the same event
+/// turn could still start two workers; this gate keeps the second one from
+/// launching a second slurp over the first.
+static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct CaptureGate;
+
+impl CaptureGate {
+    fn enter() -> bool {
+        CAPTURE_ACTIVE
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+}
+
+struct CaptureLease;
+
+impl Drop for CaptureLease {
+    fn drop(&mut self) {
+        CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The worker half of a capture: resolve the active window, then run.
+fn capture_on_worker(
+    mut request: CaptureRequest,
+    rect: Option<Rect>,
+    active: bool,
+    cancel: Arc<AtomicBool>,
+) -> Completion {
+    let runner = crate::commands::SystemRunner;
+    let runtime = CaptureRuntime::new(
+        &runner,
+        MirrorRegistry::global(),
+        crate::recording::native_dir(),
+        crate::settings::data_dir(),
+    );
+    if active && rect.is_none() {
+        match runtime.active_window() {
+            Ok(Some(window)) => request.rect = Some(window.rect),
+            Ok(None) => return Completion::Failed("No focused window to capture".to_owned()),
+            Err(error) => return Completion::Failed(error.to_string()),
+        }
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Completion::Failed(RuntimeError::Cancelled.to_string());
+    }
+    match runtime.run_with_cancel(request, None, || cancel.load(Ordering::SeqCst)) {
+        Ok(result) => Completion::Captured(result),
+        Err(error) => Completion::Failed(error.to_string()),
+    }
+}
+
 // --- QML bridge: the Capture singleton -----------------------------------
 
 #[cxx_qt::bridge]
@@ -805,43 +860,20 @@ impl qobject::Capture {
         let worker_cancel = Arc::clone(&cancel);
         self.as_mut().rust_mut().get_mut().cancel = cancel;
         let qt_thread = self.qt_thread();
-        let active_rect = if active && rect.is_none() {
-            let runner = crate::commands::SystemRunner;
-            CaptureRuntime::new(
-                &runner,
-                MirrorRegistry::global(),
-                crate::recording::native_dir(),
-                crate::settings::data_dir(),
-            )
-            .active_window()
-            .ok()
-            .flatten()
-            .map(|window| window.rect)
-        } else {
-            None
-        };
         self.as_mut().set_busy(true);
         self.as_mut().set_message(QString::from("Capturing…"));
         std::thread::spawn(move || {
-            let runner = crate::commands::SystemRunner;
-            let runtime = CaptureRuntime::new(
-                &runner,
-                MirrorRegistry::global(),
-                crate::recording::native_dir(),
-                crate::settings::data_dir(),
-            );
-            let mut request = request;
-            if let Some(rect) = active_rect {
-                request.rect = Some(rect);
+            if !CaptureGate::enter() {
+                let _ = qt_thread.queue(move |mut qobject| {
+                    qobject
+                        .as_mut()
+                        .fail("A capture is already in progress".to_owned());
+                });
+                return;
             }
-            let result = if worker_cancel.load(Ordering::SeqCst) {
-                Err(RuntimeError::Cancelled)
-            } else {
-                runtime.run_with_cancel(request, None, || worker_cancel.load(Ordering::SeqCst))
-            };
-            let completion = match result {
-                Ok(result) => Completion::Captured(result),
-                Err(error) => Completion::Failed(error.to_string()),
+            let completion = {
+                let _lease = CaptureLease;
+                capture_on_worker(request, rect, active, worker_cancel)
             };
             let _ = qt_thread.queue(move |mut qobject| {
                 qobject.as_mut().apply_completion(completion);
