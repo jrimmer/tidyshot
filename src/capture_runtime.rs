@@ -682,7 +682,7 @@ impl qobject::Capture {
         match id.as_str() {
             "all-in-one" | "select" => self.area(),
             "area" => self.area(),
-            "window" => self.window_active(),
+            "window" => self.open_window_picker(),
             "fullscreen" => self.fullscreen(),
             "desktop" => self.desktop(),
             "previous" => self.previous(),
