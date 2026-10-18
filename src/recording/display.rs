@@ -331,7 +331,7 @@ impl CleanCapture {
             if !native_dir.join(name).is_file() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    "OmniShot's capture components need rebuilding. Run install.sh from the OmniShot folder.",
+                    "TidyShot's capture components need rebuilding. Run bin/build from the TidyShot folder.",
                 ));
             }
         }

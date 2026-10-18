@@ -112,7 +112,7 @@ pub enum CaptureRequestError {
 impl fmt::Display for CaptureRequestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownMode(mode) => write!(f, "Unknown OmniShot capture mode: {mode}"),
+            Self::UnknownMode(mode) => write!(f, "Unknown TidyShot capture mode: {mode}"),
             Self::Compositor(message) => f.write_str(message),
             Self::Geometry(error) => error.fmt(f),
             Self::Delay(delay) => write!(
@@ -284,7 +284,9 @@ impl<R: CommandRunner> CaptureSession<'_, R> {
         if cursor {
             args.push("-c".to_owned());
         }
-        if let Some(output) = output {
+        // grim rejects -g with -o; a region already names its output
+        // implicitly, so the output flag is for full-output grabs only.
+        if let (Some(output), None) = (output, rect) {
             args.push("-o".to_owned());
             args.push(output.to_owned());
         }
@@ -1032,8 +1034,6 @@ mod tests {
                 "-g",
                 "10,20 640x400",
                 "-c",
-                "-o",
-                "DP-1",
                 "-s",
                 "1.5",
                 "-t",
@@ -1624,17 +1624,15 @@ mod tests {
     }
 
     #[test]
-    fn a_rebuildable_mirror_failure_stops_the_selection() {
-        // Missing components or a failed role registration are fatal, not a
-        // silent degrade: a live overlay without the mirror would appear in
-        // its own capture.
+    fn a_missing_mirror_degrades_the_selection() {
+        // TidyShot ships no clean-mirror plugin, so a selection falls back to
+        // the frozen frame instead of refusing to capture.
         let runner = Fake::default();
         let registry = degraded_registry();
-        // No native directory at all triggers MirrorError::Rebuild.
         let missing =
             std::env::temp_dir().join(format!("tidyshot-missing-native-{}", std::process::id()));
-        let error = plan_selection(&registry, &runner, &missing, false).unwrap_err();
-        assert!(matches!(error, CaptureRequestError::Mirror(_)), "{error:?}");
+        let plan = plan_selection(&registry, &runner, &missing, false).unwrap();
+        assert!(!plan.live && !plan.mirror, "{plan:?}");
     }
 
     #[test]

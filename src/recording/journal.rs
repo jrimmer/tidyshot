@@ -298,7 +298,7 @@ fn recover_one<R: crate::commands::CommandRunner>(
         .and_then(|r| r.get("options"))
         .cloned()
         .unwrap_or(Value::Null);
-    let message = "OmniShot closed unexpectedly. The recorded video has been recovered.";
+    let message = "TidyShot closed unexpectedly. The recorded video has been recovered.";
     match recovery::recover(workspace, runner, path, &options, message, true) {
         Ok(Some(saved)) => {
             let mut metadata = workspace.metadata(path);

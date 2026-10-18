@@ -75,11 +75,11 @@ pub struct VideoProject {
 pub fn validate_manifest(manifest: &Value) -> Result<(String, Option<String>), ProjectError> {
     let object = manifest
         .as_object()
-        .ok_or_else(|| ProjectError::new("Unsupported OmniShot video project"))?;
+        .ok_or_else(|| ProjectError::new("Unsupported TidyShot video project"))?;
     if object.get("format").and_then(Value::as_str) != Some("omnishot-video")
         || object.get("version").and_then(Value::as_f64) != Some(1.0)
     {
-        return Err(ProjectError::new("Unsupported OmniShot video project"));
+        return Err(ProjectError::new("Unsupported TidyShot video project"));
     }
     let source = object.get("source").and_then(Value::as_str).unwrap_or("");
     if !valid_source_name(source) {

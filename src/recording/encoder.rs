@@ -66,7 +66,7 @@ impl<'a> RecordGuard<'a> {
                 if err.kind() == io::ErrorKind::NotFound {
                     io::Error::new(
                         io::ErrorKind::NotFound,
-                        "OmniShot's recording components need rebuilding. Run install.sh from the OmniShot folder.",
+                        "TidyShot's recording components need rebuilding. Run bin/build from the TidyShot folder.",
                     )
                 } else {
                     err

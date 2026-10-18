@@ -1183,6 +1183,11 @@ mod tests {
         assert!(!slurp.args.contains(&"-r".to_owned()));
         let grim = seen.iter().find(|spec| spec.program == "grim").unwrap();
         assert!(grim.args.contains(&"10,20 100x200".to_owned()));
+        assert!(
+            !grim.args.contains(&"-o".to_owned()),
+            "a region grab must not also pass -o: {:?}",
+            grim.args
+        );
         assert_eq!(
             history::read(&root)[0].rect,
             Some(Rect::new(10, 20, 100, 200))

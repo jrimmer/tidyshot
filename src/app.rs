@@ -223,7 +223,7 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
             if tab == "cloud" {
                 return Err(RouteError {
                     message:
-                        "Cloud services are excluded from OmniShot. Captures stay on your device."
+                        "Cloud services are excluded from TidyShot. Captures stay on your device."
                             .to_owned(),
                 });
             }

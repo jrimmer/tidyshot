@@ -702,9 +702,10 @@ impl<R: CommandRunner> ScrollCapture for SystemScrollCapture<'_, R> {
 
     fn mirror_start(&self) -> Result<(), String> {
         let mut lease = self.lease.lock().expect("mirror lease poisoned");
-        lease
-            .start(self.runner, &self.native)
-            .map_err(|error| error.to_string())
+        match lease.start(self.runner, &self.native) {
+            Ok(()) | Err(crate::mirror::MirrorError::Unavailable(_)) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     fn mirror_stop(&self) -> Result<(), String> {
@@ -1210,7 +1211,7 @@ mod command_tests {
     /// Without the plugin, a scrolling capture must report the rebuild
     /// instruction rather than pretend the mirror is leased.
     #[test]
-    fn a_missing_mirror_plugin_is_reported() {
+    fn a_missing_mirror_plugin_degrades_instead_of_stopping() {
         let runner = MirrorRunner::new();
         let registry = crate::mirror::MirrorRegistry::new();
         let empty = std::env::temp_dir().join(format!(
@@ -1219,8 +1220,9 @@ mod command_tests {
         ));
         std::fs::create_dir_all(&empty).unwrap();
         let capture = SystemScrollCapture::new(&runner, &registry, empty.clone());
-        let error = capture.mirror_start().unwrap_err();
-        assert!(error.contains("rebuilding"), "{error}");
+        // TidyShot ships no clean-mirror plugin, so scrolling proceeds
+        // unmirrored rather than refusing to capture at all.
+        assert_eq!(capture.mirror_start(), Ok(()));
         let _ = std::fs::remove_dir_all(&empty);
     }
 

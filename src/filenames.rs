@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Datelike as _, Local, TimeZone as _, Timelike as _, Utc};
 
-pub const DEFAULT_FORMAT: &str = "OmniShot %y-%m-%d at %H.%M.%S";
+pub const DEFAULT_FORMAT: &str = "TidyShot %y-%m-%d at %H.%M.%S";
 
 /// A single `%X` token offered to the name customizer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,7 +182,7 @@ pub fn format_name(pattern: &str, options: &NameOptions<'_>) -> String {
     let mut capped = truncate_utf8_bytes(trimmed, 230);
     capped = capped.trim_end_matches([' ', '.']).to_owned();
     if capped.is_empty() {
-        "OmniShot".to_owned()
+        "TidyShot".to_owned()
     } else {
         capped
     }
@@ -350,7 +350,7 @@ mod tests {
         assert!(!result.contains(':'));
         assert!(result.len() <= 230);
 
-        assert_eq!(format_name("..", &NameOptions::default()), "OmniShot");
+        assert_eq!(format_name("..", &NameOptions::default()), "TidyShot");
     }
 
     #[test]

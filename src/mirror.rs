@@ -23,7 +23,7 @@ pub const PLUGIN_NAME: &str = "omnishot-clean-mirror";
 
 /// The rebuild instructions shown when the plugin cannot be made to work.
 pub const REBUILD: &str =
-    "OmniShot's capture components need rebuilding. Run install.sh from the OmniShot folder.";
+    "TidyShot's capture components need rebuilding. Run bin/build from the TidyShot folder.";
 
 /// Hyprland cannot hook functions on this CPU, so the clean mirror cannot load.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,7 +194,14 @@ impl MirrorRegistry {
         }
         let plugin = native.join(MIRROR_PLUGIN);
         if !plugin.is_file() {
-            return Err(MirrorError::Rebuild(REBUILD.to_owned()));
+            // TidyShot has no native clean-mirror build, so an absent plugin
+            // is the normal case: degrade once and cache it, exactly like a
+            // compositor that cannot hook the function.
+            let message =
+                "The clean-capture compositor plugin is not installed; using the plain capture path"
+                    .to_owned();
+            state.unavailable = Some(message.clone());
+            return Err(MirrorError::Unavailable(MirrorUnavailable { message }));
         }
         if !self.loaded(runner)? {
             let path = std::fs::canonicalize(&plugin)
@@ -210,7 +217,7 @@ impl MirrorRegistry {
                     return Err(MirrorError::Rebuild(format!("{REBUILD}\n\n{output}")));
                 }
                 let message = if output.is_empty() {
-                    "The OmniShot compositor plugin could not be loaded".to_owned()
+                    "The TidyShot compositor plugin could not be loaded".to_owned()
                 } else {
                     output
                 };
@@ -572,15 +579,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_components_ask_for_a_rebuild() {
+    fn missing_components_degrade() {
         let dir = tempdir::TempDir::new();
         let registry = MirrorRegistry::new();
         let runner = Fake::new("ok");
         let mut selection = registry.lease(SelectionMirror::new().role());
         let error = selection
             .start(&runner, dir.path())
-            .expect_err("missing plugin must fail");
-        assert!(matches!(error, MirrorError::Rebuild(_)), "{error:?}");
+            .expect_err("missing plugin is reported");
+        assert!(matches!(error, MirrorError::Unavailable(_)), "{error:?}");
         assert!(
             runner.calls().is_empty(),
             "nothing is run when files are missing"
