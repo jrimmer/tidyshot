@@ -198,19 +198,9 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             request.rect = remembered.or_else(|| history::last_area(&self.root));
         }
         let monitors_value = hypr(self.runner, "monitors")?;
-        let monitors: Vec<Value> = monitors_value
-            .as_array()
-            .ok_or_else(|| {
-                RuntimeError::Command(crate::commands::CommandError::Failure {
-                    program: "hyprctl".to_owned(),
-                    output: crate::commands::CommandOutput {
-                        status: 0,
-                        stdout: Vec::new(),
-                        stderr: b"monitors reply was not an array".to_vec(),
-                    },
-                })
-            })?
-            .to_vec();
+        let Some(monitors) = monitors_value.as_array() else {
+            return Err(RuntimeError::NoDisplays);
+        };
         if monitors.is_empty() {
             return Err(RuntimeError::NoDisplays);
         }
@@ -220,14 +210,8 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             native: self.native.clone(),
         };
         loop {
-            let outcome = run_capture(
-                &session,
-                &monitors,
-                &request,
-                self.options,
-                |_| {},
-                || false,
-            )?;
+            let outcome =
+                run_capture(&session, monitors, &request, self.options, |_| {}, || false)?;
             match outcome {
                 CaptureOutcome::NeedsSelection => {
                     let rect = self.select_region(request.mode)?;

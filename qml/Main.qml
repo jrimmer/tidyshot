@@ -14,6 +14,14 @@ ApplicationWindow {
     Material.theme: Material.Dark
     Material.accent: "#FFD60A"
 
+    // Escape cancels a capture that is still choosing an area; the runtime
+    // reports the cancellation on the same message line as a failure.
+    Shortcut {
+        sequences: ["Escape"]
+        enabled: Capture.busy
+        onActivated: Capture.cancel()
+    }
+
     // The bar panel renders the same action table the tray menu and the
     // `tidyshot menu` listing render. Menu is the Rust side of that table;
     // MenuPanel stays free of it so the component lints with QtQuick alone.
