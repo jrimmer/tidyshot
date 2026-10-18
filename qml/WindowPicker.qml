@@ -1,12 +1,11 @@
 // Window picker for a window capture.
 //
-// The visible windows arrive from the Rust `Capture` singleton as parallel
-// `windowLabels` and `windowDetails` lists; this file only lays them out and
-// forwards the chosen row back, so the client geometry never lives in QML.
+// The visible windows arrive as parallel `labels` and `details` lists from the
+// Rust `Capture` singleton; this file only lays them out and forwards the
+// chosen row back, so the client geometry never lives in QML.
 pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
-import tidyshot
 
 Popup {
     id: picker
@@ -15,9 +14,20 @@ Popup {
     focus: true
     width: 460
     height: 420
-    anchors.centerIn: Overlay.Window.contentItem
     closePolicy: Popup.CloseOnEscape
     padding: 0
+
+    /// One line per visible window.
+    property var labels: []
+    /// Monitor, workspace and size for each row.
+    property var details: []
+    /// Shown when no window can be captured.
+    property string emptyText: "No window to capture"
+
+    /// A row was chosen.
+    signal chosen(int index)
+    /// The picker should close without a choice.
+    signal dismissed()
 
     background: Rectangle {
         color: "#242424"
@@ -39,7 +49,7 @@ Popup {
         Label {
             objectName: "pickerMessage"
             width: parent.width
-            text: Capture.windowLabels.length === 0 ? "No window to capture" : ""
+            text: picker.labels.length === 0 ? picker.emptyText : ""
             visible: text !== ""
             color: "#9a9a9a"
             wrapMode: Text.WordWrap
@@ -51,14 +61,14 @@ Popup {
             width: parent.width
             height: parent.height - 70
             clip: true
-            model: Capture.windowLabels
+            model: picker.labels
 
             delegate: ItemDelegate {
                 required property var modelData
                 required property int index
                 width: ListView.view.width
                 text: modelData
-                onClicked: Capture.captureWindow(index)
+                onClicked: picker.chosen(index)
             }
         }
 
@@ -67,10 +77,10 @@ Popup {
             Button {
                 objectName: "cancelPicker"
                 text: "Cancel"
-                onClicked: Capture.closeWindowPicker()
+                onClicked: picker.dismissed()
             }
         }
     }
 
-    onClosed: Capture.closeWindowPicker()
+    onClosed: picker.dismissed()
 }

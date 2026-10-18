@@ -82,8 +82,14 @@ ApplicationWindow {
     // Window picker for a window capture; the client rectangles stay in Rust.
     WindowPicker {
         id: windowPicker
+        anchors.centerIn: parent
+        labels: Capture.windowLabels
+        details: Capture.windowDetails
         visible: Capture.windowPickerOpen
-        onClosed: Capture.closeWindowPicker()
+        onChosen: function (index) {
+            Capture.captureWindow(index)
+        }
+        onDismissed: Capture.closeWindowPicker()
     }
 
     // The tray fallback menu reads the same table through Menu.trayLabels.
