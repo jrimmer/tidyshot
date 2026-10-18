@@ -84,9 +84,12 @@ pub fn run_with(argv: &[String]) {
     cxx_qt::init_crate!(tidyshot);
     cxx_qt::init_qml_module!("tidyshot");
     note_startup_ocr();
-    if let Err(error) = app::route_and_resolve(argv, &commands::SystemRunner) {
-        eprintln!("tidyshot: {error}");
-        std::process::exit(2);
+    match app::route_and_resolve(argv, &commands::SystemRunner) {
+        Ok(command) => capture_runtime::dispatch(command),
+        Err(error) => {
+            eprintln!("tidyshot: {error}");
+            std::process::exit(2);
+        }
     }
     let mut app = cxx_qt_lib::QGuiApplication::new();
     // The icon follows the live theme; refresh the user copy before QML loads
@@ -136,7 +139,7 @@ fn start_instance() {
                     crate::bridge::qobject::tidyshot_request_quit();
                     return false;
                 }
-                Ok(_) => {}
+                Ok(command) => crate::capture_runtime::dispatch(command),
                 Err(error) => eprintln!("tidyshot: {error}"),
             }
             // Keep accepting: only `quit` ends the loop.

@@ -52,6 +52,9 @@ ApplicationWindow {
         onDismissed: Qt.quit()
     }
 
+    // Hand the runtime this object so forwarded and startup commands reach it.
+    Component.onCompleted: Capture.bind()
+
     // The Rust action table emits the activated capture row; the runtime then
     // performs it on a worker thread and reports back through its own signals.
     Connections {

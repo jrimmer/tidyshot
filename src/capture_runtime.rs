@@ -549,7 +549,6 @@ impl Drop for CaptureLease {
 /// The worker half of a capture: resolve the active window, then run.
 fn capture_on_worker(
     mut request: CaptureRequest,
-    rect: Option<Rect>,
     active: bool,
     cancel: Arc<AtomicBool>,
 ) -> Completion {
@@ -560,7 +559,7 @@ fn capture_on_worker(
         crate::recording::native_dir(),
         crate::settings::data_dir(),
     );
-    if active && rect.is_none() {
+    if active && request.rect.is_none() {
         match runtime.active_window() {
             Ok(Some(window)) => request.rect = Some(window.rect),
             Ok(None) => return Completion::Failed("No focused window to capture".to_owned()),
@@ -573,6 +572,31 @@ fn capture_on_worker(
     match runtime.run_with_cancel(request, None, || cancel.load(Ordering::SeqCst)) {
         Ok(result) => Completion::Captured(result),
         Err(error) => Completion::Failed(error.to_string()),
+    }
+}
+
+/// The Qt-side capture object, once QML has created it.
+static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::Capture>> =
+    std::sync::OnceLock::new();
+
+/// Commands that arrived before the capture object existed.
+static PENDING: std::sync::Mutex<Vec<Command>> = std::sync::Mutex::new(Vec::new());
+
+/// Hand a routed command to the GUI, or queue it until the GUI is ready.
+///
+/// The single-instance server runs on a worker thread, so a forwarded capture
+/// is queued onto the Qt event loop rather than touching QML state directly.
+pub fn dispatch(command: Command) {
+    match BOUND.get() {
+        Some(thread) => {
+            let _ = thread.queue(move |mut capture| {
+                capture.as_mut().run_app_command(command);
+            });
+        }
+        None => PENDING
+            .lock()
+            .expect("pending command queue poisoned")
+            .push(command),
     }
 }
 
@@ -650,6 +674,10 @@ pub mod qobject {
         /// Clear the last result path and message.
         #[qinvokable]
         fn clear(self: Pin<&mut Self>);
+
+        /// Register this object for commands forwarded by a running instance.
+        #[qinvokable]
+        fn bind(self: Pin<&mut Self>);
 
         /// Emitted when a capture has been saved.
         #[qsignal]
@@ -825,6 +853,37 @@ impl qobject::Capture {
             .start_request("window", Some(window.rect), true);
     }
 
+    /// Register this object for forwarded commands and run any queued ones.
+    pub fn bind(mut self: Pin<&mut Self>) {
+        let queued = {
+            let mut pending = PENDING.lock().expect("pending command queue poisoned");
+            std::mem::take(&mut *pending)
+        };
+        let _ = BOUND.set(self.qt_thread());
+        for command in queued {
+            self.as_mut().run_app_command(command);
+        }
+    }
+
+    /// Run one routed application command through the runtime worker.
+    fn run_app_command(mut self: Pin<&mut Self>, command: Command) {
+        match command {
+            Command::Capture {
+                command,
+                geometry,
+                delay,
+                ..
+            } => self.as_mut().start_command(
+                CaptureRequest::resolve(&command, geometry.as_deref(), delay, 3),
+                command == "window",
+            ),
+            Command::Menu => {}
+            other => self
+                .as_mut()
+                .fail(format!("{other:?} is not wired to the capture runtime")),
+        }
+    }
+
     /// Clear the last result path and message.
     pub fn clear(mut self: Pin<&mut Self>) {
         self.as_mut().set_path(QString::from(""));
@@ -834,9 +893,26 @@ impl qobject::Capture {
     }
 
     fn start_request(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         command: &'static str,
         rect: Option<Rect>,
+        active: bool,
+    ) {
+        self.start_command(
+            CaptureRequest::resolve(
+                command,
+                rect.map(crate::geometry::geometry_text).as_deref(),
+                None,
+                3,
+            ),
+            active,
+        );
+    }
+
+    /// Start a resolved request, taking over `rect` from the active window.
+    fn start_command(
+        mut self: Pin<&mut Self>,
+        request: Result<CaptureRequest, CaptureRequestError>,
         active: bool,
     ) {
         if *self.busy() {
@@ -847,12 +923,7 @@ impl qobject::Capture {
             self.as_mut().failed_signal(&QString::from(message));
             return;
         }
-        let request = match CaptureRequest::resolve(
-            command,
-            rect.map(crate::geometry::geometry_text).as_deref(),
-            None,
-            3,
-        ) {
+        let request = match request {
             Ok(request) => request,
             Err(error) => {
                 self.as_mut().fail(error.to_string());
@@ -876,7 +947,7 @@ impl qobject::Capture {
             }
             let completion = {
                 let _lease = CaptureLease;
-                capture_on_worker(request, rect, active, worker_cancel)
+                capture_on_worker(request, active, worker_cancel)
             };
             let _ = qt_thread.queue(move |mut qobject| {
                 qobject.as_mut().apply_completion(completion);
