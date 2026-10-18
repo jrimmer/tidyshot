@@ -875,19 +875,19 @@ impl qobject::Capture {
 
     /// Run one routed application command through the runtime worker.
     fn run_app_command(mut self: Pin<&mut Self>, command: Command) {
-        match command {
-            Command::Capture {
-                command,
-                geometry,
-                delay,
-                ..
-            } => self.as_mut().start_command(
+        // Non-capture rows keep their own behaviour; the runtime only owns
+        // the screenshot commands.
+        if let Command::Capture {
+            command,
+            geometry,
+            delay,
+            ..
+        } = command
+        {
+            self.as_mut().start_command(
                 CaptureRequest::resolve(&command, geometry.as_deref(), delay, 3),
                 command == "window",
-            ),
-            // Non-capture rows keep their own behaviour; the runtime only
-            // owns the screenshot commands.
-            _ => {}
+            );
         }
     }
 
