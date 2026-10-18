@@ -45,14 +45,20 @@ ApplicationWindow {
                 menuPanel.tabbed(-1)
         }
         onActivated: function (index) {
-            // The Rust runtime performs the capture for a capture row; other
-            // rows still move the shared cursor and report their own state.
+            // Menu emits rowActivated for a capture row; Main forwards that
+            // signal to the runtime, so the action table owns the dispatch.
             Menu.activateIndex(index)
-            var id = index >= 0 && index < Menu.ids.length ? Menu.ids[index] : ""
-            if (id !== "")
-                Capture.captureRow(id)
         }
         onDismissed: Qt.quit()
+    }
+
+    // The Rust action table emits the activated capture row; the runtime then
+    // performs it on a worker thread and reports back through its own signals.
+    Connections {
+        target: Menu
+        function onRowActivated(id) {
+            Capture.captureRow(id)
+        }
     }
 
     // State line: the current capture message, including an I/O failure.
@@ -107,7 +113,6 @@ ApplicationWindow {
         trayIds: Menu.trayIds
         onActionTriggered: function (id) {
             Menu.activateId(id)
-            Capture.captureRow(id)
         }
     }
 

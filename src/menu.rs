@@ -588,6 +588,11 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "handleKey"]
         fn handle_key(self: Pin<&mut Self>, key: i32) -> QString;
+
+        /// A capture row was activated; the runtime starts its mode.
+        #[qsignal]
+        #[cxx_name = "rowActivated"]
+        fn row_activated(self: Pin<&mut Self>, id: &QString);
     }
 }
 
@@ -659,15 +664,34 @@ impl qobject::Menu {
     }
 
     /// Activate an explicit row; true when the row routed to capture.
-    pub fn activate_index(self: Pin<&mut Self>, index: i32) -> bool {
+    ///
+    /// A capture row emits [`row_activated`](qobject::Menu::row_activated),
+    /// which the window forwards to the capture runtime, so the shared action
+    /// table is what actually starts a capture.
+    pub fn activate_index(mut self: Pin<&mut Self>, index: i32) -> bool {
         let index = index.max(0) as usize;
-        matches!(ACTIONS.get(index).map(invoke), Some(Invocation::Capture(_)))
+        let Some(row) = ACTIONS.get(index) else {
+            return false;
+        };
+        self.as_mut().set_selected_index(index as i32);
+        if matches!(invoke(row), Invocation::Capture(_)) {
+            self.as_mut().row_activated(&QString::from(row.id));
+            true
+        } else {
+            false
+        }
     }
 
     /// Activate a row by id; true when the row routed to capture.
-    pub fn activate_id(self: Pin<&mut Self>, id: &QString) -> bool {
+    pub fn activate_id(mut self: Pin<&mut Self>, id: &QString) -> bool {
         let id = id.to_string();
-        matches!(find(&id).map(invoke), Some(Invocation::Capture(_)))
+        match find(&id) {
+            Some(row) if matches!(invoke(row), Invocation::Capture(_)) => {
+                self.as_mut().row_activated(&QString::from(row.id));
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Apply a Qt key code, moving the cursor and naming the resulting event.
