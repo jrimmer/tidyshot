@@ -9,6 +9,7 @@ fn main() {
             "qml/KeyboardPanel.qml",
             "qml/PanelButton.qml",
             "qml/MenuPanel.qml",
+            "qml/WindowPicker.qml",
             "qml/Overlay.qml",
             "qml/TrayMenu.qml",
             "qml/TextResultDialog.qml",
@@ -22,6 +23,7 @@ fn main() {
     .files([
         "src/bridge.rs",
         "src/menu.rs",
+        "src/capture_runtime.rs",
         "src/qml_load.rs",
         "src/text_result.rs",
     ]);
