@@ -295,7 +295,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
     fn save_frame(&self, frame: &GrabbedFrame) -> Result<CaptureResult, RuntimeError> {
         let (width, height) = crate::annotation::png_dimensions(&frame.png)
             .ok_or_else(|| RuntimeError::Image("the capture was not a PNG image".to_owned()))?;
-        let path = self.capture_path();
+        let path = self.capture_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -359,7 +359,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         }
         let png = canvas.to_png();
         let (width, height) = (canvas.width as u32, canvas.height as u32);
-        let path = self.capture_path();
+        let path = self.capture_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -375,8 +375,16 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
     }
 
     /// Choose a new capture path under the store, never replacing a file.
-    fn capture_path(&self) -> PathBuf {
-        let directory = history::captures_dir(&self.root);
+    ///
+    /// The path is absolute: history and the preview both resolve it later,
+    /// and a relative store would depend on the process working directory.
+    fn capture_path(&self) -> Result<PathBuf, RuntimeError> {
+        let directory = std::fs::create_dir_all(history::captures_dir(&self.root))
+            .map(|()| {
+                std::fs::canonicalize(history::captures_dir(&self.root))
+                    .unwrap_or_else(|_| history::captures_dir(&self.root))
+            })
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
         let pattern = if self.filename_format.is_empty() {
             crate::filenames::DEFAULT_FORMAT
         } else {
@@ -390,7 +398,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             candidate = directory.join(format!("{stem} ({sequence}).png"));
             sequence += 1;
         }
-        candidate
+        Ok(candidate)
     }
 }
 

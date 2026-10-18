@@ -92,7 +92,7 @@ ApplicationWindow {
         visible: Capture.path !== ""
         title: "Capture ready"
         info: Capture.width > 0 ? Capture.width + " × " + Capture.height : ""
-        contentUrl: Capture.path !== "" ? "file://" + Capture.path : ""
+        contentUrl: Capture.path !== "" ? Qt.resolvedUrl("file://" + Capture.path) : ""
         onDismissed: Capture.clear()
     }
 
