@@ -191,9 +191,26 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
     /// chosen area.
     pub fn run(
         &self,
-        mut request: CaptureRequest,
+        request: CaptureRequest,
         remembered: Option<Rect>,
     ) -> Result<CaptureResult, RuntimeError> {
+        self.run_with_cancel(request, remembered, || false)
+    }
+
+    /// Run one request with a cancellation hook.
+    ///
+    /// The hook is polled before every step, so a cancel while the overlay is
+    /// open ends the capture as soon as the selector returns instead of
+    /// saving the pixels it produced.
+    pub fn run_with_cancel<F>(
+        &self,
+        mut request: CaptureRequest,
+        remembered: Option<Rect>,
+        mut should_cancel: F,
+    ) -> Result<CaptureResult, RuntimeError>
+    where
+        F: FnMut() -> bool,
+    {
         if request.mode == crate::capture_session::CaptureMode::Previous && request.rect.is_none() {
             request.rect = remembered.or_else(|| history::last_area(&self.root));
         }
@@ -210,11 +227,23 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             native: self.native.clone(),
         };
         loop {
-            let outcome =
-                run_capture(&session, monitors, &request, self.options, |_| {}, || false)?;
+            if should_cancel() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let outcome = run_capture(
+                &session,
+                monitors,
+                &request,
+                self.options,
+                |_| {},
+                &mut should_cancel,
+            )?;
             match outcome {
                 CaptureOutcome::NeedsSelection => {
                     let rect = self.select_region(request.mode)?;
+                    if should_cancel() {
+                        return Err(RuntimeError::Cancelled);
+                    }
                     request.rect = Some(rect);
                 }
                 CaptureOutcome::Scroll { .. } => {
@@ -808,7 +837,7 @@ impl qobject::Capture {
             let result = if worker_cancel.load(Ordering::SeqCst) {
                 Err(RuntimeError::Cancelled)
             } else {
-                runtime.run(request, None)
+                runtime.run_with_cancel(request, None, || worker_cancel.load(Ordering::SeqCst))
             };
             let completion = match result {
                 Ok(result) => Completion::Captured(result),
@@ -1084,6 +1113,40 @@ mod tests {
             runner.seen().iter().all(|spec| spec.program != "grim"),
             "a cancelled selection must not grab pixels"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cancel_before_the_grab_takes_no_pixels() {
+        let root = scratch("cancel-first");
+        let runner = Fake::new(monitors(), clients(), active());
+        let error = runtime(&runner, &root)
+            .run_with_cancel(request("fullscreen"), None, || true)
+            .unwrap_err();
+        assert!(matches!(error, RuntimeError::Cancelled), "{error}");
+        assert!(
+            runner
+                .seen()
+                .iter()
+                .all(|spec| spec.program != "grim" && spec.program != "slurp"),
+            "a cancelled capture must not reach the selector or grim"
+        );
+        assert!(history::read(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn previous_without_history_reports_that_an_area_is_needed() {
+        let root = scratch("previous-empty");
+        let runner = Fake::new(monitors(), clients(), active());
+        let error = runtime(&runner, &root)
+            .run(request("previous"), None)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Capture an area first"),
+            "{error}"
+        );
+        assert!(history::read(&root).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
