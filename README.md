@@ -205,6 +205,16 @@ Super+Print retains Omarchy's color picker. Change shortcuts in Settings.
 
 ## Capture and annotate
 
+`src/capture_runtime.rs` is the one capture path: it reads the live monitors,
+runs `capture_session::run_capture`, answers a frozen selection with slurp,
+writes the PNG through the atomic store and prepends its history row. The QML
+`Capture` singleton calls it from a worker thread, so the menu, the tray menu,
+a forwarded socket command and a direct `tidyshot area` all reach the same
+grabs, save and history. Saved captures live under `captures/` beside
+`history.json` in the data directory, and the corner preview opens the saved
+file. A window capture offers `hyprctl -j clients` rectangles through
+`qml/WindowPicker.qml`.
+
 1. Press **Super+Shift+Print** and select the scrolling content.
 2. Click **Start Capture**. Scroll manually or choose **Auto-Scroll**.
 3. Click **Done**, then click the corner preview to annotate.
