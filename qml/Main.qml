@@ -89,6 +89,7 @@ ApplicationWindow {
         anchors.left: parent.left
         anchors.bottom: parent.bottom
         anchors.margins: 12
+        height: preview.collapsed ? 52 : 260
         visible: Capture.path !== ""
         title: "Capture ready"
         info: Capture.width > 0 ? Capture.width + " × " + Capture.height : ""

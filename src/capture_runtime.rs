@@ -885,10 +885,9 @@ impl qobject::Capture {
                 CaptureRequest::resolve(&command, geometry.as_deref(), delay, 3),
                 command == "window",
             ),
-            Command::Menu => {}
-            other => self
-                .as_mut()
-                .fail(format!("{other:?} is not wired to the capture runtime")),
+            // Non-capture rows keep their own behaviour; the runtime only
+            // owns the screenshot commands.
+            _ => {}
         }
     }
 
