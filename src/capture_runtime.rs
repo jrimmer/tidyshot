@@ -840,8 +840,11 @@ impl qobject::Capture {
         active: bool,
     ) {
         if *self.busy() {
-            self.as_mut()
-                .fail("A capture is already in progress".to_owned());
+            // The running capture owns the busy flag; report the refusal
+            // without clearing its state.
+            let message = "A capture is already in progress";
+            self.as_mut().set_message(QString::from(message));
+            self.as_mut().failed_signal(&QString::from(message));
             return;
         }
         let request = match CaptureRequest::resolve(
@@ -906,6 +909,8 @@ impl qobject::Capture {
     fn fail(mut self: Pin<&mut Self>, message: String) {
         self.as_mut().set_message(QString::from(message.clone()));
         self.as_mut().set_path(QString::from(""));
+        self.as_mut().set_width(0);
+        self.as_mut().set_height(0);
         self.as_mut().set_busy(false);
         self.as_mut().failed_signal(&QString::from(message));
     }
