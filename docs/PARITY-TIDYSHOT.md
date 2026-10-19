@@ -75,8 +75,8 @@ runtime caller; **Absent** = no implementation.
 |---|---|---|---|
 | Capture | Area, selected window, display/full desktop, previous area, delay | **Partial** | `capture_runtime::CaptureRuntime` runs `area`, `window`, `fullscreen`, `desktop`, `previous`, `timer`; `desktop` composites per-output frames. Delay runs, but `run_with_cancel` passes `on_tick = |_| {}` and no QML countdown exists, so the timer is silent and only polled for cancel between steps. Cursor mirror is best-effort; freeze is hardcoded `true` in the runtime options. |
 | Selection | Crosshair, magnifier, freeze, exact size, aspect ratio, cancel | **Absent** | Selection is slurp (`capture_session::slurp_region`) or nothing. No QML selection surface, magnifier, size/aspect fields, live-vs-frozen switching, or keyboard adjust. Escape in `qml/Main.qml` only cancels a busy capture flag; it does not close a selector. |
-| Scrolling | Select region → Start → manual/auto scroll → Done → preview | **Test only** | `src/scroll.rs` (19 tests), `src/stitch.rs`, `native/scroll-helper` and the `CaptureOutcome::Scroll` state exist, but `capture_runtime::run_with_cancel` returns `RuntimeError::Unsupported("Scrolling capture is not wired yet")`, and `Capture.captureRow` reports the same. No Start/Auto-Scroll/Done UI. |
-| Scrolling directions | Vertical and horizontal, reverse frames, alignment failure | **Test only** | `stitch` and `scroll` tests cover reverse capture, repeated-row rejection and 120 MP cap; no runtime path. |
+| Scrolling | Select region → Start → manual/auto scroll → Done → preview | **Working** | `capture_runtime` runs `CaptureOutcome::Scroll` through `scroll_runtime::drive`: slurp selects the region, `qml/ScrollControls.qml` binds Start, Auto-Scroll, Done, Cancel and the frame count from the `Capture` singleton properties, `SystemScrollCapture` feeds grim PPM frames to the stitcher, and Done saves the composite PNG, its history row (`kind: scroll`) and the preview. `tidyshot scroll` runs the same session headlessly. Stop conditions: four unchanged frames, repeated rows (`Could not align`), the 120 MP cap and cancel. `scroll-done` finishes the open session. |
+| Scrolling directions | Vertical and horizontal, reverse frames, alignment failure | **Working** | `scroll-horizontal` and the controls' horizontal label drive the same session with transposed frames; `stitch` and `scroll` tests still cover reverse capture, repeated-row rejection and the 120 MP cap. |
 | Preview | Corner thumbnail, annotate, copy, save, drag, pin, dismiss/restore | **Partial** | `qml/Overlay.qml` is instantiated in `qml/Main.qml` and shows the saved file, dimensions, collapse/restore and the auto-close timer; only `onDismissed: Capture.clear()` is connected. `copyRequested`, `saveRequested`, `pinRequested`, `activate`, `trashRequested`, `saveAllRequested`, `closeAllRequested` have no handler, so annotate/copy/save/pin/drag/trash do nothing. `src/overlay.rs` (gestures, auto-close, corners, drag rules) is test only. |
 | Overlay preferences | Position, size, autoclose, monitors, gestures, hide | **Test only** | `overlay.rs` implements corner placement, swipe thresholds, auto-close and close-after-drag with 11 tests; no settings are read and no window is positioned by it. `Main.qml` hardcodes a bottom-left overlay. |
 | Annotation | Arrow (4 styles), line, ellipse, rectangle, filled rectangle | **Test only** | `annotation.rs`, `render.rs` and `raster.rs` implement the shapes, handles and arrow geometry with tests. Only `annotation::png_dimensions` is reached at runtime; no editor window or QML toolbar exists. |
@@ -131,10 +131,11 @@ means a production caller and a UI or CLI entry exist.
    `stop`, `scroll-done`, `Command::Ocr` and `Command::Overlay` all reach a dead
    end. This also leaves 14 of 24 menu rows inert and makes the CLI/API surface
    look much larger than the behavior behind it.
-3. **Scrolling capture is unwired.** The stitcher, session state machine,
-   auto-scroll helper and reverse/limit handling are ported and tested, but the
-   runtime returns "not wired yet" and there is no Start/Auto-Scroll/Done UI.
-   This is a headline OmniShot workflow that currently only exists in tests.
+3. **Scrolling capture is reachable but the UI is minimal.** The controls
+   window has Start/Auto-Scroll/Done/Cancel and a frame count, and the CLI runs
+   the same session headlessly; there is no in-place selection overlay, no
+   live preview image in the controls, and the auto-scroll pointer guard only
+   reports when the pointer leaves the area.
 4. **Annotation editor has no window.** `Document`, `render`, `project`,
    `crop`, `backgrounds`, `effects`, `spotlight` and `text_styles` are test
    only; no QML editor/toolbar exists, the preview's `activate` signal is

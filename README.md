@@ -215,6 +215,14 @@ grabs, save and history. Saved captures live under `captures/` beside
 file. A window capture offers `hyprctl -j clients` rectangles through
 `qml/WindowPicker.qml`.
 
+A scrolling capture runs `capture_session::run_capture`'s `Scroll` outcome
+through `scroll_runtime::drive`: slurp selects the region, `qml/ScrollControls.qml`
+drives Start, Auto-Scroll, Done and Cancel over the frame count from the
+`Capture` singleton, grim PPM frames feed `stitch::ScrollStitcher`, and Done
+saves the composite as an ordinary PNG with a `scroll` history row. The same
+session runs headlessly for `tidyshot scroll`, stopping at the end of the
+content, at a repeated row, at the 120 megapixel ceiling or on cancel.
+
 1. Press **Super+Shift+Print** and select the scrolling content.
 2. Click **Start Capture**. Scroll manually or choose **Auto-Scroll**.
 3. Click **Done**, then click the corner preview to annotate.
