@@ -34,6 +34,10 @@ Window {
     property bool canUndo: false
     property bool canRedo: false
     property bool cropActive: false
+    property double cropX: 0
+    property double cropY: 0
+    property double cropW: 0
+    property double cropH: 0
     property bool textActive: false
     property bool hasSelection: false
     property double selectionX: 0
@@ -113,6 +117,10 @@ Window {
             editorWindow.canUndo = EditorApi.canUndo
             editorWindow.canRedo = EditorApi.canRedo
             editorWindow.cropActive = EditorApi.cropActive
+            editorWindow.cropX = EditorApi.cropX
+            editorWindow.cropY = EditorApi.cropY
+            editorWindow.cropW = EditorApi.cropW
+            editorWindow.cropH = EditorApi.cropH
             editorWindow.textActive = EditorApi.textActive
             editorWindow.hasSelection = EditorApi.hasSelection
             editorWindow.selectionX = EditorApi.selectionX
@@ -257,11 +265,27 @@ Window {
                         : ""
             }
 
+            // A released crop stays on screen until Apply or Escape, so the
+            // user can see the region before it changes the canvas.
+            Rectangle {
+                objectName: "cropOverlay"
+                visible: editorWindow.cropActive
+                color: "#33ffd60a"
+                border.color: "#ffd60a"
+                border.width: editorWindow.px(2)
+                x: canvas.x + (canvas.width - canvas.paintedWidth) / 2
+                   + editorWindow.cropX * canvas.paintedWidth / Math.max(1, editorWindow.canvasWidth)
+                y: canvas.y + (canvas.height - canvas.paintedHeight) / 2
+                   + editorWindow.cropY * canvas.paintedHeight / Math.max(1, editorWindow.canvasHeight)
+                width: editorWindow.cropW * canvas.paintedWidth / Math.max(1, editorWindow.canvasWidth)
+                height: editorWindow.cropH * canvas.paintedHeight / Math.max(1, editorWindow.canvasHeight)
+            }
+
             // The provisional shape follows the pointer; the document render
             // only changes when the drag finishes.
             Rectangle {
                 objectName: "provisionalShape"
-                visible: editorWindow.provisional && !editorWindow.cropActive || editorWindow.provisionalKind === "crop"
+                visible: editorWindow.provisional && editorWindow.provisionalKind !== "crop"
                 color: editorWindow.provisionalKind === "crop" ? "#33ffd60a" : "#22000000"
                 border.color: editorWindow.provisionalKind === "crop" ? "#ffd60a" : editorWindow.annotationColor
                 border.width: editorWindow.px(2)

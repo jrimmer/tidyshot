@@ -254,10 +254,14 @@ impl EditorState {
             EditorAction::Undo => self.undo(),
             EditorAction::Redo => self.redo(),
             EditorAction::Save => {
-                let _ = self.save(None);
+                if let Err(error) = self.save(None) {
+                    self.message = error.to_string();
+                }
             }
             EditorAction::Copy => {
-                let _ = self.copy(&SystemRunner);
+                if let Err(error) = self.copy(&SystemRunner) {
+                    self.message = error.to_string();
+                }
             }
             EditorAction::Delete => self.delete_selection(),
             EditorAction::Cancel => {
@@ -397,6 +401,10 @@ pub mod qobject {
         #[qproperty(bool, can_undo, cxx_name = "canUndo")]
         #[qproperty(bool, can_redo, cxx_name = "canRedo")]
         #[qproperty(bool, crop_active, cxx_name = "cropActive")]
+        #[qproperty(f64, crop_x, cxx_name = "cropX")]
+        #[qproperty(f64, crop_y, cxx_name = "cropY")]
+        #[qproperty(f64, crop_w, cxx_name = "cropW")]
+        #[qproperty(f64, crop_h, cxx_name = "cropH")]
         #[qproperty(bool, text_active, cxx_name = "textActive")]
         #[qproperty(bool, has_selection, cxx_name = "hasSelection")]
         #[qproperty(f64, selection_x, cxx_name = "selectionX")]
@@ -564,6 +572,10 @@ pub struct EditorRust {
     can_undo: bool,
     can_redo: bool,
     crop_active: bool,
+    crop_x: f64,
+    crop_y: f64,
+    crop_w: f64,
+    crop_h: f64,
     text_active: bool,
     has_selection: bool,
     selection_x: f64,
@@ -608,6 +620,10 @@ impl Default for EditorRust {
             can_undo: false,
             can_redo: false,
             crop_active: false,
+            crop_x: 0.0,
+            crop_y: 0.0,
+            crop_w: 0.0,
+            crop_h: 0.0,
             text_active: false,
             has_selection: false,
             selection_x: 0.0,
@@ -695,6 +711,12 @@ impl EditorRust {
         self.color = QString::from(crate::color::color_text(interaction.color()));
         self.stroke = interaction.stroke();
         self.crop_active = interaction.crop().is_some();
+        if let Some(rect) = interaction.crop() {
+            self.crop_x = rect.x;
+            self.crop_y = rect.y;
+            self.crop_w = rect.width;
+            self.crop_h = rect.height;
+        }
         self.text_active = interaction.pending_text().is_some();
         if let Some(pending) = interaction.pending_text() {
             self.text_x = pending.annotation.x();
@@ -774,6 +796,10 @@ impl qobject::EditorApi {
                 rust.can_undo,
                 rust.can_redo,
                 rust.crop_active,
+                rust.crop_x,
+                rust.crop_y,
+                rust.crop_w,
+                rust.crop_h,
                 rust.text_active,
                 rust.has_selection,
                 rust.selection_x,
@@ -810,24 +836,28 @@ impl qobject::EditorApi {
         self.as_mut().set_can_undo(snapshot.13);
         self.as_mut().set_can_redo(snapshot.14);
         self.as_mut().set_crop_active(snapshot.15);
-        self.as_mut().set_text_active(snapshot.16);
-        self.as_mut().set_has_selection(snapshot.17);
-        self.as_mut().set_selection_x(snapshot.18);
-        self.as_mut().set_selection_y(snapshot.19);
-        self.as_mut().set_selection_w(snapshot.20);
-        self.as_mut().set_selection_h(snapshot.21);
-        self.as_mut().set_provisional(snapshot.22);
-        self.as_mut().set_provisional_kind(snapshot.23);
-        self.as_mut().set_provisional_x(snapshot.24);
-        self.as_mut().set_provisional_y(snapshot.25);
-        self.as_mut().set_provisional_w(snapshot.26);
-        self.as_mut().set_provisional_h(snapshot.27);
-        self.as_mut().set_text_x(snapshot.28);
-        self.as_mut().set_text_y(snapshot.29);
-        self.as_mut().set_text_w(snapshot.30);
-        self.as_mut().set_text_h(snapshot.31);
-        self.as_mut().set_save_suggestion(snapshot.32);
-        self.as_mut().set_ui_scale(snapshot.33);
+        self.as_mut().set_crop_x(snapshot.16);
+        self.as_mut().set_crop_y(snapshot.17);
+        self.as_mut().set_crop_w(snapshot.18);
+        self.as_mut().set_crop_h(snapshot.19);
+        self.as_mut().set_text_active(snapshot.20);
+        self.as_mut().set_has_selection(snapshot.21);
+        self.as_mut().set_selection_x(snapshot.22);
+        self.as_mut().set_selection_y(snapshot.23);
+        self.as_mut().set_selection_w(snapshot.24);
+        self.as_mut().set_selection_h(snapshot.25);
+        self.as_mut().set_provisional(snapshot.26);
+        self.as_mut().set_provisional_kind(snapshot.27);
+        self.as_mut().set_provisional_x(snapshot.28);
+        self.as_mut().set_provisional_y(snapshot.29);
+        self.as_mut().set_provisional_w(snapshot.30);
+        self.as_mut().set_provisional_h(snapshot.31);
+        self.as_mut().set_text_x(snapshot.32);
+        self.as_mut().set_text_y(snapshot.33);
+        self.as_mut().set_text_w(snapshot.34);
+        self.as_mut().set_text_h(snapshot.35);
+        self.as_mut().set_save_suggestion(snapshot.36);
+        self.as_mut().set_ui_scale(snapshot.37);
     }
 
     /// Register this object and replay a queued open request.
