@@ -15,6 +15,7 @@ use tidyshot::instance::{self, Forwarded, Instance};
 use tidyshot::overlay::{
     Corner, Preview, PreviewSettings, ScreenRect, Swipe, SwipeState, available_actions, is_video,
 };
+use tidyshot::preview::{PreviewWindow, focused_monitor};
 use tidyshot::ui_scale;
 
 fn scratch(name: &str) -> PathBuf {
@@ -265,6 +266,30 @@ fn a_recording_preview_uses_its_first_frame_and_omits_pin() {
     )
     .unwrap_err();
     assert!(!error.to_string().is_empty());
+}
+
+#[test]
+fn the_preview_window_anchors_bottom_right_and_honours_saved_settings() {
+    let monitors = tidyshot::json::parse(
+        r#"[
+            {"name":"left","x":0,"y":0,"width":1920,"height":1080,"focused":false},
+            {"name":"right","x":1920,"y":0,"width":2560,"height":1440,"focused":true}
+        ]"#,
+    )
+    .unwrap();
+    let monitor = focused_monitor(monitors.as_array().unwrap()).expect("a focused monitor");
+    let settings = PreviewSettings {
+        timeout: 3.0,
+        ..PreviewSettings::default()
+    };
+    let preview = PreviewWindow::new("/tmp/capture.png", 640, 480, settings, Some(monitor));
+    // The right monitor runs from 1920 to 4480; a 355 px window with an 18 px
+    // margin ends at 4480 - 18.
+    assert_eq!(preview.position(), (4107.0, 1122.0));
+    assert_eq!(preview.auto_close_ms(), 3000);
+    assert_eq!(preview.auto_close_action(), "close");
+    assert!(preview.closes_after_drag(true, false));
+    assert!(!preview.closes_after_drag(true, true));
 }
 
 #[test]
