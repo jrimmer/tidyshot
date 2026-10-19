@@ -259,12 +259,20 @@ Window {
             // side tests; the text box keeps its own typing because it has
             // focus while it is open.
             Keys.onPressed: function (event) {
-                if (event.text === "")
+                // Ctrl combinations belong to the window shortcuts above, so
+                // they are not handled a second time here.
+                if ((event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) !== 0)
                     return
-                var handled = EditorApi.key(event.text,
-                                            (event.modifiers & Qt.ControlModifier) !== 0,
-                                            (event.modifiers & Qt.ShiftModifier) !== 0)
-                if (handled)
+                // Escape and Ctrl+Enter are window shortcuts, so only the
+                // delete keys are mapped by code here.
+                var key = event.text
+                if (key === "")
+                    key = event.key === Qt.Key_Delete ? "Delete"
+                        : event.key === Qt.Key_Backspace ? "Backspace"
+                        : ""
+                if (key === "")
+                    return
+                if (EditorApi.key(key, false, false))
                     event.accepted = true
             }
             width: parent.width
