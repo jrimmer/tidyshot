@@ -44,6 +44,40 @@ TestCase {
         return findChild(controls, name)
     }
 
+    // Main.qml anchors the panel by one corner inside the window, so the panel
+    // must size itself. A zero height would lay out the buttons outside the
+    // visible area even though every property binding is correct.
+    function test_the_panel_is_tall_enough_for_its_controls() {
+        verify(controls.height > 0, "the controls panel has no height")
+        verify(controls.width > 0)
+        var buttons = ["scrollStart", "scrollAuto", "scrollDone", "scrollCancel"]
+        for (var i = 0; i < buttons.length; ++i) {
+            var control = button(buttons[i])
+            verify(control.y >= 0, buttons[i] + " is above the panel")
+            verify(control.y + control.height <= controls.height,
+                   buttons[i] + " is below the panel")
+            verify(control.visible, buttons[i] + " is hidden")
+        }
+    }
+
+    // The app instantiates the panel the same way Main.qml does: created on
+    // the window's content item with only right and top anchors set.
+    function test_a_corner_anchored_panel_sizes_itself() {
+        var component = Qt.createComponent("../ScrollControls.qml")
+        compare(component.status, Component.Ready)
+        var panel = component.createObject(window.contentItem, {
+            "anchors.right": window.contentItem.right,
+            "anchors.top": window.contentItem.top
+        })
+        verify(panel !== null)
+        compare(panel.width, 420)
+        verify(panel.height > 40, "a corner-anchored panel must not collapse to height zero")
+        var done = findChild(panel, "scrollDone")
+        verify(done !== null)
+        verify(done.y + done.height <= panel.height, "the Done button must sit inside the panel")
+        panel.destroy()
+    }
+
     function test_status_and_frame_count_are_shown() {
         compare(button("scrollStatus").text, "Scroll slowly inside the selection.")
         compare(button("scrollFrames").text, "0 frames")

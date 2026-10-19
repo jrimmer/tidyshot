@@ -32,11 +32,15 @@ Rectangle {
     signal cancelRequested()
 
     width: 420
+    // The panel is anchored by one corner only, so it has to size itself from
+    // its column; without this the buttons would be laid out in zero height.
+    implicitHeight: column.implicitHeight + column.anchors.margins * 2
     color: "#242424"
     radius: 8
     border.color: "#3a3a3a"
 
     Column {
+        id: column
         anchors.fill: parent
         anchors.margins: 10
         spacing: 6
