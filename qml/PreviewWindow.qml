@@ -41,11 +41,13 @@ Window {
     // moving the pointer back to a button.
     Shortcut {
         sequences: ["Return", "Enter"]
+        context: Qt.ApplicationShortcut
         enabled: previewWindow.open
         onActivated: previewWindow.copyRequested()
     }
     Shortcut {
         sequences: ["Escape"]
+        context: Qt.ApplicationShortcut
         enabled: previewWindow.open
         onActivated: previewWindow.dismissed()
     }

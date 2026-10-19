@@ -130,12 +130,21 @@ Rectangle {
             Drag.hotSpot.x: 10
             Drag.hotSpot.y: 10
             Drag.mimeData: { "text/uri-list": preview.contentUrl }
+            // A Wayland receiver can accept a drop while Qt reports a
+            // cancelled drag, so the drop action alone is not definitive.
+            // Every action other than Ignore counts as accepted here.
+            Drag.onDragFinished: function (dropAction) {
+                preview.finishDrag(dropAction !== Qt.IgnoreAction, dragArea.altHeld)
+            }
             MouseArea {
                 id: dragArea
+                property bool altHeld: false
                 anchors.fill: parent
                 drag.target: parent
-                onPressed: preview.beginDrag()
-                onReleased: preview.finishDrag(false, false)
+                onPressed: function (mouse) {
+                    altHeld = (mouse.modifiers & Qt.AltModifier) !== 0
+                    preview.beginDrag()
+                }
                 onClicked: preview.activate()
             }
         }
