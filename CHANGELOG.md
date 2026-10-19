@@ -4,6 +4,18 @@ All notable changes to TidyShot are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The annotate editor window: select, arrow, line, rectangle, ellipse, text,
+  counter, pencil, highlighter, blur, pixelate and crop tools over the existing
+  document, renderer and undo model, with one undo step per drag, Ctrl+Z and
+  Ctrl+Shift+Z, Escape to cancel a provisional crop, atomic Ctrl+S, Ctrl+C of
+  the rendered result, a discard prompt on close and `.omnishot` project
+  open/save. It opens from the preview, `tidyshot open`, annotate links and an
+  after-capture annotate action, and follows the Omarchy text scale.
+
 ## [0.1.1] - 2026-10-17
 
 ### Changed

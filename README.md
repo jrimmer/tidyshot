@@ -293,6 +293,25 @@ The editor is ported from OmniShot's `editor.py`, `annotation_*.py`, `crop.py`,
 projects without an original still open. PNG and ZIP are written and read by
 `src/pngzip.rs` on top of the vendored-free codec in `src/compress.rs`.
 
+`qml/Editor.qml` is the window: the Rust `Editor` singleton owns the document
+and every edit, and the canvas is the rendered document served through the
+`image://tidyshot/canvas` provider, so there is one renderer. The toolbar
+(`qml/EditorToolbar.qml`) arms select, arrow, line, rectangle, ellipse, text,
+counter, pencil, highlighter, blur, pixelate and crop; each drag becomes one
+document change and one undo step. Ctrl+Z and Ctrl+Shift+Z undo and redo,
+Escape drops a provisional crop or a drag without changing the image, Ctrl+S
+saves atomically and Ctrl+C copies the rendered result. Saving a path ending
+in `.omnishot` keeps the project editable; any other path flattens to PNG and
+the copy/export path never modifies the opened file until Save is pressed. A
+close with unsaved annotations asks before discarding.
+
+The window opens from the preview's Annotate button, `tidyshot open <file>`
+(a path-less `tidyshot open` shows a file chooser), `cleanshot://open-annotate`
+links, and after a capture with `--action annotate`. A command-line open starts
+only the editor and closing it ends the process. Layout measurements follow the
+Omarchy text scale (`Editor.uiScale` comes from `src/ui_scale.rs`), so a theme
+change reflows the chrome without resampling the captured pixels.
+
 ## Video studio
 
 The recording editor is ported from OmniShot's `video_*.py`, `studio.py`,
@@ -316,14 +335,16 @@ plugin contract, `tests/setup_scripts.rs` drives `setup.sh`/`uninstall.sh`
 against a throwaway HOME with stubbed desktop commands, and
 `tests/install_user.rs` covers the user-level installer in an isolated home.
 `tests/editor_port.rs` drives the annotate editor document, project file,
-clipboard and renderer. `tests/video_studio.rs` drives the video decoder
+clipboard and renderer; `tests/editor_window.rs` drives the editor window's
+open, undo, save, copy and key paths. `tests/video_studio.rs` drives the video decoder
 policy, timeline persistence, motion blur and export planning.
 `tests/app_surface.rs` asserts every documented CLI subcommand and URL
 parameter still routes, and covers the single-instance socket, UI scale,
 preview and clipboard rules. `qml/tests/tst_overlay.qml` drives the corner
 preview overlay with synthetic events offscreen, and
 `qml/tests/tst_preview_window.qml` drives the frameless preview window, its
-key bindings and its action forwarding.
+key bindings and its action forwarding, and
+`qml/tests/tst_editor_toolbar.qml` drives the editor toolbar.
 
 ## License
 

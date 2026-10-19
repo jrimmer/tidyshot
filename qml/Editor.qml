@@ -81,7 +81,10 @@ Window {
             Math.max(0, Math.min(editorWindow.canvasHeight, (y - top) * editorWindow.canvasHeight / h)))
     }
 
-    Component.onCompleted: EditorApi.bind()
+    Component.onCompleted: {
+        EditorApi.bind()
+        canvasFrame.forceActiveFocus()
+    }
 
     // cxx-qt singleton notifications do not reach QML bindings here, so the
     // window is fed from the singleton on a short timer.
@@ -226,6 +229,18 @@ Window {
 
         Item {
             id: canvasFrame
+            // Plain letters arm their tool through the same key map the Rust
+            // side tests; the text box keeps its own typing because it has
+            // focus while it is open.
+            Keys.onPressed: function (event) {
+                if (event.text === "")
+                    return
+                var handled = EditorApi.key(event.text,
+                                            (event.modifiers & Qt.ControlModifier) !== 0,
+                                            (event.modifiers & Qt.ShiftModifier) !== 0)
+                if (handled)
+                    event.accepted = true
+            }
             width: parent.width
             height: parent.height - toolbar.height - statusLabel.height - editorWindow.px(24)
             clip: true

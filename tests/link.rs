@@ -32,6 +32,11 @@ fn main_qml_loads_offscreen() {
     let roots = tidyshot::qml_load::root_count("qrc:/qt/qml/tidyshot/qml/Main.qml");
     assert_eq!(roots, 1, "Main.qml should produce exactly one root object");
 
+    // The editor window loads too, so a toolbar or singleton failure is a
+    // load assertion instead of a silent missing window.
+    let editor = tidyshot::qml_load::root_count("qrc:/qt/qml/tidyshot/qml/Editor.qml");
+    assert_eq!(editor, 1, "Editor.qml should produce one root window");
+
     // A missing document yields no root objects, so the count above is the
     // document loading and not a constant.
     let missing = tidyshot::qml_load::root_count("qrc:/qt/qml/tidyshot/qml/Missing.qml");
