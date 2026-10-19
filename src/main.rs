@@ -95,6 +95,26 @@ where
 {
     if forward(args) { Some(0) } else { None }
 }
+/// Run one capture before the GUI starts.
+///
+/// The CLI capture keeps its synchronous save and printed path, then hands
+/// the result to the window, so the process stays alive with the corner
+/// preview instead of exiting before the user can act on the capture.
+fn capture_before_gui(
+    args: &[String],
+) -> Option<Result<tidyshot::capture_runtime::CaptureResult, i32>> {
+    let command = tidyshot::app::route_and_resolve(args, &tidyshot::commands::SystemRunner).ok()?;
+    match &command {
+        tidyshot::app::Command::Capture { command: name, .. } if name != "ocr" => Some(
+            tidyshot::capture_runtime::execute(&command).map_err(|error| {
+                eprintln!("tidyshot: {error}");
+                1
+            }),
+        ),
+        _ => None,
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = run_subcommand(&args) {
@@ -113,12 +133,23 @@ fn main() {
     if let Some(code) = delivered {
         std::process::exit(code);
     }
-    // A capture starts the window rather than saving and exiting, so its
-    // corner preview can offer copy, save, annotate, pin and drag.
+    // A capture that never reaches a window saves here, prints its path and
+    // is then replayed as the startup preview. The GUI still starts, so the
+    // preview can offer copy, save, annotate, pin, drag and close.
+    let mut startup_argv = args.clone();
+    match capture_before_gui(&args) {
+        Some(Ok(result)) => {
+            println!("{}", result.path.display());
+            tidyshot::preview::set_startup_preview(result);
+            startup_argv.clear();
+        }
+        Some(Err(code)) => std::process::exit(code),
+        None => {}
+    }
     // Qt reads its hardware-decoding variable when the media backend starts,
     // so the preview policy is applied before the GUI constructs QGuiApplication.
     tidyshot::video_decoder::configure_preview_decoder(&tidyshot::settings::stored_settings());
-    tidyshot::run();
+    tidyshot::run_with(&startup_argv);
 }
 
 #[cfg(test)]
@@ -228,5 +259,18 @@ mod tests {
     #[test]
     fn without_an_instance_the_sender_starts_the_gui() {
         assert_eq!(hand_off(&["area".to_owned()], |_| false), None);
+    }
+
+    #[test]
+    fn only_a_capture_runs_before_the_gui() {
+        for command in ["menu", "history", "settings", "quit"] {
+            assert!(
+                super::capture_before_gui(&[command.to_owned()]).is_none(),
+                "{command}"
+            );
+        }
+        // A capture is executed by the CLI and replayed in the preview; the
+        // result is what keeps the process alive instead of exiting.
+        assert!(super::capture_before_gui(&["area".to_owned()]).is_some());
     }
 }

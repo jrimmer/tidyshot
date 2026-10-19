@@ -425,11 +425,21 @@ pub fn execute(command: &Command) -> Result<CaptureResult, RuntimeError> {
         crate::recording::native_dir(),
         crate::settings::data_dir(),
     );
-    runtime.run_command(command).unwrap_or_else(|| {
+    let mut result = runtime.run_command(command).unwrap_or_else(|| {
         Err(RuntimeError::Unsupported(
             "not a capture command".to_owned(),
         ))
-    })
+    })?;
+    // The preview anchors to the focused monitor after the grab, so a
+    // height change while capturing is reflected in the window position.
+    result.screen = crate::commands::hypr(&runner, "monitors")
+        .ok()
+        .and_then(|value| {
+            value
+                .as_array()
+                .and_then(crate::preview::focused_monitor_screen)
+        });
+    Ok(result)
 }
 
 /// Run a capture command and save it, reporting the result on stdout.
