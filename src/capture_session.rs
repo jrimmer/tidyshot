@@ -1030,16 +1030,7 @@ mod tests {
         let grim = seen.iter().find(|spec| spec.program == "grim").unwrap();
         assert_eq!(
             grim.args,
-            [
-                "-g",
-                "10,20 640x400",
-                "-c",
-                "-s",
-                "1.5",
-                "-t",
-                "png",
-                "-"
-            ]
+            ["-g", "10,20 640x400", "-c", "-s", "1.5", "-t", "png", "-"]
         );
         assert_eq!(grim.timeout, Some(Duration::from_secs(15)));
     }

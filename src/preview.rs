@@ -524,7 +524,7 @@ impl PreviewRust {
         let settings = crate::settings::preview_settings();
         let monitor = published.screen.map(MonitorScreen::new);
         let window = PreviewWindow::new(
-            published.path,
+            &published.path,
             published.width,
             published.height,
             settings,
