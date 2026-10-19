@@ -1278,7 +1278,7 @@ mod tests {
         assert!(
             rust.message.to_string().contains("Save or discard"),
             "message was {}",
-            rust.message.to_string()
+            rust.message
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
