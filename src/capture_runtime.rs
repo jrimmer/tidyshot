@@ -1095,7 +1095,9 @@ impl qobject::Capture {
         let cancel = Arc::new(AtomicBool::new(false));
         self.as_mut().rust_mut().get_mut().scroll = Some(control.clone());
         self.as_mut().rust_mut().get_mut().cancel = Arc::clone(&cancel);
-        self.as_mut().set_scroll_open(true);
+        // The controls wait until the worker has a region; showing them over
+        // an open slurp selector would put them in the selection.
+        self.as_mut().set_scroll_open(false);
         self.as_mut()
             .set_scroll_status(QString::from("Choose an area to scroll"));
         self.as_mut().set_scroll_frames(0);
