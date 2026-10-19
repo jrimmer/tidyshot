@@ -31,6 +31,8 @@ Window {
     signal saveRequested()
     signal pinRequested()
     signal dismissed()
+    /// The body was collapsed or restored; the Rust side adjusts the anchor.
+    signal collapseRequested(bool collapsed)
 
     width: 355
     height: 300
@@ -69,6 +71,13 @@ Window {
         onSaveRequested: previewWindow.saveRequested()
         onPinRequested: previewWindow.pinRequested()
         onDismissed: previewWindow.dismissed()
+    }
+
+    Connections {
+        target: overlay
+        function onCollapsedChanged() {
+            previewWindow.collapseRequested(overlay.collapsed)
+        }
     }
 
     Text {

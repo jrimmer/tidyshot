@@ -112,6 +112,9 @@ ApplicationWindow {
         onSaveRequested: Preview.save()
         onPinRequested: Preview.pin()
         onDismissed: Preview.dismiss()
+        onCollapseRequested: function (collapsed) {
+            Preview.collapseTo(collapsed)
+        }
     }
 
     // A command-line capture has no menu window behind it; once its preview
