@@ -301,12 +301,18 @@ pub fn save_capture(path: &Path) -> Result<(), PreviewError> {
 
 /// Open the annotate editor on a capture.
 ///
-/// The editor loads the file itself, so this only checks that it can be
-/// opened before handing the path to the editor window.
+/// The editor decodes the file itself, so this only checks that it still
+/// exists before handing the path over; a malformed file is reported by the
+/// editor window instead of being decoded twice here.
 pub fn annotate_capture(path: &Path) -> Result<(), PreviewError> {
-    crate::editor_ui::load_document(path)
-        .map(|_| ())
-        .map_err(|error| PreviewError::Image(error.message().to_owned()))
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(PreviewError::Io(format!(
+            "the capture is no longer available: {}",
+            path.display()
+        )))
+    }
 }
 
 /// Pin a capture using the pin module's starting geometry.
