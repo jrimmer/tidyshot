@@ -116,12 +116,20 @@ fn capture_before_gui(
 }
 
 /// Whether a capture command asks for the editor after it saves.
+///
+/// This reads the parsed action rather than routing again, so the coordinate
+/// links are not resolved against the compositor twice.
 fn wants_annotate(args: &[String]) -> bool {
-    matches!(
-        tidyshot::app::route_and_resolve(args, &tidyshot::commands::SystemRunner),
-        Ok(tidyshot::app::Command::Capture { action: Some(ref action), .. })
-            if action == "annotate"
-    )
+    tidyshot::cli::parse_args(args.iter().map(String::as_str))
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .action
+                .clone()
+                .or_else(|| parsed.url.as_ref().and_then(|url| url.action.clone()))
+        })
+        .as_deref()
+        == Some("annotate")
 }
 
 /// Whether a routed command is a capture the CLI runs itself.
