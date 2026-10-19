@@ -236,12 +236,29 @@ the socket, so they work when the display or the running app is broken.
 
 ## Quick Access preview
 
-The corner preview overlay is `qml/Overlay.qml` for layout and `src/overlay.rs`
-for behavior: auto-close and the save-on-timeout action, dismiss and restore,
-pin, and drag-out with the close-after-drag and Alt-to-keep rules. `src/drag.rs`
-tracks definitive Wayland drag completion through a `drag-status` preload when
-one is present, and falls back to Qt's own action otherwise. `src/ui_scale.rs`
-reflows UI measurements to the Omarchy theme without touching captured pixels.
+After every capture a frameless, always-on-top preview window
+(`qml/PreviewWindow.qml`) opens in the bottom-right corner of the focused
+monitor. It reuses `qml/Overlay.qml` for its body, so the preview shows the
+saved image or the recording's first frame with Copy, Save, Annotate/Edit,
+Pin, drag-out and close. Enter copies and Escape closes; the action results and
+any I/O failure appear on the window.
+
+`src/preview.rs` owns the window: it resolves the focused monitor with
+`hyprctl -j monitors`, computes the anchor through `src/overlay.rs`, reads the
+Quick Access settings (`preview_timeout` or the grouped `quick_access` object,
+`preview_action`, `preview_corner`, `close_after_drag`) and performs the
+actions through the existing clipboard, storage, annotator and pin modules. A
+`tidyshot area` invocation saves, prints the path and then starts the preview
+instead of exiting, so the capture can still be acted on; closing that preview
+ends the process. `qml/Main.qml` keeps the menu window hidden for a
+command-line capture and shows it only for an interactive menu session.
+
+`src/overlay.rs` owns the preview behavior: auto-close and the
+save-on-timeout action, dismiss and restore, pin, and drag-out with the
+close-after-drag and Alt-to-keep rules. `src/drag.rs` tracks definitive Wayland
+drag completion through a `drag-status` preload when one is present, and falls
+back to Qt's own action otherwise. `src/ui_scale.rs` reflows UI measurements to
+the Omarchy theme without touching captured pixels.
 
 `cargo run --release --bin bench [reps]` is a fixed-workload timing harness for
 the scroll stitcher and the annotation effects. It is not a gate; the unit
@@ -289,7 +306,9 @@ policy, timeline persistence, motion blur and export planning.
 `tests/app_surface.rs` asserts every documented CLI subcommand and URL
 parameter still routes, and covers the single-instance socket, UI scale,
 preview and clipboard rules. `qml/tests/tst_overlay.qml` drives the corner
-preview overlay with synthetic events offscreen.
+preview overlay with synthetic events offscreen, and
+`qml/tests/tst_preview_window.qml` drives the frameless preview window, its
+key bindings and its action forwarding.
 
 ## License
 
