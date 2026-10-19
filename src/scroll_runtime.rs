@@ -378,6 +378,9 @@ pub fn drive<'a>(
         }
         let result = session.run_job(job);
         let changed = result.as_ref().ok().map(|(changed, _)| *changed);
+        let unalignable = result
+            .as_ref()
+            .is_ok_and(|(_, message)| message.starts_with("Could not align"));
         let completed = session.complete(job, result);
         panel.publish(&snapshot(session, controls_visible));
         if let Some(frame) = completed {
@@ -396,6 +399,15 @@ pub fn drive<'a>(
         }
         if !headless {
             continue;
+        }
+        if unalignable {
+            // A headless capture cannot be nudged back into alignment, so the
+            // rows already stitched are the result.
+            let outcome = finish(session);
+            if !deferred(&outcome) {
+                panel.publish(&snapshot(session, controls_visible));
+                return outcome;
+            }
         }
         match changed {
             Some(true) => idle = 0,
@@ -684,6 +696,39 @@ mod tests {
             }
         }
         data
+    }
+
+    #[test]
+    fn a_headless_capture_stops_on_an_unalignable_frame() {
+        let width = 600;
+        let height = 600;
+        let first = page(height * 2, width);
+        let first = FrameData::new(first[..height * width * 3].to_vec(), width, height, 3);
+        // Unrelated noise cannot be matched, so the capture must stop with the
+        // first frame instead of grabbing forever.
+        let mut state: u64 = 99;
+        let mut noise = vec![0u8; width * height * 3];
+        for byte in &mut noise {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *byte = (state >> 33) as u8;
+        }
+        let noise = FrameData::new(noise, width, height, 3);
+        let frames = vec![first.clone(), noise];
+        let mut session = session(frames, Rect::new(0, 0, width as i32, height as i32), false);
+        let (mut panel, _published) = recorder();
+        let outcome = drive(
+            &mut session,
+            &mut panel,
+            DriveMode::Headless { autoscroll: true },
+            &mut || false,
+        );
+        let DriveOutcome::Finished(image) = outcome else {
+            panic!("expected the first frame, got {outcome:?}");
+        };
+        assert_eq!(image.data, first.data);
+        assert_eq!(session.stitcher().accepted(), 1);
     }
 
     #[test]
