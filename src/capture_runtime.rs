@@ -1524,6 +1524,13 @@ mod tests {
                     stderr: Vec::new(),
                 });
             }
+            if spec.program.ends_with("scroll-helper") {
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
             let mut results = self.results.lock().unwrap();
             let position = results
                 .iter()
@@ -1576,6 +1583,15 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         for name in [crate::mirror::MIRROR_PLUGIN, crate::mirror::CAPTURE_PLUGIN] {
             std::fs::write(path.join(name), b"plugin").unwrap();
+        }
+        // The auto-scroll helper is a built native binary, not a tracked file,
+        // so a test supplies a stand-in that the fake runner answers.
+        let helper = path.join("scroll-helper");
+        std::fs::write(&helper, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         path
     }

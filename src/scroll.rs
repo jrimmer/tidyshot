@@ -559,6 +559,9 @@ pub struct SystemScrollInput<'a, R: CommandRunner> {
 #[must_use]
 pub fn native_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+    if let Some(dir) = std::env::var_os("TIDYSHOT_NATIVE_DIR") {
+        candidates.push(PathBuf::from(dir));
+    }
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {

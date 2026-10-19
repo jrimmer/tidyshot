@@ -97,6 +97,13 @@ impl Home {
         let native = self.native_dir();
         fs::create_dir_all(&native).unwrap();
         fs::write(native.join("clean-mirror.so"), b"plugin").unwrap();
+        // Auto-scroll needs the standalone helper; the scroll flow only checks
+        // that it can run, so a stub that records its argv is enough.
+        write_stub(
+            &native,
+            "scroll-helper",
+            "echo \"scroll-helper $*\" >> \"$TIDYSHOT_E2E_MARKER\"",
+        );
 
         write_stub(
             &bin,
