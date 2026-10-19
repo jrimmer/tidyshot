@@ -115,6 +115,15 @@ fn capture_before_gui(
     )
 }
 
+/// Whether a capture command asks for the editor after it saves.
+fn wants_annotate(args: &[String]) -> bool {
+    matches!(
+        tidyshot::app::route_and_resolve(args, &tidyshot::commands::SystemRunner),
+        Ok(tidyshot::app::Command::Capture { action: Some(ref action), .. })
+            if action == "annotate"
+    )
+}
+
 /// Whether a routed command is a capture the CLI runs itself.
 ///
 /// Interactive OCR stays with the GUI because its review dialog presents the
@@ -151,6 +160,11 @@ fn main() {
     match capture_before_gui(&args) {
         Some(Ok(result)) => {
             println!("{}", result.path.display());
+            // An after-capture annotate action from a shortcut or URL opens the
+            // editor on the saved file once the GUI exists.
+            if wants_annotate(&args) {
+                tidyshot::editor_window::publish_open(result.path.clone());
+            }
             tidyshot::preview::set_startup_preview(result);
             startup_argv.clear();
         }

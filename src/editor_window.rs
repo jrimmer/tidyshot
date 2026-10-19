@@ -47,9 +47,32 @@ impl std::error::Error for EditorWindowError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenRequest {
     /// A file or project to open.
-    Path(PathBuf),
+    Path {
+        path: PathBuf,
+        /// True when this was the command-line request, so the editor is the
+        /// only window and closing it ends the process.
+        standalone: bool,
+    },
     /// No path: the window asks the user for one.
-    Chooser,
+    Chooser { standalone: bool },
+}
+
+impl OpenRequest {
+    /// A file requested by the preview or an after-capture action.
+    #[must_use]
+    pub fn open(path: PathBuf) -> Self {
+        Self::Path {
+            path,
+            standalone: false,
+        }
+    }
+
+    #[must_use]
+    pub fn standalone(&self) -> bool {
+        match self {
+            Self::Path { standalone, .. } | Self::Chooser { standalone } => *standalone,
+        }
+    }
 }
 
 /// The editor state QML renders.
@@ -95,6 +118,11 @@ impl EditorState {
     #[must_use]
     pub fn document(&self) -> Option<&Document> {
         self.document.as_ref()
+    }
+
+    /// The document for an interaction the caller drives directly.
+    pub fn document_mut(&mut self) -> &mut Document {
+        self.document.as_mut().expect("a document is open")
     }
 
     #[must_use]
@@ -306,13 +334,21 @@ static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::EditorApi>> =
     std::sync::OnceLock::new();
 
 /// Ask the running editor (or the next one) to open a file.
+///
+/// A request that arrives before QML binds came from the command line, so the
+/// editor is the only window and closing it ends the process.
 pub fn publish_open(path: PathBuf) {
-    publish(OpenRequest::Path(path));
+    publish(OpenRequest::Path {
+        path,
+        standalone: BOUND.get().is_none(),
+    });
 }
 
 /// Ask the editor to show its file chooser.
 pub fn publish_chooser() {
-    publish(OpenRequest::Chooser);
+    publish(OpenRequest::Chooser {
+        standalone: BOUND.get().is_none(),
+    });
 }
 
 fn publish(request: OpenRequest) {
@@ -343,6 +379,7 @@ pub mod qobject {
         #[qml_element]
         #[qml_singleton]
         #[qproperty(bool, open)]
+        #[qproperty(bool, standalone)]
         #[qproperty(bool, chooser_open, cxx_name = "chooserOpen")]
         #[qproperty(QString, title)]
         #[qproperty(QString, path)]
@@ -509,6 +546,7 @@ use cxx_qt_lib::{QString, QStringList};
 /// Rust state behind the QML `Editor` singleton.
 pub struct EditorRust {
     open: bool,
+    standalone: bool,
     chooser_open: bool,
     title: QString,
     path: QString,
@@ -552,6 +590,7 @@ impl Default for EditorRust {
     fn default() -> Self {
         let mut rust = Self {
             open: false,
+            standalone: false,
             chooser_open: false,
             title: QString::from("TidyShot Editor"),
             path: QString::from(""),
@@ -616,8 +655,9 @@ fn strings(values: Vec<String>) -> QStringList {
 }
 
 fn apply_request(rust: &mut EditorRust, request: OpenRequest) {
+    rust.standalone = request.standalone();
     match request {
-        OpenRequest::Path(path) => match rust.state.open(&path) {
+        OpenRequest::Path { path, .. } => match rust.state.open(&path) {
             Ok(()) => {
                 rust.open = true;
                 rust.chooser_open = false;
@@ -627,7 +667,7 @@ fn apply_request(rust: &mut EditorRust, request: OpenRequest) {
                 rust.message = QString::from(error.to_string());
             }
         },
-        OpenRequest::Chooser => {
+        OpenRequest::Chooser { .. } => {
             rust.open = true;
             rust.chooser_open = true;
         }
@@ -719,6 +759,7 @@ impl qobject::EditorApi {
             rust.publish_image();
             (
                 rust.open,
+                rust.standalone,
                 rust.chooser_open,
                 rust.title.clone(),
                 rust.path.clone(),
@@ -754,38 +795,39 @@ impl qobject::EditorApi {
             )
         };
         self.as_mut().set_open(snapshot.0);
-        self.as_mut().set_chooser_open(snapshot.1);
-        self.as_mut().set_title(snapshot.2);
-        self.as_mut().set_path(snapshot.3);
-        self.as_mut().set_message(snapshot.4);
-        self.as_mut().set_dirty(snapshot.5);
-        self.as_mut().set_revision(snapshot.6);
-        self.as_mut().set_canvas_width(snapshot.7);
-        self.as_mut().set_canvas_height(snapshot.8);
-        self.as_mut().set_tool(snapshot.9);
-        self.as_mut().set_color(snapshot.10);
-        self.as_mut().set_stroke(snapshot.11);
-        self.as_mut().set_can_undo(snapshot.12);
-        self.as_mut().set_can_redo(snapshot.13);
-        self.as_mut().set_crop_active(snapshot.14);
-        self.as_mut().set_text_active(snapshot.15);
-        self.as_mut().set_has_selection(snapshot.16);
-        self.as_mut().set_selection_x(snapshot.17);
-        self.as_mut().set_selection_y(snapshot.18);
-        self.as_mut().set_selection_w(snapshot.19);
-        self.as_mut().set_selection_h(snapshot.20);
-        self.as_mut().set_provisional(snapshot.21);
-        self.as_mut().set_provisional_kind(snapshot.22);
-        self.as_mut().set_provisional_x(snapshot.23);
-        self.as_mut().set_provisional_y(snapshot.24);
-        self.as_mut().set_provisional_w(snapshot.25);
-        self.as_mut().set_provisional_h(snapshot.26);
-        self.as_mut().set_text_x(snapshot.27);
-        self.as_mut().set_text_y(snapshot.28);
-        self.as_mut().set_text_w(snapshot.29);
-        self.as_mut().set_text_h(snapshot.30);
-        self.as_mut().set_save_suggestion(snapshot.31);
-        self.as_mut().set_ui_scale(snapshot.32);
+        self.as_mut().set_standalone(snapshot.1);
+        self.as_mut().set_chooser_open(snapshot.2);
+        self.as_mut().set_title(snapshot.3);
+        self.as_mut().set_path(snapshot.4);
+        self.as_mut().set_message(snapshot.5);
+        self.as_mut().set_dirty(snapshot.6);
+        self.as_mut().set_revision(snapshot.7);
+        self.as_mut().set_canvas_width(snapshot.8);
+        self.as_mut().set_canvas_height(snapshot.9);
+        self.as_mut().set_tool(snapshot.10);
+        self.as_mut().set_color(snapshot.11);
+        self.as_mut().set_stroke(snapshot.12);
+        self.as_mut().set_can_undo(snapshot.13);
+        self.as_mut().set_can_redo(snapshot.14);
+        self.as_mut().set_crop_active(snapshot.15);
+        self.as_mut().set_text_active(snapshot.16);
+        self.as_mut().set_has_selection(snapshot.17);
+        self.as_mut().set_selection_x(snapshot.18);
+        self.as_mut().set_selection_y(snapshot.19);
+        self.as_mut().set_selection_w(snapshot.20);
+        self.as_mut().set_selection_h(snapshot.21);
+        self.as_mut().set_provisional(snapshot.22);
+        self.as_mut().set_provisional_kind(snapshot.23);
+        self.as_mut().set_provisional_x(snapshot.24);
+        self.as_mut().set_provisional_y(snapshot.25);
+        self.as_mut().set_provisional_w(snapshot.26);
+        self.as_mut().set_provisional_h(snapshot.27);
+        self.as_mut().set_text_x(snapshot.28);
+        self.as_mut().set_text_y(snapshot.29);
+        self.as_mut().set_text_w(snapshot.30);
+        self.as_mut().set_text_h(snapshot.31);
+        self.as_mut().set_save_suggestion(snapshot.32);
+        self.as_mut().set_ui_scale(snapshot.33);
     }
 
     /// Register this object and replay a queued open request.
@@ -801,7 +843,7 @@ impl qobject::EditorApi {
     /// Open a file or project, reporting a failure on the window.
     pub fn open_path(mut self: Pin<&mut Self>, path: &QString) {
         self.as_mut()
-            .apply_request(OpenRequest::Path(PathBuf::from(path.to_string())));
+            .apply_request(OpenRequest::open(PathBuf::from(path.to_string())));
     }
 
     /// Open the local file a dialog URL names.
@@ -813,7 +855,7 @@ impl qobject::EditorApi {
             return;
         };
         self.as_mut()
-            .apply_request(OpenRequest::Path(PathBuf::from(path)));
+            .apply_request(OpenRequest::open(PathBuf::from(path)));
     }
 
     /// Show the file chooser.
@@ -1152,14 +1194,22 @@ mod tests {
         let path = dir.join("queued.png");
         std::fs::write(&path, Image::new(12, 9, vec![0u8; 12 * 9 * 4]).to_png()).unwrap();
         let mut rust = EditorRust::default();
-        apply_request(&mut rust, OpenRequest::Path(path.clone()));
+        apply_request(
+            &mut rust,
+            OpenRequest::Path {
+                path: path.clone(),
+                standalone: true,
+            },
+        );
         assert!(rust.open);
         rust.refresh();
         assert_eq!((rust.canvas_width, rust.canvas_height), (12, 9));
         assert!(rust.state.path().is_some());
         assert!(rust.title.to_string().contains("queued.png"));
-        apply_request(&mut rust, OpenRequest::Chooser);
+        assert!(rust.standalone, "a startup request owns the window");
+        apply_request(&mut rust, OpenRequest::Chooser { standalone: false });
         assert!(rust.open && rust.chooser_open);
+        assert!(!rust.standalone);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1168,7 +1218,10 @@ mod tests {
         let mut rust = EditorRust::default();
         apply_request(
             &mut rust,
-            OpenRequest::Path(PathBuf::from("/tmp/absent-12345.png")),
+            OpenRequest::Path {
+                path: PathBuf::from("/tmp/absent-12345.png"),
+                standalone: true,
+            },
         );
         assert!(rust.open);
         assert!(!rust.message.to_string().is_empty());

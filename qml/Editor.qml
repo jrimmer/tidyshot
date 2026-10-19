@@ -16,6 +16,7 @@ Window {
     /// Mirrors the singleton so bindings survive a property notification the
     /// cxx-qt bridge does not deliver to QML.
     property bool open: false
+    property bool standalone: false
     property bool chooserOpen: false
     property string documentTitle: "TidyShot Editor"
     property string path: ""
@@ -91,6 +92,7 @@ Window {
         running: true
         onTriggered: {
             editorWindow.open = EditorApi.open
+            editorWindow.standalone = EditorApi.standalone
             editorWindow.chooserOpen = EditorApi.chooserOpen
             editorWindow.documentTitle = EditorApi.title
             editorWindow.path = EditorApi.path
@@ -138,6 +140,13 @@ Window {
         } else {
             EditorApi.discard()
         }
+    }
+
+    // A command-line `open` starts only the editor; once it closes there is
+    // nothing left to show, so the process exits instead of idling invisible.
+    onOpenChanged: {
+        if (!editorWindow.open && editorWindow.standalone)
+            Qt.quit()
     }
 
     Shortcut {
@@ -388,6 +397,10 @@ Window {
         onDiscarded: {
             EditorApi.discard()
             editorWindow.discardPrompt = false
+            if (editorWindow.standalone)
+                Qt.quit()
+            else
+                editorWindow.close()
         }
         onRejected: editorWindow.discardPrompt = false
         onAccepted: editorWindow.discardPrompt = false

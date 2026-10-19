@@ -15,8 +15,8 @@
 //! prefix (slurp selection, grim grab, OCR) with stubbed commands and then
 //! tears the dialog process down; it never asserts on the QML dialog, because
 //! a headless e2e run cannot drive a real GUI. Flow 4 exercises the CLI
-//! parse, route and forward of a library-created project; the editor window
-//! that would open it is outside the headless surface.
+//! parse, route and forward of a library-created project, and the editor's
+//! open request reaching a real process.
 
 use std::fs;
 use std::path::{Path, PathBuf};

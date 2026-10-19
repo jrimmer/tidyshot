@@ -9,7 +9,7 @@ ApplicationWindow {
     height: 620
     // A command-line capture starts only the corner preview; the menu window
     // stays out of the way and the process ends when that preview closes.
-    visible: !Preview.standalone
+    visible: !Preview.standalone && !EditorApi.standalone
     title: qsTr("tidyshot")
     color: "#1e1e1e"
 
@@ -98,7 +98,7 @@ ApplicationWindow {
         repeat: true
         running: true
         onTriggered: {
-            window.visible = !Preview.standalone
+            window.visible = !Preview.standalone && !EditorApi.standalone
             previewWindow.open = Preview.open
             previewWindow.visible = Preview.open
             previewWindow.x = Preview.x
