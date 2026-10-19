@@ -604,7 +604,6 @@ impl PreviewRust {
 }
 
 impl qobject::Preview {
-
     /// Copy the Rust state onto the QObject properties.
     ///
     /// `PreviewRust` methods mutate plain fields; without going through the

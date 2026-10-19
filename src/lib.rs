@@ -18,6 +18,7 @@ pub mod crop;
 pub mod doctor;
 pub mod drag;
 pub mod editor;
+pub mod editor_ui;
 pub mod effects;
 pub mod filenames;
 pub mod geometry;
