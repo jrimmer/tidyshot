@@ -104,15 +104,26 @@ fn capture_before_gui(
     args: &[String],
 ) -> Option<Result<tidyshot::capture_runtime::CaptureResult, i32>> {
     let command = tidyshot::app::route_and_resolve(args, &tidyshot::commands::SystemRunner).ok()?;
-    match &command {
-        tidyshot::app::Command::Capture { command: name, .. } if name != "ocr" => Some(
-            tidyshot::capture_runtime::execute(&command).map_err(|error| {
-                eprintln!("tidyshot: {error}");
-                1
-            }),
-        ),
-        _ => None,
+    if !runs_before_gui(&command) {
+        return None;
     }
+    Some(
+        tidyshot::capture_runtime::execute(&command).map_err(|error| {
+            eprintln!("tidyshot: {error}");
+            1
+        }),
+    )
+}
+
+/// Whether a routed command is a capture the CLI runs itself.
+///
+/// Interactive OCR stays with the GUI because its review dialog presents the
+/// result; every other capture saves first and hands the path to the preview.
+fn runs_before_gui(command: &tidyshot::app::Command) -> bool {
+    matches!(
+        command,
+        tidyshot::app::Command::Capture { command, .. } if command != "ocr"
+    )
 }
 
 fn main() {
@@ -263,14 +274,22 @@ mod tests {
 
     #[test]
     fn only_a_capture_runs_before_the_gui() {
-        for command in ["menu", "history", "settings", "quit"] {
-            assert!(
-                super::capture_before_gui(&[command.to_owned()]).is_none(),
-                "{command}"
-            );
+        use tidyshot::app::Command;
+        let capture = |name: &str| Command::Capture {
+            command: name.to_owned(),
+            geometry: None,
+            coordinates: None,
+            action: None,
+            delay: None,
+            linebreaks: None,
+            start: None,
+            autoscroll: None,
+        };
+        assert!(super::runs_before_gui(&capture("area")));
+        // Interactive OCR needs its review dialog, so the GUI runs it.
+        assert!(!super::runs_before_gui(&capture("ocr")));
+        for command in [Command::Menu, Command::History, Command::Quit] {
+            assert!(!super::runs_before_gui(&command), "{command:?}");
         }
-        // A capture is executed by the CLI and replayed in the preview; the
-        // result is what keeps the process alive instead of exiting.
-        assert!(super::capture_before_gui(&["area".to_owned()]).is_some());
     }
 }

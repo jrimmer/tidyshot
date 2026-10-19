@@ -602,6 +602,9 @@ impl qobject::Preview {
         if let Some(window) = self.as_mut().rust_mut().get_mut().window.as_mut() {
             window.dismiss();
         }
+        // Reset the delay as well: the QML timer stops being eligible once
+        // the window is hidden, so a later save must not fire for it.
+        self.as_mut().set_auto_close_ms(0);
         self.as_mut().set_open(false);
         self.as_mut().set_message(QString::from(""));
     }
