@@ -315,7 +315,7 @@ impl EditorState {
 
 /// A published open request that waits for QML to bind.
 static PENDING: std::sync::Mutex<Option<OpenRequest>> = std::sync::Mutex::new(None);
-static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::Editor>> =
+static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::EditorApi>> =
     std::sync::OnceLock::new();
 
 /// Ask the running editor (or the next one) to open a file.
@@ -388,7 +388,9 @@ pub mod qobject {
         #[qproperty(f64, text_w, cxx_name = "textW")]
         #[qproperty(f64, text_h, cxx_name = "textH")]
         #[qproperty(QString, save_suggestion, cxx_name = "saveSuggestion")]
-        type Editor = super::EditorRust;
+        #[qproperty(f64, ui_scale, cxx_name = "uiScale")]
+        #[cxx_name = "EditorApi"]
+        type EditorApi = super::EditorRust;
 
         /// Register this object and replay a queued open request.
         #[qinvokable]
@@ -497,7 +499,7 @@ pub mod qobject {
         fn clear_message(self: Pin<&mut Self>);
     }
 
-    impl cxx_qt::Threading for Editor {}
+    impl cxx_qt::Threading for EditorApi {}
 }
 
 use core::pin::Pin;
@@ -542,6 +544,7 @@ pub struct EditorRust {
     text_w: f64,
     text_h: f64,
     save_suggestion: QString,
+    ui_scale: f64,
     published: i64,
     state: EditorState,
 }
@@ -584,6 +587,10 @@ impl Default for EditorRust {
             text_w: 0.0,
             text_h: 0.0,
             save_suggestion: QString::from(""),
+            ui_scale: crate::ui_scale::read(None)
+                .unwrap_or_default()
+                .factor()
+                .max(0.5),
             published: -1,
             state: EditorState::default(),
         };
@@ -699,7 +706,7 @@ impl EditorRust {
     }
 }
 
-impl qobject::Editor {
+impl qobject::EditorApi {
     /// Copy every field onto the QObject properties.
     fn sync(mut self: Pin<&mut Self>) {
         let snapshot = {
@@ -739,6 +746,7 @@ impl qobject::Editor {
                 rust.text_w,
                 rust.text_h,
                 rust.save_suggestion.clone(),
+                rust.ui_scale,
             )
         };
         self.as_mut().set_open(snapshot.0);
@@ -773,6 +781,7 @@ impl qobject::Editor {
         self.as_mut().set_text_w(snapshot.29);
         self.as_mut().set_text_h(snapshot.30);
         self.as_mut().set_save_suggestion(snapshot.31);
+        self.as_mut().set_ui_scale(snapshot.32);
     }
 
     /// Register this object and replay a queued open request.

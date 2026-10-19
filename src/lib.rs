@@ -105,7 +105,9 @@ pub fn run_with(argv: &[String]) {
     // reaches a live event loop.
     start_instance();
     let mut engine = cxx_qt_lib::QQmlApplicationEngine::new();
-    if let Some(engine) = engine.as_mut() {
+    if let Some(mut engine) = engine.as_mut() {
+        // The editor publishes its rendered canvas through this provider.
+        editor_image::install(engine.as_mut());
         engine.load(&cxx_qt_lib::QUrl::from("qrc:/qt/qml/tidyshot/qml/Main.qml"));
     }
     if let Some(app) = app.as_mut() {

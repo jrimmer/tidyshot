@@ -227,6 +227,13 @@ ApplicationWindow {
     // by id rather than instantiated. When the command line asked for OCR, run
     // the completion path: a file goes straight to recognition, while a bare
     // `tidyshot ocr` or `capture-text` URL first runs the interactive capture.
+    // The annotate editor: its own top-level window, opened by the preview's
+    // Annotate button, `tidyshot open`, or an after-capture annotate action.
+    Editor {
+        id: editorWindow
+        transientParent: null
+    }
+
     TextResultDialog {
         id: textResultDialog
         Component.onCompleted: {

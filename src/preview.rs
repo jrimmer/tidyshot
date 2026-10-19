@@ -299,16 +299,14 @@ pub fn save_capture(path: &Path) -> Result<(), PreviewError> {
     Ok(())
 }
 
-/// Open the annotate document for a capture.
+/// Open the annotate editor on a capture.
 ///
-/// The editor window itself is not ported yet, so this validates that the
-/// capture can be annotated instead of claiming a window opened.
+/// The editor loads the file itself, so this only checks that it can be
+/// opened before handing the path to the editor window.
 pub fn annotate_capture(path: &Path) -> Result<(), PreviewError> {
-    let bytes = std::fs::read(path)?;
-    let image = crate::pngzip::decode_png(&bytes)
-        .map_err(|error| PreviewError::Image(error.to_string()))?;
-    let _document = crate::editor::Document::new(image, None, false);
-    Ok(())
+    crate::editor_ui::load_document(path)
+        .map(|_| ())
+        .map_err(|error| PreviewError::Image(error.message().to_owned()))
 }
 
 /// Pin a capture using the pin module's starting geometry.
@@ -694,16 +692,16 @@ impl qobject::Preview {
     }
 
     /// Open the capture in the annotate editor.
-    ///
-    /// No editor window exists yet, so the message names the missing window
-    /// instead of implying the capture opened.
     pub fn annotate(mut self: Pin<&mut Self>) {
         let path = PathBuf::from(self.path().to_string());
         let result = annotate_capture(&path);
+        if result.is_ok() {
+            crate::editor_window::publish_open(path);
+        }
         self.as_mut()
             .rust_mut()
             .get_mut()
-            .action_error(result, "The annotate editor is not available yet");
+            .action_error(result, "Opened in the editor");
         self.as_mut().sync();
     }
 

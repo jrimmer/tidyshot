@@ -1029,6 +1029,7 @@ pub struct CaptureRust {
     cancel: Arc<AtomicBool>,
     windows: Vec<WindowInfo>,
     scroll: Option<crate::scroll_runtime::ScrollControl>,
+    pending_action: Option<String>,
 }
 
 impl Default for CaptureRust {
@@ -1052,6 +1053,7 @@ impl Default for CaptureRust {
             cancel: Arc::new(AtomicBool::new(false)),
             windows: Vec::new(),
             scroll: None,
+            pending_action: None,
         }
     }
 }
@@ -1337,6 +1339,7 @@ impl qobject::Capture {
                 delay,
                 start,
                 autoscroll,
+                action,
                 ..
             } => {
                 // Scrolling captures drive an interactive session rather than
@@ -1356,8 +1359,11 @@ impl qobject::Capture {
                 self.as_mut().start_command(
                     CaptureRequest::resolve(&command, geometry.as_deref(), delay, 3),
                     command == "window",
+                    action,
                 );
             }
+            Command::Edit(path) => crate::editor_window::publish_open(path),
+            Command::EditChooser => crate::editor_window::publish_chooser(),
             Command::Overlay(path) => crate::preview::publish_file(path),
             Command::Restore => {
                 if let Some(path) = crate::history::newest_path(&crate::settings::data_dir()) {
@@ -1392,6 +1398,7 @@ impl qobject::Capture {
                 3,
             ),
             active,
+            None,
         );
     }
 
@@ -1400,6 +1407,7 @@ impl qobject::Capture {
         mut self: Pin<&mut Self>,
         request: Result<CaptureRequest, CaptureRequestError>,
         active: bool,
+        action: Option<String>,
     ) {
         if *self.busy() {
             // The running capture owns the busy flag; report the refusal
@@ -1419,6 +1427,7 @@ impl qobject::Capture {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         self.as_mut().rust_mut().get_mut().cancel = cancel;
+        self.as_mut().rust_mut().get_mut().pending_action = action;
         let qt_thread = self.qt_thread();
         self.as_mut().set_busy(true);
         self.as_mut().set_message(QString::from("Capturing…"));
@@ -1459,6 +1468,7 @@ impl qobject::Capture {
                     result.height,
                     result.screen,
                 );
+                self.as_mut().after_capture_action(&result.path);
                 self.as_mut().captured_signal(
                     &QString::from(path),
                     result.width as i32,
@@ -1480,6 +1490,7 @@ impl qobject::Capture {
                     result.height,
                     result.screen,
                 );
+                self.as_mut().after_capture_action(&result.path);
                 self.as_mut().captured_signal(
                     &QString::from(path),
                     result.width as i32,
@@ -1487,6 +1498,18 @@ impl qobject::Capture {
                 );
             }
             Completion::Failed(message) => self.as_mut().fail(message),
+        }
+    }
+
+    /// Run the requested after-capture action.
+    ///
+    /// An explicit `annotate` from a shortcut or URL opens the editor on the
+    /// saved file; the preview is still published so the capture stays
+    /// reachable when the editor closes.
+    fn after_capture_action(mut self: Pin<&mut Self>, path: &std::path::Path) {
+        let action = self.as_mut().rust_mut().get_mut().pending_action.take();
+        if action.as_deref() == Some("annotate") {
+            crate::editor_window::publish_open(path.to_path_buf());
         }
     }
 

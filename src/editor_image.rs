@@ -10,11 +10,11 @@ mod image_bridge {
     unsafe extern "C++" {
         include!("editor_image.h");
         type QImage = cxx_qt_lib::QImage;
-        include!("cxx-qt-lib/qml/qqmlengine.h");
-        type QQmlEngine = cxx_qt_lib::QQmlEngine;
+        include!("cxx-qt-lib/qml/qqmlapplicationengine.h");
+        type QQmlApplicationEngine = cxx_qt_lib::QQmlApplicationEngine;
 
         /// Register the `tidyshot` image provider on `engine`.
-        fn tidyshot_editor_image_install(engine: Pin<&mut QQmlEngine>);
+        fn tidyshot_editor_image_install(engine: Pin<&mut QQmlApplicationEngine>);
 
         /// Replace the image the provider serves.
         #[rust_name = "set_image_raw"]
@@ -23,7 +23,7 @@ mod image_bridge {
 }
 
 /// Register the editor image provider with the application's engine.
-pub fn install(engine: Pin<&mut cxx_qt_lib::QQmlEngine>) {
+pub fn install(engine: Pin<&mut cxx_qt_lib::QQmlApplicationEngine>) {
     image_bridge::tidyshot_editor_image_install(engine);
 }
 

@@ -14,7 +14,10 @@ public:
 
   QImage requestImage(const QString& id, QSize* size, const QSize&) override
   {
-    if (id != QStringLiteral("canvas")) {
+    // QML appends the revision as a query string so a re-render invalidates
+    // the decoded image cache.
+    const QString name = id.section(QLatin1Char('?'), 0, 0);
+    if (name != QStringLiteral("canvas")) {
       return QImage();
     }
     if (size != nullptr) {
@@ -31,7 +34,7 @@ EditorImageProvider* provider = nullptr;
 } // namespace
 
 void
-tidyshot_editor_image_install(QQmlEngine& engine)
+tidyshot_editor_image_install(QQmlApplicationEngine& engine)
 {
   if (provider == nullptr) {
     provider = new EditorImageProvider();
