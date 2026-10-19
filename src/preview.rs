@@ -507,7 +507,7 @@ impl Default for PreviewRust {
 
 impl PreviewRust {
     fn apply(&mut self, published: Published) {
-        let settings = crate::overlay::preview_settings(&crate::settings::stored_settings());
+        let settings = crate::settings::preview_settings();
         let monitor = published.screen.map(MonitorScreen::new);
         let window = PreviewWindow::new(
             published.path,

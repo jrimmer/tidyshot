@@ -46,6 +46,18 @@ pub fn stored_settings() -> std::collections::BTreeMap<String, crate::json::Valu
     stored_settings_at(&settings_path())
 }
 
+/// The Quick Access preview preferences from the saved settings.
+#[must_use]
+pub fn preview_settings() -> crate::overlay::PreviewSettings {
+    preview_settings_at(&settings_path())
+}
+
+/// Read the Quick Access preferences from an explicit settings file.
+#[must_use]
+fn preview_settings_at(path: &std::path::Path) -> crate::overlay::PreviewSettings {
+    crate::overlay::preview_settings(&stored_settings_at(path))
+}
+
 /// Read the saved settings from an explicit file.
 #[must_use]
 fn stored_settings_at(
@@ -104,6 +116,30 @@ mod tests {
         // A malformed file must not stop OCR either.
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(ocr_settings_at(&path).ocr_languages, ocr::AUTO);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn preview_settings_read_the_quick_access_keys() {
+        let path =
+            std::env::temp_dir().join(format!("tidyshot-preview-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"preview_timeout":4,"preview_action":"save","close_after_drag":false,"preview_corner":"top-right"}"#,
+        )
+        .unwrap();
+        let settings = preview_settings_at(&path);
+        assert_eq!(settings.auto_close_ms(), 4000);
+        assert_eq!(settings.auto_close_action(), "save");
+        assert!(!settings.close_after_drag);
+        assert_eq!(settings.corner, crate::overlay::Corner::TopRight);
+        // A missing or malformed file falls back to the fresh-preview defaults.
+        let _ = std::fs::remove_file(&path);
+        let defaults = preview_settings_at(&path);
+        assert_eq!(defaults.auto_close_ms(), 0);
+        assert_eq!(defaults.corner, crate::overlay::Corner::BottomRight);
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(preview_settings_at(&path).auto_close_ms(), 0);
         let _ = std::fs::remove_file(&path);
     }
 
