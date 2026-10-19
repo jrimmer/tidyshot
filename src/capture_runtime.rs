@@ -112,6 +112,15 @@ impl WindowInfo {
         }
     }
 
+    /// True when this client is one of TidyShot's own windows.
+    ///
+    /// A preview or pin is always on top, so leaving it in the window picker
+    /// would offer the user a capture of TidyShot itself.
+    #[must_use]
+    pub fn is_own_preview(&self) -> bool {
+        self.class.starts_with("tidyshot") || self.class.starts_with("org.omarchy.TidyShot")
+    }
+
     /// The detail line: monitor, workspace and size.
     #[must_use]
     pub fn detail(&self) -> String {
@@ -268,6 +277,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         let clients = if mode == crate::capture_session::CaptureMode::Window {
             self.windows()?
                 .iter()
+                .filter(|window| !window.is_own_preview())
                 .map(|window| window.rect)
                 .collect::<Vec<_>>()
         } else {
@@ -824,6 +834,10 @@ impl qobject::Capture {
         );
         match runtime.windows() {
             Ok(windows) => {
+                let windows: Vec<WindowInfo> = windows
+                    .into_iter()
+                    .filter(|window| !window.is_own_preview())
+                    .collect();
                 let mut labels = QStringList::default();
                 let mut details = QStringList::default();
                 for window in &windows {
@@ -1163,6 +1177,24 @@ mod tests {
 
     fn request(command: &str) -> CaptureRequest {
         CaptureRequest::resolve(command, None, None, 0).unwrap()
+    }
+
+    #[test]
+    fn tidy_shot_own_windows_are_not_offered_for_capture() {
+        let value = crate::json::parse(
+            r#"[
+                {"title":"TidyShot Preview — shot.png","class":"tidyshot","at":[0,0],"size":[355,300],"monitor":0,"workspace":{"name":"1"},"mapped":true},
+                {"title":"Editor","class":"code","at":[10,20],"size":[600,400],"monitor":0,"workspace":{"name":"1"},"mapped":true}
+            ]"#,
+        )
+        .unwrap();
+        let windows = windows_from(&value);
+        let offered: Vec<&str> = windows
+            .iter()
+            .filter(|window| !window.is_own_preview())
+            .map(|window| window.class.as_str())
+            .collect();
+        assert_eq!(offered, ["code"]);
     }
 
     #[test]
