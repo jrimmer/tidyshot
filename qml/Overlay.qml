@@ -133,22 +133,33 @@ Rectangle {
             // A Wayland receiver can accept a drop while Qt reports a
             // cancelled drag, so the drop action alone is not definitive.
             // Every action other than Ignore counts as accepted here.
+            Drag.onDragStarted: dragArea.dragStarted = true
             Drag.onDragFinished: function (dropAction) {
                 preview.finishDrag(dropAction !== Qt.IgnoreAction, dragArea.altHeld)
+                dragArea.altHeld = false
+                dragArea.dragStarted = false
             }
             MouseArea {
                 id: dragArea
                 property bool altHeld: false
+                // A started drag always ends through Drag.onDragFinished, so
+                // the release that follows must not report a second finish.
+                property bool dragStarted: false
                 anchors.fill: parent
                 drag.target: parent
                 onPressed: function (mouse) {
                     altHeld = (mouse.modifiers & Qt.AltModifier) !== 0
+                    dragStarted = false
                     preview.beginDrag()
                 }
                 // A press without a drag never finishes through Drag; release
-                // it here so the auto-close timer rearms. An accepted drop is
-                // reported separately by onDragFinished.
-                onReleased: preview.finishDrag(false, false)
+                // it here so the preview is not left mid-drag.
+                onReleased: {
+                    if (!dragStarted) {
+                        altHeld = false
+                        preview.finishDrag(false, false)
+                    }
+                }
                 onClicked: preview.activate()
             }
         }

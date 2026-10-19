@@ -38,21 +38,24 @@ Window {
     height: 300
     visible: open
     color: "transparent"
-    title: "TidyShot Preview — TidyShot"
+    title: "TidyShot Preview"
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
 
-    // Enter copies and Escape closes; the window is built to be usable without
-    // moving the pointer back to a button.
+    // Enter copies and Escape closes while this window is active. The scope
+    // is the preview window, not the application: a menu window in front must
+    // keep its own Return and Escape handling.
     Shortcut {
+        objectName: "copyShortcut"
         sequences: ["Return", "Enter"]
-        context: Qt.ApplicationShortcut
-        enabled: previewWindow.open
+        context: Qt.WindowShortcut
+        enabled: previewWindow.open && previewWindow.active
         onActivated: previewWindow.copyRequested()
     }
     Shortcut {
+        objectName: "closeShortcut"
         sequences: ["Escape"]
-        context: Qt.ApplicationShortcut
-        enabled: previewWindow.open
+        context: Qt.WindowShortcut
+        enabled: previewWindow.open && previewWindow.active
         onActivated: previewWindow.dismissed()
     }
 

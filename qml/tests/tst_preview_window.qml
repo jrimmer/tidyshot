@@ -35,6 +35,11 @@ TestCase {
     }
 
     SignalSpy { id: annotateSpy; target: preview; signalName: "annotateRequested" }
+    SignalSpy {
+        id: activateSpy
+        target: preview ? preview.contentItem.children[0] : null
+        signalName: "activate"
+    }
     SignalSpy { id: copySpy; target: preview; signalName: "copyRequested" }
     SignalSpy { id: saveSpy; target: preview; signalName: "saveRequested" }
     SignalSpy { id: pinSpy; target: preview; signalName: "pinRequested" }
@@ -43,6 +48,7 @@ TestCase {
 
     function init() {
         annotateSpy.clear()
+        activateSpy.clear()
         copySpy.clear()
         saveSpy.clear()
         pinSpy.clear()
@@ -89,6 +95,35 @@ TestCase {
     function test_enter_copies() {
         keyClick(Qt.Key_Return)
         compare(copySpy.count, 1)
+    }
+
+    function test_the_key_shortcuts_belong_to_the_preview_window() {
+        // An application-scoped shortcut would take Return from the capture
+        // menu while a preview is open behind it.
+        var copyShortcut = findChild(preview, "copyShortcut")
+        var closeShortcut = findChild(preview, "closeShortcut")
+        verify(copyShortcut !== null)
+        verify(closeShortcut !== null)
+        compare(copyShortcut.context, Qt.WindowShortcut)
+        compare(closeShortcut.context, Qt.WindowShortcut)
+        compare(copyShortcut.enabled, preview.open && preview.active)
+        compare(closeShortcut.enabled, preview.open && preview.active)
+    }
+
+    function test_a_closed_preview_ignores_the_keys() {
+        preview.open = false
+        keyClick(Qt.Key_Return)
+        keyClick(Qt.Key_Escape)
+        compare(copySpy.count, 0)
+        compare(dismissedSpy.count, 0)
+    }
+
+    function test_a_press_without_a_drag_rearms_without_a_second_finish() {
+        // A click that never leaves the handle reports one release, not a
+        // drag completion plus a release.
+        mouseClick(button("dragHandle"), 10, 10)
+        compare(activateSpy.count, 1)
+        compare(dismissedSpy.count, 0)
     }
 
     function test_auto_close_saves_then_dismisses() {

@@ -18,8 +18,10 @@ pub const WINDOW_WIDTH: f64 = 355.0;
 pub const WINDOW_HEIGHT: f64 = 300.0;
 /// The collapsed height that leaves the restore control visible.
 pub const COLLAPSED_HEIGHT: f64 = 52.0;
-/// The smallest gap between the window and the monitor edge.
-pub const DEFAULT_MARGIN: f64 = 18.0;
+/// The screen width assumed when no monitor can be resolved.
+pub const FALLBACK_SCREEN_WIDTH: f64 = 1920.0;
+/// The screen height assumed when no monitor can be resolved.
+pub const FALLBACK_SCREEN_HEIGHT: f64 = 1080.0;
 
 /// Why a preview action failed.
 #[derive(Debug)]
@@ -98,12 +100,14 @@ pub fn window_position(
     height: f64,
     settings: &PreviewSettings,
 ) -> (f64, f64) {
-    let margin = if settings.margin > 0.0 {
-        settings.margin
-    } else {
-        DEFAULT_MARGIN
-    };
-    corner_position(screen.bounds, width, height, settings.corner, 0, margin)
+    corner_position(
+        screen.bounds,
+        width,
+        height,
+        settings.corner,
+        0,
+        settings.margin,
+    )
 }
 
 /// A preview window before QML renders it.
@@ -227,14 +231,21 @@ impl PreviewWindow {
     }
 
     /// The window position on the focused monitor.
+    ///
+    /// With no resolvable monitor the window sits at the bottom-right of the
+    /// virtual desktop, so a failed monitor query cannot move it away from
+    /// the corner the user expects.
     #[must_use]
     pub fn position(&self) -> (f64, f64) {
-        match self.monitor {
-            Some(monitor) => {
-                window_position(monitor, WINDOW_WIDTH, self.window_height(), &self.settings)
-            }
-            None => (DEFAULT_MARGIN, DEFAULT_MARGIN),
-        }
+        let screen = self
+            .monitor
+            .map_or_else(fallback_screen, |monitor| monitor.bounds);
+        window_position(
+            MonitorScreen::new(screen),
+            WINDOW_WIDTH,
+            self.window_height(),
+            &self.settings,
+        )
     }
 
     pub fn set_collapsed(&mut self, collapsed: bool) {
@@ -245,12 +256,15 @@ impl PreviewWindow {
     pub fn dismiss(&mut self) {
         self.dismissed = true;
     }
+}
 
-    /// Whether an accepted drag closes the window.
-    #[must_use]
-    pub fn closes_after_drag(&self, accepted: bool, keep: bool) -> bool {
-        accepted && self.settings.close_after_drag && !keep
-    }
+/// The screen a preview assumes when the monitor query failed.
+///
+/// The virtual desktop is unbounded, so the fallback is a desktop-sized area
+/// whose bottom-right corner is the only anchor the window can still honour.
+#[must_use]
+fn fallback_screen() -> ScreenRect {
+    ScreenRect::new(0.0, 0.0, FALLBACK_SCREEN_WIDTH, FALLBACK_SCREEN_HEIGHT)
 }
 
 /// Copy a capture or recording to the clipboard.
@@ -276,6 +290,9 @@ pub fn save_capture(path: &Path) -> Result<(), PreviewError> {
 }
 
 /// Open the annotate document for a capture.
+///
+/// The editor window itself is not ported yet, so this validates that the
+/// capture can be annotated instead of claiming a window opened.
 pub fn annotate_capture(path: &Path) -> Result<(), PreviewError> {
     let bytes = std::fs::read(path)?;
     let image = crate::pngzip::decode_png(&bytes)
@@ -285,26 +302,14 @@ pub fn annotate_capture(path: &Path) -> Result<(), PreviewError> {
 }
 
 /// Pin a capture using the pin module's starting geometry.
+///
+/// The pin window itself is not ported yet, so this only resolves the
+/// geometry the pin would start with.
 pub fn pin_capture(path: &Path) -> Result<(f64, f64), PreviewError> {
     let bytes = std::fs::read(path)?;
     let image = crate::pngzip::decode_png(&bytes)
         .map_err(|error| PreviewError::Image(error.to_string()))?;
     Ok(crate::pin::initial_size(image.width, image.height))
-}
-
-/// The window position for a capture, resolving the live focused monitor.
-pub fn position_on_focused_monitor<R: CommandRunner>(
-    runner: &R,
-    settings: &PreviewSettings,
-    height: f64,
-) -> (f64, f64) {
-    let monitor = crate::commands::hypr(runner, "monitors")
-        .ok()
-        .and_then(|value| value.as_array().and_then(focused_monitor));
-    match monitor {
-        Some(monitor) => window_position(monitor, WINDOW_WIDTH, height, settings),
-        None => (DEFAULT_MARGIN, DEFAULT_MARGIN),
-    }
 }
 
 /// The corner a new preview uses when no settings override it.
@@ -363,30 +368,57 @@ pub fn publish_file(path: PathBuf) {
     publish_capture(path, dimensions.0, dimensions.1, screen);
 }
 
+/// A command for the visible preview that may arrive before it is bound.
+#[derive(Debug, Clone, Copy)]
+enum PendingAction {
+    Save,
+    Dismiss,
+}
+
+static ACTIONS: std::sync::Mutex<Vec<PendingAction>> = std::sync::Mutex::new(Vec::new());
+
 /// Save the visible preview.
 pub fn publish_save() {
-    if let Some(thread) = BOUND.get() {
-        let _ = thread.queue(|mut preview| preview.as_mut().save());
-    }
+    queue_action(PendingAction::Save);
 }
 
 /// Close the visible preview.
 pub fn publish_dismiss() {
-    if let Some(thread) = BOUND.get() {
-        let _ = thread.queue(|mut preview| preview.as_mut().dismiss());
+    queue_action(PendingAction::Dismiss);
+}
+
+/// Run a preview action on the Qt thread, or hold it until QML binds.
+fn queue_action(action: PendingAction) {
+    match BOUND.get() {
+        Some(thread) => {
+            let _ = thread.queue(move |mut preview| run_action(preview.as_mut(), action));
+        }
+        None => ACTIONS
+            .lock()
+            .expect("preview action queue poisoned")
+            .push(action),
+    }
+}
+
+fn run_action(mut preview: Pin<&mut qobject::Preview>, action: PendingAction) {
+    match action {
+        PendingAction::Save => preview.as_mut().save(),
+        PendingAction::Dismiss => preview.as_mut().dismiss(),
     }
 }
 
 /// Hand the GUI a capture that a command-line invocation already saved.
+///
+/// The capture waits until QML binds the preview, so only one startup entry
+/// is ever stored.
 pub fn set_startup_preview(result: crate::capture_runtime::CaptureResult) {
-    let published = Published {
+    *STARTUP.lock().expect("preview queue poisoned") = Some(Published {
         path: result.path,
         width: result.width,
         height: result.height,
         screen: result.screen,
         standalone: true,
-    };
-    *STARTUP.lock().expect("preview queue poisoned") = Some(published);
+    });
 }
 
 // --- QML bridge: the Preview singleton -----------------------------------
@@ -451,15 +483,6 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "collapseTo"]
         fn collapse(self: Pin<&mut Self>, collapsed: bool);
-
-        /// Report an accepted drag; the settings decide whether it closes.
-        #[qinvokable]
-        #[cxx_name = "finishDrag"]
-        fn finish_drag(self: Pin<&mut Self>, accepted: bool, keep: bool);
-
-        /// Emitted when a preview becomes visible.
-        #[qsignal]
-        fn shown(self: Pin<&mut Self>);
     }
 
     impl cxx_qt::Threading for Preview {}
@@ -560,27 +583,24 @@ impl PreviewRust {
 }
 
 impl qobject::Preview {
-    /// Register this object and apply a capture that arrived before QML.
+    /// Register this object, then replay any capture or action that arrived
+    /// before QML loaded.
     pub fn bind(mut self: Pin<&mut Self>) {
-        let pending = PENDING
-            .lock()
-            .expect("preview queue poisoned")
-            .take()
-            .or_else(|| STARTUP.lock().expect("preview queue poisoned").take());
+        let pending = PENDING.lock().expect("preview queue poisoned").take();
+        let startup = STARTUP.lock().expect("preview queue poisoned").take();
+        let actions = std::mem::take(&mut *ACTIONS.lock().expect("preview action queue poisoned"));
         let _ = BOUND.set(self.qt_thread());
-        if let Some(published) = pending {
+        if let Some(published) = pending.or(startup) {
             self.as_mut().rust_mut().get_mut().apply(published);
-            let open = *self.open();
-            if open {
-                self.as_mut().shown();
-            }
+        }
+        for action in actions {
+            run_action(self.as_mut(), action);
         }
     }
 
     /// Apply a capture published by the runtime.
     fn apply_published(mut self: Pin<&mut Self>, published: Published) {
         self.as_mut().rust_mut().get_mut().apply(published);
-        self.as_mut().shown();
     }
 
     /// Copy the capture to the clipboard.
@@ -604,23 +624,28 @@ impl qobject::Preview {
     }
 
     /// Open the capture in the annotate editor.
+    ///
+    /// No editor window exists yet, so the message names the missing window
+    /// instead of implying the capture opened.
     pub fn annotate(mut self: Pin<&mut Self>) {
         let path = PathBuf::from(self.path().to_string());
         let result = annotate_capture(&path);
         self.as_mut()
             .rust_mut()
             .get_mut()
-            .action_error(result, "Ready to annotate");
+            .action_error(result, "The annotate editor is not available yet");
     }
 
     /// Pin the capture at its starting size.
+    ///
+    /// No pin window exists yet, so the message names the missing window.
     pub fn pin(mut self: Pin<&mut Self>) {
         let path = PathBuf::from(self.path().to_string());
         let result = pin_capture(&path).map(|_| ());
         self.as_mut()
             .rust_mut()
             .get_mut()
-            .action_error(result, "Pinned");
+            .action_error(result, "The pin window is not available yet");
     }
 
     /// Close the preview.
@@ -646,17 +671,6 @@ impl qobject::Preview {
             self.as_mut().set_window_height(height as i32);
         }
         self.as_mut().set_collapsed(collapsed);
-    }
-
-    /// Report an accepted drag; the settings decide whether it closes.
-    pub fn finish_drag(mut self: Pin<&mut Self>, accepted: bool, keep: bool) {
-        let closes = self
-            .window
-            .as_ref()
-            .is_some_and(|window| window.closes_after_drag(accepted, keep));
-        if closes {
-            self.as_mut().dismiss();
-        }
     }
 }
 
@@ -727,25 +741,6 @@ mod tests {
     }
 
     #[test]
-    fn an_accepted_drag_closes_unless_kept() {
-        let preview = PreviewWindow::new("/tmp/capture.png", 10, 10, settings(), None);
-        assert!(preview.closes_after_drag(true, false));
-        assert!(!preview.closes_after_drag(true, true));
-        assert!(!preview.closes_after_drag(false, false));
-        let preview = PreviewWindow::new(
-            "/tmp/capture.png",
-            10,
-            10,
-            PreviewSettings {
-                close_after_drag: false,
-                ..settings()
-            },
-            None,
-        );
-        assert!(!preview.closes_after_drag(true, false));
-    }
-
-    #[test]
     fn focused_monitor_prefers_the_focused_output() {
         let monitors = crate::json::parse(
             r#"[
@@ -759,10 +754,26 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_monitor_list_keeps_the_window_visible_at_the_margin() {
+    fn a_missing_monitor_list_falls_back_to_the_bottom_right_corner() {
         assert!(focused_monitor(&[]).is_none());
         let preview = PreviewWindow::new("/tmp/capture.png", 10, 10, settings(), None);
-        assert_eq!(preview.position(), (DEFAULT_MARGIN, DEFAULT_MARGIN));
+        assert_eq!(preview.position(), (1547.0, 762.0));
+    }
+
+    #[test]
+    fn a_zero_margin_puts_the_window_flush_with_the_corner() {
+        let monitor = MonitorScreen::new(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0));
+        let preview = PreviewWindow::new(
+            "/tmp/capture.png",
+            640,
+            480,
+            PreviewSettings {
+                margin: 0.0,
+                ..settings()
+            },
+            Some(monitor),
+        );
+        assert_eq!(preview.position(), (1565.0, 780.0));
     }
 
     #[derive(Default)]

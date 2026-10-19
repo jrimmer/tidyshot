@@ -115,10 +115,14 @@ impl WindowInfo {
     /// True when this client is one of TidyShot's own windows.
     ///
     /// A preview or pin is always on top, so leaving it in the window picker
-    /// would offer the user a capture of TidyShot itself.
+    /// would offer the user a capture of TidyShot itself. The desktop id and
+    /// the binary name are both matched, because the compositor's class comes
+    /// from whichever of them Qt used when the window was mapped.
     #[must_use]
     pub fn is_own_preview(&self) -> bool {
-        self.class.starts_with("tidyshot") || self.class.starts_with("org.omarchy.TidyShot")
+        self.class.starts_with("tidyshot")
+            || self.class.starts_with("org.omarchy.TidyShot")
+            || self.class.starts_with("com.jasonrimmer.tidyshot")
     }
 
     /// The detail line: monitor, workspace and size.
@@ -1194,6 +1198,8 @@ mod tests {
         let value = crate::json::parse(
             r#"[
                 {"title":"TidyShot Preview — shot.png","class":"tidyshot","at":[0,0],"size":[355,300],"monitor":0,"workspace":{"name":"1"},"mapped":true},
+                {"title":"TidyShot Preview — shot.png","class":"org.omarchy.TidyShot","at":[0,0],"size":[355,300],"monitor":0,"workspace":{"name":"1"},"mapped":true},
+                {"title":"TidyShot Preview — shot.png","class":"com.jasonrimmer.tidyshot","at":[0,0],"size":[355,300],"monitor":0,"workspace":{"name":"1"},"mapped":true},
                 {"title":"Editor","class":"code","at":[10,20],"size":[600,400],"monitor":0,"workspace":{"name":"1"},"mapped":true}
             ]"#,
         )

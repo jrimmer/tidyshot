@@ -288,8 +288,7 @@ fn the_preview_window_anchors_bottom_right_and_honours_saved_settings() {
     assert_eq!(preview.position(), (4107.0, 1122.0));
     assert_eq!(preview.auto_close_ms(), 3000);
     assert_eq!(preview.auto_close_action(), "close");
-    assert!(preview.closes_after_drag(true, false));
-    assert!(!preview.closes_after_drag(true, true));
+    assert!(preview.close_after_drag());
 }
 
 #[test]
