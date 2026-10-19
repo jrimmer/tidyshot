@@ -28,7 +28,7 @@ did not run the GUI; QML facts are read from `qml/*.qml` and
 
 ## Reachability ledger
 
-`src/lib.rs` declares 62 modules. Only these are on a production path:
+`src/lib.rs` declares 68 modules. Only these are on a production path:
 
 | Reached from production | How |
 |---|---|
@@ -38,7 +38,7 @@ did not run the GUI; QML facts are read from `qml/*.qml` and
 | `commands` | runner trait and every external program |
 | `history`, `settings`, `filenames`, `storage` | capture store, settings read, atomic writes |
 | `annotation` (only `png_dimensions`) | PNG size for a captured frame |
-| `pngzip`, `compress`, `raster`, `geometry`, `json`, `color`, `effects` | image decode/encode, canvas compose, parsing |
+| `pngzip`, `compress`, `raster`, `geometry`, `json`, `color` | image decode/encode, canvas compose, parsing |
 | `text_result`, `ocr` | `tidyshot ocr <file>`, `capture-text` startup path |
 | `menu`, `bridge` | QML action table, startup args |
 | `doctor`, `compat` | headless subcommands |
@@ -46,7 +46,7 @@ did not run the GUI; QML facts are read from `qml/*.qml` and
 | `doctor::*` | `tidyshot doctor` |
 
 Everything below is compiled and tested but **not reachable at runtime**:
-`backgrounds`, `clean_capture`, `clipboard`, `crop`, `drag`, `editor`, `gif`,
+`backgrounds`, `clean_capture`, `clipboard`, `crop`, `drag`, `editor`, `effects`, `gif`,
 `hover_keys`, `media_import`, `motion_blur`, `overlay`, `pin`, `project`,
 `qml_load` (tests only), the whole `recording::*` tree (`audio`,
 `checkpoint`, `display`, `encoder`, `gif`, `journal`, `options`, `recorder`,
