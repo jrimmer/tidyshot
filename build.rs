@@ -22,6 +22,7 @@ fn main() {
     .qt_module("QuickTest")
     .cpp_file("src/cpp/qml_load.cpp")
     .cpp_file("src/qt_shutdown.cpp")
+    .cpp_file("src/cpp/editor_image.cpp")
     .files([
         "src/bridge.rs",
         "src/menu.rs",
@@ -29,6 +30,8 @@ fn main() {
         "src/capture_runtime.rs",
         "src/qml_load.rs",
         "src/text_result.rs",
+        "src/editor_window.rs",
+        "src/editor_image.rs",
     ]);
     // The load probe's header is local to src/cpp; cxx generates the binding
     // that includes it, so that directory must be on the include path.

@@ -611,8 +611,7 @@ impl qobject::Preview {
     /// stale value, so the window never maps even though `open` reads true.
     fn sync(mut self: Pin<&mut Self>) {
         let snapshot = {
-            let mut this = self.as_mut();
-            let rust = this.rust_mut().get_mut();
+            let rust = self.as_mut().rust_mut().get_mut();
             (
                 rust.open,
                 rust.standalone,

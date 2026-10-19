@@ -460,8 +460,8 @@ impl EditorInteraction {
     }
 
     /// Drop a provisional text without touching the document.
-    pub fn cancel_text(&mut self) {
-        self.pending_text = None;
+    pub fn cancel_text(&mut self) -> bool {
+        self.pending_text.take().is_some()
     }
 
     /// Apply the provisional crop, if one is drawn.
