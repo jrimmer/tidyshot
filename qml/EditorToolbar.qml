@@ -34,6 +34,7 @@ Rectangle {
     signal undoRequested()
     signal redoRequested()
     signal saveRequested()
+    signal saveAsRequested()
     signal copyRequested()
     signal doneRequested()
     signal applyCropRequested()
@@ -142,6 +143,12 @@ Rectangle {
                 text: "Save"
                 font.pixelSize: toolbar.px(12)
                 onClicked: toolbar.saveRequested()
+            }
+            Button {
+                objectName: "saveAsButton"
+                text: "Save As…"
+                font.pixelSize: toolbar.px(12)
+                onClicked: toolbar.saveAsRequested()
             }
             Button {
                 objectName: "doneButton"

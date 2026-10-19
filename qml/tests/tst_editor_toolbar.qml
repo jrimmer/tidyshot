@@ -30,6 +30,7 @@ TestCase {
     SignalSpy { id: undoSpy; target: toolbar; signalName: "undoRequested" }
     SignalSpy { id: saveSpy; target: toolbar; signalName: "saveRequested" }
     SignalSpy { id: cropSpy; target: toolbar; signalName: "applyCropRequested" }
+    SignalSpy { id: saveAsSpy; target: toolbar; signalName: "saveAsRequested" }
 
     function init() {
         toolSpy.clear()
@@ -37,6 +38,7 @@ TestCase {
         undoSpy.clear()
         saveSpy.clear()
         cropSpy.clear()
+        saveAsSpy.clear()
         toolbar.currentTool = "select"
         toolbar.canUndo = false
         toolbar.cropActive = false
@@ -73,6 +75,11 @@ TestCase {
     function test_save_is_always_reachable() {
         mouseClick(findChild(toolbar, "saveButton"), 5, 5)
         compare(saveSpy.count, 1)
+    }
+
+    function test_save_as_is_reachable() {
+        mouseClick(findChild(toolbar, "saveAsButton"), 5, 5)
+        compare(saveAsSpy.count, 1)
     }
 
     function test_crop_actions_only_show_while_a_crop_is_provisional() {

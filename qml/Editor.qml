@@ -85,6 +85,23 @@ Window {
             Math.max(0, Math.min(editorWindow.canvasHeight, (y - top) * editorWindow.canvasHeight / h)))
     }
 
+    /// Save over the opened file, or ask for a path when there is none.
+    function saveOrAsk() {
+        if (editorWindow.path === "")
+            editorWindow.askSaveAs()
+        else
+            EditorApi.save()
+    }
+
+    /// Open the Save As dialog at the current file or a suggested name.
+    function askSaveAs() {
+        saveDialog.selectedFile = editorWindow.saveSuggestion !== ""
+            ? editorWindow.saveSuggestion
+            : editorWindow.path
+        editorWindow.saveAsPrompt = true
+        saveDialog.open()
+    }
+
     Component.onCompleted: {
         EditorApi.bind()
         canvasFrame.forceActiveFocus()
@@ -179,7 +196,7 @@ Window {
         sequences: ["Ctrl+S"]
         context: Qt.WindowShortcut
         enabled: editorWindow.open
-        onActivated: EditorApi.save()
+        onActivated: editorWindow.saveOrAsk()
     }
     Shortcut {
         objectName: "copyShortcut"
@@ -228,7 +245,8 @@ Window {
             onStrokeChosen: function (value) { EditorApi.chooseStroke(value) }
             onUndoRequested: EditorApi.undo()
             onRedoRequested: EditorApi.redo()
-            onSaveRequested: EditorApi.save()
+            onSaveRequested: editorWindow.saveOrAsk()
+            onSaveAsRequested: editorWindow.askSaveAs()
             onCopyRequested: EditorApi.copy()
             onDoneRequested: editorWindow.close()
             onApplyCropRequested: EditorApi.applyCrop()

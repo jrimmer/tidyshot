@@ -255,6 +255,22 @@ mod tests {
     }
 
     #[test]
+    fn only_an_annotate_capture_asks_the_editor_to_open() {
+        assert!(super::wants_annotate(&[
+            "area".to_owned(),
+            "--action".to_owned(),
+            "annotate".to_owned(),
+        ]));
+        assert!(!super::wants_annotate(&[
+            "area".to_owned(),
+            "--action".to_owned(),
+            "copy".to_owned(),
+        ]));
+        assert!(!super::wants_annotate(&["area".to_owned()]));
+        assert!(!super::wants_annotate(&["menu".to_owned()]));
+    }
+
+    #[test]
     fn an_unknown_command_is_rejected_before_qt_or_the_socket() {
         assert_eq!(validate(&["frobnicate".to_owned()]), Some(2));
     }
