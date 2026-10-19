@@ -322,6 +322,7 @@ struct Published {
     width: u32,
     height: u32,
     screen: Option<ScreenRect>,
+    standalone: bool,
 }
 
 static PENDING: std::sync::Mutex<Option<Published>> = std::sync::Mutex::new(None);
@@ -336,6 +337,7 @@ pub fn publish_capture(path: PathBuf, width: u32, height: u32, screen: Option<Sc
         width,
         height,
         screen,
+        standalone: false,
     };
     match BOUND.get() {
         Some(thread) => {
@@ -382,6 +384,7 @@ pub fn set_startup_preview(result: crate::capture_runtime::CaptureResult) {
         width: result.width,
         height: result.height,
         screen: result.screen,
+        standalone: true,
     };
     *STARTUP.lock().expect("preview queue poisoned") = Some(published);
 }
@@ -403,6 +406,7 @@ pub mod qobject {
         #[qml_element]
         #[qml_singleton]
         #[qproperty(bool, open)]
+        #[qproperty(bool, standalone)]
         #[qproperty(QString, path)]
         #[qproperty(QUrl, content_url, cxx_name = "contentUrl")]
         #[qproperty(QString, title)]
@@ -469,6 +473,7 @@ use cxx_qt_lib::{QString, QUrl};
 /// Rust state behind the QML `Preview` singleton.
 pub struct PreviewRust {
     open: bool,
+    standalone: bool,
     path: QString,
     content_url: QUrl,
     title: QString,
@@ -488,8 +493,13 @@ pub struct PreviewRust {
 
 impl Default for PreviewRust {
     fn default() -> Self {
+        let standalone = STARTUP
+            .lock()
+            .map(|startup| startup.is_some())
+            .unwrap_or(false);
         Self {
             open: false,
+            standalone,
             path: QString::from(""),
             content_url: QUrl::default(),
             title: QString::from(""),
@@ -536,6 +546,7 @@ impl PreviewRust {
         self.auto_close_ms = window.auto_close_ms();
         self.auto_close_action = QString::from(window.auto_close_action());
         self.close_after_drag = window.close_after_drag();
+        self.standalone = published.standalone;
         self.open = !window.dismissed();
         self.window = Some(window);
     }
@@ -657,6 +668,23 @@ mod tests {
         assert_eq!(preview.auto_close_ms(), 0);
         assert!(preview.title().starts_with("TidyShot Preview"));
         assert_eq!(preview.info(), "640 × 480");
+    }
+
+    #[test]
+    fn a_command_line_capture_is_marked_standalone() {
+        let result = crate::capture_runtime::CaptureResult {
+            path: PathBuf::from("/tmp/capture.png"),
+            width: 10,
+            height: 10,
+            rect: None,
+            screen: Some(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0)),
+        };
+        set_startup_preview(result);
+        assert!(
+            STARTUP.lock().unwrap().is_some(),
+            "the startup preview is queued for the QML bind"
+        );
+        let _ = STARTUP.lock().unwrap().take();
     }
 
     #[test]

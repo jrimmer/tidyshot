@@ -7,7 +7,9 @@ ApplicationWindow {
     id: window
     width: 480
     height: 620
-    visible: true
+    // A command-line capture starts only the corner preview; the menu window
+    // stays out of the way and the process ends when that preview closes.
+    visible: !Preview.standalone
     title: qsTr("tidyshot")
     color: "#1e1e1e"
 
@@ -109,6 +111,17 @@ ApplicationWindow {
         onSaveRequested: Preview.save()
         onPinRequested: Preview.pin()
         onDismissed: Preview.dismiss()
+    }
+
+    // A command-line capture has no menu window behind it; once its preview
+    // is dismissed there is nothing left to show, so the process exits
+    // instead of idling invisibly.
+    Connections {
+        target: Preview
+        function onOpenChanged() {
+            if (!Preview.open && Preview.standalone)
+                Qt.quit()
+        }
     }
 
     // Window picker for a window capture; the client rectangles stay in Rust.
