@@ -526,11 +526,18 @@ pub struct PreviewRust {
 
 impl Default for PreviewRust {
     fn default() -> Self {
-        let standalone = STARTUP
-            .lock()
-            .map(|startup| startup.is_some())
-            .unwrap_or(false);
-        Self {
+        // A command-line capture saved before the GUI started is applied here,
+        // not only in `bind`: the preview window is constructed with its final
+        // state, so it maps on the first commit instead of needing a runtime
+        // show, which the Wayland backend refuses for an unparented frame.
+        let (standalone, startup) = {
+            let mut queue = STARTUP.lock().expect("preview queue poisoned");
+            match queue.take() {
+                Some(published) => (true, Some(published)),
+                None => (false, None),
+            }
+        };
+        let mut rust = Self {
             open: false,
             standalone,
             path: QString::from(""),
@@ -548,7 +555,11 @@ impl Default for PreviewRust {
             auto_close_action: QString::from("close"),
             close_after_drag: true,
             window: None,
+        };
+        if let Some(published) = startup {
+            rust.apply(published);
         }
+        rust
     }
 }
 
@@ -593,6 +604,53 @@ impl PreviewRust {
 }
 
 impl qobject::Preview {
+
+    /// Copy the Rust state onto the QObject properties.
+    ///
+    /// `PreviewRust` methods mutate plain fields; without going through the
+    /// generated setters no change signal fires and QML bindings keep the
+    /// stale value, so the window never maps even though `open` reads true.
+    fn sync(mut self: Pin<&mut Self>) {
+        let snapshot = {
+            let mut this = self.as_mut();
+            let rust = this.rust_mut().get_mut();
+            (
+                rust.open,
+                rust.standalone,
+                rust.path.clone(),
+                rust.content_url.clone(),
+                rust.title.clone(),
+                rust.info.clone(),
+                rust.message.clone(),
+                rust.video,
+                rust.collapsed,
+                rust.x,
+                rust.y,
+                rust.window_width,
+                rust.window_height,
+                rust.auto_close_ms,
+                rust.auto_close_action.clone(),
+                rust.close_after_drag,
+            )
+        };
+        self.as_mut().set_open(snapshot.0);
+        self.as_mut().set_standalone(snapshot.1);
+        self.as_mut().set_path(snapshot.2);
+        self.as_mut().set_content_url(snapshot.3);
+        self.as_mut().set_title(snapshot.4);
+        self.as_mut().set_info(snapshot.5);
+        self.as_mut().set_message(snapshot.6);
+        self.as_mut().set_video(snapshot.7);
+        self.as_mut().set_collapsed(snapshot.8);
+        self.as_mut().set_x(snapshot.9);
+        self.as_mut().set_y(snapshot.10);
+        self.as_mut().set_window_width(snapshot.11);
+        self.as_mut().set_window_height(snapshot.12);
+        self.as_mut().set_auto_close_ms(snapshot.13);
+        self.as_mut().set_auto_close_action(snapshot.14);
+        self.as_mut().set_close_after_drag(snapshot.15);
+    }
+
     /// Register this object, then replay any capture or action that arrived
     /// before QML loaded.
     pub fn bind(mut self: Pin<&mut Self>) {
@@ -602,6 +660,7 @@ impl qobject::Preview {
         let _ = BOUND.set(self.qt_thread());
         if let Some(published) = pending.or(startup) {
             self.as_mut().rust_mut().get_mut().apply(published);
+            self.as_mut().sync();
         }
         for action in actions {
             run_action(self.as_mut(), action);
@@ -611,6 +670,7 @@ impl qobject::Preview {
     /// Apply a capture published by the runtime.
     fn apply_published(mut self: Pin<&mut Self>, published: Published) {
         self.as_mut().rust_mut().get_mut().apply(published);
+        self.as_mut().sync();
     }
 
     /// Copy the capture to the clipboard.
@@ -621,6 +681,7 @@ impl qobject::Preview {
             .rust_mut()
             .get_mut()
             .action_error(result, "Copied to the clipboard");
+        self.as_mut().sync();
     }
 
     /// Save the capture again through the atomic store.
@@ -631,6 +692,7 @@ impl qobject::Preview {
             .rust_mut()
             .get_mut()
             .action_error(result, "Saved");
+        self.as_mut().sync();
     }
 
     /// Open the capture in the annotate editor.
@@ -644,6 +706,7 @@ impl qobject::Preview {
             .rust_mut()
             .get_mut()
             .action_error(result, "The annotate editor is not available yet");
+        self.as_mut().sync();
     }
 
     /// Pin the capture at its starting size.
@@ -656,6 +719,7 @@ impl qobject::Preview {
             .rust_mut()
             .get_mut()
             .action_error(result, "The pin window is not available yet");
+        self.as_mut().sync();
     }
 
     /// Close the preview.

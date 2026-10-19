@@ -59,6 +59,7 @@ ApplicationWindow {
     Component.onCompleted: {
         Capture.bind()
         Preview.bind()
+
     }
 
     // The Rust action table emits the activated capture row; the runtime then
@@ -88,12 +89,41 @@ ApplicationWindow {
         color: "#9a9a9a"
     }
 
+    // cxx-qt singleton property notifications do not reach QML bindings in
+    // this build, so the windows are fed from the singleton on a short timer.
+    // Sixty milliseconds is below perception and costs one comparison pass.
+    Timer {
+        id: previewSync
+        interval: 60
+        repeat: true
+        running: true
+        onTriggered: {
+            window.visible = !Preview.standalone
+            previewWindow.open = Preview.open
+            previewWindow.visible = Preview.open
+            previewWindow.x = Preview.x
+            previewWindow.y = Preview.y
+            previewWindow.width = Preview.windowWidth
+            previewWindow.height = Preview.windowHeight
+            previewWindow.title = Preview.title
+            previewWindow.info = Preview.info
+            previewWindow.contentUrl = Preview.contentUrl
+            previewWindow.video = Preview.video
+            previewWindow.autoCloseMs = Preview.autoCloseMs
+            previewWindow.autoCloseAction = Preview.autoCloseAction
+            previewWindow.closeAfterDrag = Preview.closeAfterDrag
+            previewWindow.takeFocus = Preview.standalone
+            previewWindow.message = Preview.message
+        }
+    }
+
     // The frameless corner preview is its own always-on-top window, anchored
     // by the Rust runtime to the focused monitor after every capture. The
     // embedded overlay stays out of this window so a capture cannot cover
     // itself with the menu.
     PreviewWindow {
         id: previewWindow
+        transientParent: null
         open: Preview.open
         x: Preview.x
         y: Preview.y
@@ -124,6 +154,7 @@ ApplicationWindow {
     Connections {
         target: Preview
         function onOpenChanged() {
+
             if (!Preview.open && Preview.standalone)
                 Qt.quit()
         }

@@ -42,7 +42,7 @@ Window {
     visible: open
     color: "transparent"
     title: "TidyShot Preview"
-    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
 
     // The shortcuts are scoped to this window, so a capture with no menu
     // behind it takes activation and its keys work straight away. A preview
