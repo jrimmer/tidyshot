@@ -39,6 +39,7 @@ TestCase {
     SignalSpy { id: saveSpy; target: preview; signalName: "saveRequested" }
     SignalSpy { id: pinSpy; target: preview; signalName: "pinRequested" }
     SignalSpy { id: dismissedSpy; target: preview; signalName: "dismissed" }
+    SignalSpy { id: collapseSpy; target: preview; signalName: "collapseRequested" }
 
     function init() {
         annotateSpy.clear()
@@ -46,6 +47,7 @@ TestCase {
         saveSpy.clear()
         pinSpy.clear()
         dismissedSpy.clear()
+        collapseSpy.clear()
         preview.open = true
         preview.autoCloseMs = 0
         preview.autoCloseAction = "close"
@@ -94,6 +96,12 @@ TestCase {
         preview.autoCloseAction = "save"
         tryCompare(dismissedSpy, "count", 1, 2000)
         compare(saveSpy.count, 1)
+    }
+
+    function test_collapsing_reports_the_new_height() {
+        preview.collapseRequested(true)
+        compare(collapseSpy.count, 1)
+        compare(collapseSpy.signalArguments[0][0], true)
     }
 
     function test_a_message_is_shown_including_a_failure() {
