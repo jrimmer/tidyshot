@@ -1072,7 +1072,13 @@ impl qobject::Capture {
     /// A nil region runs slurp on the worker; the controls window then drives
     /// Start, auto-scroll, Done and Cancel until the stitch is saved.
     // Ported from omnishot/widgets.py (ScrollPanel)
-    fn start_scroll(mut self: Pin<&mut Self>, rect: Option<Rect>, horizontal: bool) {
+    fn start_scroll(
+        mut self: Pin<&mut Self>,
+        rect: Option<Rect>,
+        horizontal: bool,
+        begin: bool,
+        autoscroll: bool,
+    ) {
         if *self.busy() {
             let message = "A capture is already in progress";
             self.as_mut().set_message(QString::from(message));
@@ -1080,6 +1086,12 @@ impl qobject::Capture {
             return;
         }
         let control = ScrollControl::new();
+        if begin {
+            control.send(ScrollCommand::Start);
+        }
+        if autoscroll {
+            control.send(ScrollCommand::SetAuto(true));
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         self.as_mut().rust_mut().get_mut().scroll = Some(control.clone());
         self.as_mut().rust_mut().get_mut().cancel = Arc::clone(&cancel);
@@ -1197,8 +1209,8 @@ impl qobject::Capture {
             "desktop" => self.desktop(),
             "previous" => self.previous(),
             "timer" => self.as_mut().start_request("timer", None, false),
-            "scroll" => self.as_mut().start_scroll(None, false),
-            "scroll-horizontal" => self.as_mut().start_scroll(None, true),
+            "scroll" => self.as_mut().start_scroll(None, false, false, false),
+            "scroll-horizontal" => self.as_mut().start_scroll(None, true, false, false),
             "ocr" => return false,
             _ => return false,
         }
@@ -1294,6 +1306,8 @@ impl qobject::Capture {
                 command,
                 geometry,
                 delay,
+                start,
+                autoscroll,
                 ..
             } => {
                 // Scrolling captures drive an interactive session rather than
@@ -1302,8 +1316,12 @@ impl qobject::Capture {
                     let rect = geometry
                         .as_deref()
                         .and_then(|text| crate::geometry::parse_geometry(text).ok());
-                    self.as_mut()
-                        .start_scroll(rect, command == "scroll-horizontal");
+                    self.as_mut().start_scroll(
+                        rect,
+                        command == "scroll-horizontal",
+                        start.unwrap_or(false),
+                        autoscroll.unwrap_or(false),
+                    );
                     return;
                 }
                 self.as_mut().start_command(
