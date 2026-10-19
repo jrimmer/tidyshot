@@ -337,11 +337,15 @@ pub fn publish_capture(path: PathBuf, width: u32, height: u32, screen: Option<Sc
         height,
         screen,
     };
-    *PENDING.lock().expect("preview queue poisoned") = Some(published.clone());
-    if let Some(thread) = BOUND.get() {
-        let _ = thread.queue(move |mut preview| {
-            preview.as_mut().apply_published(published);
-        });
+    match BOUND.get() {
+        Some(thread) => {
+            let _ = thread.queue(move |mut preview| {
+                preview.as_mut().apply_published(published);
+            });
+        }
+        None => {
+            *PENDING.lock().expect("preview queue poisoned") = Some(published);
+        }
     }
 }
 

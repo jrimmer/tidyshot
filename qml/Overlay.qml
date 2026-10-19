@@ -146,11 +146,9 @@ Rectangle {
                     preview.beginDrag()
                 }
                 // A press without a drag never finishes through Drag; release
-                // it here so the auto-close timer rearms.
-                onReleased: {
-                    if (!dragArea.drag.active)
-                        preview.finishDrag(false, false)
-                }
+                // it here so the auto-close timer rearms. An accepted drop is
+                // reported separately by onDragFinished.
+                onReleased: preview.finishDrag(false, false)
                 onClicked: preview.activate()
             }
         }
