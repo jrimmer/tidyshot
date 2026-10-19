@@ -169,6 +169,7 @@ ApplicationWindow {
         anchors.margins: 12
         visible: Capture.scrollOpen
         status: Capture.scrollStatus
+        startLabel: Capture.scrollStartLabel
         frames: Capture.scrollFrames
         autoScroll: Capture.scrollAuto
         running: Capture.scrollRunning

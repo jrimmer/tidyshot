@@ -99,6 +99,15 @@ impl From<std::io::Error> for RuntimeError {
     }
 }
 
+/// Whether a headless scrolling capture can drive auto-scroll.
+///
+/// Without the helper the session still runs, but only manual scrolling could
+/// add frames, which a CLI invocation has no way to do; the caller turns
+/// auto-scroll off and reports that the stitch will be a single viewport.
+fn scroll_helper_available(native: &std::path::Path) -> bool {
+    native.join("scroll-helper").is_file()
+}
+
 /// An encoded scrolling capture.
 struct Image {
     width: u32,
@@ -341,13 +350,10 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             return Err(RuntimeError::Cancelled);
         }
         let native = crate::scroll::native_dir().unwrap_or_else(|| self.native.clone());
-        if !native.join("scroll-helper").is_file() {
-            // A headless capture has no pointer to drive, so without the
-            // helper it could only save one viewport; say so instead.
-            return Err(RuntimeError::Scroll(
-                "Scrolling capture needs the scroll helper. Run bin/native to build it.".to_owned(),
-            ));
-        }
+        // A headless capture has no pointer to drive, so without the helper it
+        // still grabs the first viewport manually; saying which mode ran keeps
+        // the difference from a silent single screenshot visible.
+        let autoscroll = scroll_helper_available(&native);
         let capture = std::sync::Arc::new(crate::scroll::SystemScrollCapture::new(
             self.runner,
             self.mirror,
@@ -368,11 +374,20 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         let outcome = crate::scroll_runtime::drive(
             &mut session,
             &mut panel,
-            crate::scroll_runtime::DriveMode::Headless { autoscroll: true },
+            crate::scroll_runtime::DriveMode::Headless { autoscroll },
             should_cancel,
         );
         match outcome {
-            crate::scroll_runtime::DriveOutcome::Finished(frame) => {
+            crate::scroll_runtime::DriveOutcome::Finished(frame, warning) => {
+                if !autoscroll {
+                    eprintln!(
+                        "tidyshot: the scroll helper is missing, so auto-scroll is off. \
+                         Run bin/native to build it."
+                    );
+                }
+                if let Some(warning) = warning {
+                    eprintln!("tidyshot: the scrolling capture stopped early: {warning}");
+                }
                 self.save_scroll(&frame, Some(rect))
             }
             crate::scroll_runtime::DriveOutcome::Cancelled => Err(RuntimeError::Cancelled),
@@ -831,8 +846,11 @@ fn scroll_on_worker(
         DriveMode::Interactive,
         &mut || cancel.load(Ordering::SeqCst),
     ) {
-        DriveOutcome::Finished(frame) => match runtime.save_scroll(&frame, Some(rect)) {
-            Ok(result) => Completion::Captured(result),
+        DriveOutcome::Finished(frame, warning) => match runtime.save_scroll(&frame, Some(rect)) {
+            Ok(result) => match warning {
+                Some(reason) => Completion::CapturedPartial(result, reason),
+                None => Completion::Captured(result),
+            },
             Err(error) => Completion::Failed(error.to_string()),
         },
         DriveOutcome::Cancelled => Completion::Failed(RuntimeError::Cancelled.to_string()),
@@ -891,6 +909,7 @@ pub mod qobject {
         #[qproperty(QStringList, window_details, cxx_name = "windowDetails")]
         #[qproperty(bool, scroll_open, cxx_name = "scrollOpen")]
         #[qproperty(QString, scroll_status, cxx_name = "scrollStatus")]
+        #[qproperty(QString, scroll_start_label, cxx_name = "scrollStartLabel")]
         #[qproperty(i32, scroll_frames, cxx_name = "scrollFrames")]
         #[qproperty(bool, scroll_auto, cxx_name = "scrollAuto")]
         #[qproperty(bool, scroll_running, cxx_name = "scrollRunning")]
@@ -1002,6 +1021,7 @@ pub struct CaptureRust {
     window_details: QStringList,
     scroll_open: bool,
     scroll_status: QString,
+    scroll_start_label: QString,
     scroll_frames: i32,
     scroll_auto: bool,
     scroll_running: bool,
@@ -1024,6 +1044,7 @@ impl Default for CaptureRust {
             window_details: QStringList::default(),
             scroll_open: false,
             scroll_status: QString::from(""),
+            scroll_start_label: QString::from("Start Capture"),
             scroll_frames: 0,
             scroll_auto: false,
             scroll_running: false,
@@ -1038,6 +1059,8 @@ impl Default for CaptureRust {
 /// What a worker thread hands back to the Qt thread.
 enum Completion {
     Captured(CaptureResult),
+    /// The stitched image is saved but a frame error stopped it short.
+    CapturedPartial(CaptureResult, String),
     Failed(String),
 }
 
@@ -1100,6 +1123,8 @@ impl qobject::Capture {
         self.as_mut().set_scroll_open(false);
         self.as_mut()
             .set_scroll_status(QString::from("Choose an area to scroll"));
+        self.as_mut()
+            .set_scroll_start_label(QString::from("Start Capture"));
         self.as_mut().set_scroll_frames(0);
         self.as_mut().set_scroll_auto(false);
         self.as_mut().set_scroll_running(false);
@@ -1136,6 +1161,8 @@ impl qobject::Capture {
         self.as_mut().set_scroll_open(status.visible);
         self.as_mut()
             .set_scroll_status(QString::from(status.status.clone()));
+        self.as_mut()
+            .set_scroll_start_label(QString::from(status.start_label.clone()));
         self.as_mut().set_scroll_frames(status.frames as i32);
         self.as_mut().set_scroll_auto(status.auto);
         self.as_mut().set_scroll_running(status.running);
@@ -1424,6 +1451,27 @@ impl qobject::Capture {
                 self.as_mut().set_height(result.height as i32);
                 self.as_mut().set_message(QString::from(format!(
                     "Saved {} × {}",
+                    result.width, result.height
+                )));
+                crate::preview::publish_capture(
+                    result.path.clone(),
+                    result.width,
+                    result.height,
+                    result.screen,
+                );
+                self.as_mut().captured_signal(
+                    &QString::from(path),
+                    result.width as i32,
+                    result.height as i32,
+                );
+            }
+            Completion::CapturedPartial(result, reason) => {
+                let path = result.path.display().to_string();
+                self.as_mut().set_path(QString::from(path.clone()));
+                self.as_mut().set_width(result.width as i32);
+                self.as_mut().set_height(result.height as i32);
+                self.as_mut().set_message(QString::from(format!(
+                    "Saved {} × {} before the capture stopped: {reason}",
                     result.width, result.height
                 )));
                 crate::preview::publish_capture(
@@ -1804,6 +1852,18 @@ mod tests {
         assert!(grim[0].args.iter().any(|arg| arg == "ppm"));
         assert!(grim[0].args.contains(&"10,20 100x200".to_owned()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_scroll_helper_decision_follows_the_native_directory() {
+        let dir = scratch("scroll-helper-decision");
+        assert!(!scroll_helper_available(&dir), "an empty dir has no helper");
+        std::fs::write(dir.join("scroll-helper"), b"#!/bin/sh\n").unwrap();
+        assert!(
+            scroll_helper_available(&dir),
+            "a built helper enables auto-scroll"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

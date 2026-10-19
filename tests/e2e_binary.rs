@@ -557,9 +557,10 @@ fn the_ocr_capture_reaches_stubbed_slurp_grim_and_ocr() {
 ///
 /// The stub `grim` answers every PPM request with the same frame, so the
 /// session stops at the repeated rows and the binary prints the saved path.
-/// A small region keeps the matching budget tiny. The process then stays alive
-/// with the corner preview, exactly as a one-shot CLI capture does, so the
-/// test stops it once the history row proves the save landed.
+/// A small region keeps the matching budget tiny. Saving must not end the
+/// process: it stays alive with the corner preview, exactly as a one-shot CLI
+/// capture does, so the test checks it is still running and only then asks it
+/// to stop (SIGTERM) before reading what it printed.
 #[test]
 fn a_headless_scrolling_capture_saves_a_composite() {
     if missing_binary() {
@@ -605,14 +606,29 @@ fn a_headless_scrolling_capture_saves_a_composite() {
         }
         std::thread::sleep(POLL);
     }
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(
-        output.status.code(),
-        None,
-        "scroll should stay with its preview, not exit: {}",
-        String::from_utf8_lossy(&output.stderr)
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "scroll exited after saving instead of staying with its preview"
     );
+    // SIGTERM is catchable, so the process is stopped on request rather than
+    // killed out from under the assertions below.
+    // SAFETY: the pid belongs to this child and SIGTERM is catchable.
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let stop = Instant::now() + EXIT_TIMEOUT;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() >= stop {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("scroll ignored SIGTERM");
+        }
+        std::thread::sleep(POLL);
+    }
+    let output = child.wait_with_output().unwrap();
     let saved = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     assert!(saved.ends_with(".png"), "no capture path printed: {saved}");
     let bytes = fs::read(&saved).expect("the printed capture exists");

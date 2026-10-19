@@ -221,7 +221,10 @@ drives Start, Auto-Scroll, Done and Cancel over the frame count from the
 `Capture` singleton, grim PPM frames feed `stitch::ScrollStitcher`, and Done
 saves the composite as an ordinary PNG with a `scroll` history row. The same
 session runs headlessly for `tidyshot scroll`, stopping at the end of the
-content, at a repeated row, at the 120 megapixel ceiling or on cancel.
+content, at a repeated row, at the 120 megapixel ceiling or on cancel. Without
+the auto-scroll helper the headless run still saves its first viewport and says
+on stderr that auto-scroll is off; a frame error that stops a capture early is
+reported alongside the saved image instead of being dropped.
 
 1. Press **Super+Shift+Print** and select the scrolling content.
 2. Click **Start Capture**. Scroll manually or choose **Auto-Scroll**.

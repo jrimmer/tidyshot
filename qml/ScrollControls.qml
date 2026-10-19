@@ -13,6 +13,8 @@ Rectangle {
 
     /// The session's status line.
     property string status: ""
+    /// The start button's label, so a failed start offers its retry.
+    property string startLabel: "Start Capture"
     /// Frames folded into the stitch so far.
     property int frames: 0
     /// Whether auto-scroll is on.
@@ -71,7 +73,7 @@ Rectangle {
             spacing: 6
             Button {
                 objectName: "scrollStart"
-                text: controls.running ? "Capturing…" : (controls.frames > 0 ? "Retry" : "Start Capture")
+                text: controls.running ? "Capturing…" : controls.startLabel
                 enabled: !controls.running
                 onClicked: controls.startRequested()
             }

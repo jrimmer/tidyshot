@@ -58,6 +58,9 @@ pub struct ScrollStatus {
     pub auto: bool,
     /// Whether frames are currently being accepted.
     pub running: bool,
+    /// The session's start button label: "Retry Capture" after a failed start
+    /// or grab, so the controls offer the retry the session expects.
+    pub start_label: String,
     /// Whether this is a horizontal capture.
     pub horizontal: bool,
 }
@@ -66,7 +69,11 @@ pub struct ScrollStatus {
 #[derive(Debug)]
 pub enum DriveOutcome {
     /// The user finished, or a headless capture reached its stop condition.
-    Finished(FrameData),
+    ///
+    /// The second field is set when a frame error or the megapixel ceiling
+    /// stopped the capture, so the image is shorter than the content. The
+    /// image is still the right result; the caller decides how to report it.
+    Finished(FrameData, Option<String>),
     /// The user cancelled, or the caller asked to stop.
     Cancelled,
     /// No frame could be produced.
@@ -241,6 +248,7 @@ pub fn snapshot(session: &ScrollSession, visible: bool) -> ScrollStatus {
         height,
         auto: session.auto,
         running: session.is_running(),
+        start_label: session.start_label.clone(),
         horizontal: session.horizontal,
     }
 }
@@ -265,17 +273,22 @@ impl DriveMode {
 ///
 /// [`ScrollSession::finish`] returns the image only when a completion
 /// callback is installed; the driver reads the stitch directly so it works
-/// for the CLI and the controls alike.
-fn finish(session: &mut ScrollSession<'_>) -> DriveOutcome {
+/// for the CLI and the controls alike. `warning` carries a frame error that
+/// stopped the capture, so an image saved from it is not silently partial.
+fn finish_with(session: &mut ScrollSession<'_>, warning: Option<String>) -> DriveOutcome {
     let _ = session.finish();
     if !session.finished {
         // A frame is still in flight; the next completion finalises.
         return DriveOutcome::Failed(String::new());
     }
     match session.output() {
-        Some(frame) => DriveOutcome::Finished(frame),
+        Some(frame) => DriveOutcome::Finished(frame, warning),
         None => DriveOutcome::Failed("The scrolling capture has no frames to save".to_owned()),
     }
+}
+
+fn finish(session: &mut ScrollSession<'_>) -> DriveOutcome {
+    finish_with(session, None)
 }
 
 /// True when [`finish`] could not finalise yet because a frame is in flight.
@@ -312,7 +325,7 @@ pub fn drive<'a>(
                 let status = snapshot(session, controls_visible);
                 panel.publish(&status);
                 return match session.output() {
-                    Some(frame) => DriveOutcome::Finished(frame),
+                    Some(frame) => DriveOutcome::Finished(frame, Some(status.status)),
                     None => DriveOutcome::Failed(status.status),
                 };
             }
@@ -320,6 +333,13 @@ pub fn drive<'a>(
             match panel.wait_command(COMMAND_POLL) {
                 Some(ScrollCommand::Start) => session.start(),
                 Some(ScrollCommand::Done) => {
+                    // Done before any frame is a cancel from the shortcut, not
+                    // a reason to close the session with nothing to save.
+                    if session.stitcher().accepted() == 0 {
+                        session.close();
+                        panel.publish(&snapshot(session, false));
+                        return DriveOutcome::Cancelled;
+                    }
                     let outcome = finish(session);
                     if !deferred(&outcome) {
                         panel.publish(&snapshot(session, false));
@@ -385,13 +405,13 @@ pub fn drive<'a>(
         panel.publish(&snapshot(session, controls_visible));
         if let Some(frame) = completed {
             panel.publish(&snapshot(session, false));
-            return DriveOutcome::Finished(frame);
+            return DriveOutcome::Finished(frame, None);
         }
         if session.finished {
             // A deferred Done finalised with this frame.
             panel.publish(&snapshot(session, false));
             return match session.output() {
-                Some(frame) => DriveOutcome::Finished(frame),
+                Some(frame) => DriveOutcome::Finished(frame, None),
                 None => {
                     DriveOutcome::Failed("The scrolling capture has no frames to save".to_owned())
                 }
@@ -423,19 +443,23 @@ pub fn drive<'a>(
             }
             None => {
                 // A failed grab or an over-limit frame stops the session but
-                // keeps the rows already stitched, so Done still works.
-                panel.publish(&snapshot(session, controls_visible));
+                // keeps the rows already stitched, so Done still works. The
+                // reason travels with the image so a headless caller can warn
+                // that the stitch is short.
+                let status = snapshot(session, controls_visible);
+                panel.publish(&status);
                 return match session.output() {
-                    Some(frame) => DriveOutcome::Finished(frame),
-                    None => DriveOutcome::Failed(session.status().to_owned()),
+                    Some(frame) => DriveOutcome::Finished(frame, Some(status.status)),
+                    None => DriveOutcome::Failed(status.status),
                 };
             }
         }
         if !session.is_running() {
-            panel.publish(&snapshot(session, controls_visible));
+            let status = snapshot(session, controls_visible);
+            panel.publish(&status);
             return match session.output() {
-                Some(frame) => DriveOutcome::Finished(frame),
-                None => DriveOutcome::Failed(session.status().to_owned()),
+                Some(frame) => DriveOutcome::Finished(frame, Some(status.status)),
+                None => DriveOutcome::Failed(status.status),
             };
         }
     }
@@ -627,7 +651,7 @@ mod tests {
             DriveMode::Headless { autoscroll: true },
             &mut || false,
         );
-        let DriveOutcome::Finished(image) = outcome else {
+        let DriveOutcome::Finished(image, _) = outcome else {
             panic!("expected a finished capture, got {outcome:?}");
         };
         assert_eq!(image.width, width);
@@ -655,7 +679,7 @@ mod tests {
             DriveMode::Headless { autoscroll: true },
             &mut || false,
         );
-        let DriveOutcome::Finished(image) = outcome else {
+        let DriveOutcome::Finished(image, _) = outcome else {
             panic!("expected the first frame, got {outcome:?}");
         };
         assert_eq!(image.height, 200);
@@ -724,11 +748,39 @@ mod tests {
             DriveMode::Headless { autoscroll: true },
             &mut || false,
         );
-        let DriveOutcome::Finished(image) = outcome else {
+        let DriveOutcome::Finished(image, _) = outcome else {
             panic!("expected the first frame, got {outcome:?}");
         };
         assert_eq!(image.data, first.data);
         assert_eq!(session.stitcher().accepted(), 1);
+    }
+
+    #[test]
+    fn a_headless_capture_without_auto_scroll_still_saves_the_first_viewport() {
+        // The CLI falls back to this mode when the scroll helper is missing:
+        // no pointer can be driven, so identical frames end the capture and
+        // the one viewport it grabbed is still the result.
+        let width = 200;
+        let page = textured_page(200, width);
+        let first = FrameData::new(page, width, 200, 3);
+        let frames = (0..6).map(|_| first.clone()).collect();
+        let mut session = session(frames, Rect::new(0, 0, width as i32, 200), false);
+        let (mut panel, _published) = recorder();
+        let outcome = drive(
+            &mut session,
+            &mut panel,
+            DriveMode::Headless { autoscroll: false },
+            &mut || false,
+        );
+        let DriveOutcome::Finished(image, warning) = outcome else {
+            panic!("expected a finished capture, got {outcome:?}");
+        };
+        assert_eq!(image.data, first.data);
+        assert!(
+            warning.is_none(),
+            "a normal end is not a warning: {warning:?}"
+        );
+        assert!(!session.auto);
     }
 
     #[test]
@@ -772,7 +824,7 @@ mod tests {
             DriveMode::Headless { autoscroll: true },
             &mut || false,
         );
-        let DriveOutcome::Finished(image) = outcome else {
+        let DriveOutcome::Finished(image, _) = outcome else {
             panic!("expected a finished capture, got {outcome:?}");
         };
         assert_eq!(image.height, height);
@@ -865,11 +917,79 @@ mod tests {
             DriveMode::Interactive,
             &mut || false,
         );
-        let DriveOutcome::Finished(image) = outcome else {
+        let DriveOutcome::Finished(image, _) = outcome else {
             panic!("expected a finished capture, got {outcome:?}");
         };
         assert_eq!(image.width, width);
         assert_eq!(image.height, viewport);
+    }
+
+    #[test]
+    fn an_interactive_done_before_start_cancels_without_closing_on_a_failure() {
+        let width = 200;
+        let frames = vertical_frames(400, width, 200);
+        let control = ScrollControl::new();
+        // A `scroll-done` shortcut reaches Done while the session is open but
+        // never started, so no frame could have landed yet.
+        control.send(ScrollCommand::Done);
+        let mut panel = ControlPanel::new(control.clone());
+        let mut session = session(frames, Rect::new(0, 0, width as i32, 200), false);
+        let outcome = drive(
+            &mut session,
+            &mut panel,
+            DriveMode::Interactive,
+            &mut || false,
+        );
+        assert!(matches!(outcome, DriveOutcome::Cancelled), "{outcome:?}");
+        assert!(session.closed, "the session must not linger open");
+        assert!(!control.snapshot().visible);
+    }
+
+    #[test]
+    fn a_headless_stop_that_keeps_the_image_reports_why_it_stopped() {
+        struct FailsAfterFirst {
+            first: Mutex<Option<FrameData>>,
+        }
+        impl ScrollCapture for FailsAfterFirst {
+            fn grab(&self, _rect: Rect) -> Result<FrameData, String> {
+                let mut first = self.first.lock().unwrap();
+                match first.take() {
+                    Some(frame) => Ok(frame),
+                    None => Err("Display disconnected".to_owned()),
+                }
+            }
+            fn mirror_start(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn mirror_stop(&self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let width = 200;
+        let page = textured_page(400, width);
+        let first = FrameData::new(page[..200 * width * 3].to_vec(), width, 200, 3);
+        let mut session = ScrollSession::new(
+            Rect::new(0, 0, width as i32, 200),
+            false,
+            Arc::new(FailsAfterFirst {
+                first: Mutex::new(Some(first.clone())),
+            }),
+            Box::new(Pointer::inside()),
+            Box::new(Ui),
+        );
+        let (mut panel, _published) = recorder();
+        let outcome = drive(
+            &mut session,
+            &mut panel,
+            DriveMode::Headless { autoscroll: true },
+            &mut || false,
+        );
+        let DriveOutcome::Finished(image, warning) = outcome else {
+            panic!("expected the stitched image, got {outcome:?}");
+        };
+        assert_eq!(image.data, first.data);
+        let warning = warning.expect("a stopped capture must carry its reason");
+        assert!(warning.contains("Display disconnected"), "{warning}");
     }
 
     #[test]

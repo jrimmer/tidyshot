@@ -34,6 +34,7 @@ TestCase {
         doneSpy.clear()
         cancelSpy.clear()
         controls.status = "Scroll slowly inside the selection."
+        controls.startLabel = "Start Capture"
         controls.frames = 0
         controls.autoScroll = false
         controls.running = false
@@ -108,6 +109,13 @@ TestCase {
         controls.running = true
         compare(button("scrollStart").enabled, false)
         compare(button("scrollStart").text, "Capturing…")
+    }
+
+    // The session decides when a retry is offered; the panel only shows it.
+    function test_the_start_button_shows_the_session_label() {
+        compare(button("scrollStart").text, "Start Capture")
+        controls.startLabel = "Retry Capture"
+        compare(button("scrollStart").text, "Retry Capture")
     }
 
     function test_auto_state_and_axis_are_labelled() {
