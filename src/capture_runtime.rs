@@ -52,6 +52,8 @@ pub enum RuntimeError {
     Io(String),
     /// The produced pixels could not be read or composed.
     Image(String),
+    /// The scrolling session stopped without an image worth saving.
+    Scroll(String),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -64,6 +66,7 @@ impl std::fmt::Display for RuntimeError {
             Self::Command(error) => error.fmt(f),
             Self::Io(message) => f.write_str(message),
             Self::Image(message) => f.write_str(message),
+            Self::Scroll(message) => f.write_str(message),
         }
     }
 }
@@ -89,6 +92,44 @@ impl From<std::io::Error> for RuntimeError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error.to_string())
     }
+}
+
+/// An encoded scrolling capture.
+struct Image {
+    width: u32,
+    height: u32,
+    png: Vec<u8>,
+}
+
+/// Convert a stitched frame to a PNG, expanding RGB rows to RGBA once.
+fn encode_frame(frame: &crate::stitch::FrameData) -> Result<Image, RuntimeError> {
+    if frame.width == 0 || frame.height == 0 {
+        return Err(RuntimeError::Image(
+            "the scrolling capture has no area".to_owned(),
+        ));
+    }
+    let pixels = frame.width * frame.height;
+    let mut data = Vec::with_capacity(pixels * 4);
+    match frame.channels {
+        4 => data.extend_from_slice(&frame.data[..pixels * 4]),
+        3 => {
+            for pixel in frame.data[..pixels * 3].chunks_exact(3) {
+                data.extend_from_slice(pixel);
+                data.push(255);
+            }
+        }
+        channels => {
+            return Err(RuntimeError::Image(format!(
+                "the scrolling capture has {channels} channels"
+            )));
+        }
+    }
+    let png = crate::pngzip::Image::new(frame.width, frame.height, data).to_png();
+    Ok(Image {
+        width: frame.width as u32,
+        height: frame.height as u32,
+        png,
+    })
 }
 
 /// One selectable window from `hyprctl -j clients`.
@@ -261,15 +302,98 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
                     }
                     request.rect = Some(rect);
                 }
-                CaptureOutcome::Scroll { .. } => {
-                    return Err(RuntimeError::Unsupported(
-                        "Scrolling capture is not wired yet".to_owned(),
-                    ));
+                CaptureOutcome::Scroll { rect, horizontal } => {
+                    return self.run_scroll(request.mode, rect, horizontal, &mut should_cancel);
                 }
                 CaptureOutcome::Grabbed(frame) => return self.save_frame(&frame),
                 CaptureOutcome::Frames(frames) => return self.save_frames(&frames),
             }
         }
+    }
+
+    /// Run a scrolling capture to completion headlessly.
+    ///
+    /// This is the CLI path: it selects an area when the request carries
+    /// none, then grabs and stitches until the content ends, a row repeats or
+    /// the megapixel ceiling is reached. The stitched image is saved exactly
+    /// like a screenshot, so a headless capture is still reachable later.
+    // Ported from omnishot/widgets.py (ScrollPanel start/finish)
+    fn run_scroll<F>(
+        &self,
+        mode: crate::capture_session::CaptureMode,
+        rect: Option<Rect>,
+        horizontal: bool,
+        should_cancel: &mut F,
+    ) -> Result<CaptureResult, RuntimeError>
+    where
+        F: FnMut() -> bool,
+    {
+        let rect = match rect {
+            Some(rect) => rect,
+            None => self.select_region(mode)?,
+        };
+        if should_cancel() {
+            return Err(RuntimeError::Cancelled);
+        }
+        let native = crate::scroll::native_dir().unwrap_or_else(|| self.native.clone());
+        let capture = std::sync::Arc::new(crate::scroll::SystemScrollCapture::new(
+            self.runner,
+            self.mirror,
+            native.clone(),
+        ));
+        let input = Box::new(crate::scroll::SystemScrollInput {
+            runner: self.runner,
+            native,
+        });
+        let mut session = crate::scroll::ScrollSession::new(
+            rect,
+            horizontal,
+            capture,
+            input,
+            Box::new(crate::scroll::NoUi),
+        );
+        let mut panel = crate::scroll_runtime::HeadlessPanel::default();
+        let outcome = crate::scroll_runtime::drive(
+            &mut session,
+            &mut panel,
+            crate::scroll_runtime::DriveMode::Headless { autoscroll: true },
+            should_cancel,
+        );
+        match outcome {
+            crate::scroll_runtime::DriveOutcome::Finished(frame) => {
+                self.save_scroll(&frame, Some(rect))
+            }
+            crate::scroll_runtime::DriveOutcome::Cancelled => Err(RuntimeError::Cancelled),
+            crate::scroll_runtime::DriveOutcome::Failed(message) => {
+                Err(RuntimeError::Scroll(message))
+            }
+        }
+    }
+
+    /// Save a stitched scrolling capture and append its history row.
+    ///
+    /// The stitcher keeps RGB or RGBA rows; PNG output is RGBA8, so the one
+    /// conversion happens here, at the save boundary, and every other stage
+    /// works on the borrowed stitched buffer.
+    pub fn save_scroll(
+        &self,
+        frame: &crate::stitch::FrameData,
+        rect: Option<Rect>,
+    ) -> Result<CaptureResult, RuntimeError> {
+        let Image { width, height, png } = encode_frame(frame)?;
+        let path = self.capture_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::storage::atomic_write_file(&path, &png)?;
+        let row = HistoryRow::scroll(path.clone(), width, height, rect);
+        history::prepend(&self.root, &row)?;
+        Ok(CaptureResult {
+            path,
+            width,
+            height,
+            rect,
+        })
     }
 
     /// Run the interactive selector, restricted to client rectangles for a

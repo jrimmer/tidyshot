@@ -113,12 +113,12 @@ pub struct ScrollJob {
 /// adapter and the auto-scroll input, which stay on the owning thread; only the
 /// frame source (already `Send + Sync`) and the shared stitch cross threads.
 #[derive(Clone)]
-pub struct ScrollWorker {
-    capture: Arc<dyn ScrollCapture>,
+pub struct ScrollWorker<'a> {
+    capture: Arc<dyn ScrollCapture + 'a>,
     stitcher: Arc<Mutex<ScrollStitcher>>,
 }
 
-impl ScrollWorker {
+impl ScrollWorker<'_> {
     /// Grab one frame and fold it into the stitch.
     ///
     /// This is the reference's `work()`: the hide delay, the `grim` grab and
@@ -139,7 +139,7 @@ impl ScrollWorker {
 }
 
 /// A running scrolling capture.
-pub struct ScrollSession {
+pub struct ScrollSession<'a> {
     pub rect: Rect,
     pub horizontal: bool,
     pub interval: Duration,
@@ -157,8 +157,8 @@ pub struct ScrollSession {
     pub generation: u64,
     stitcher: Arc<Mutex<ScrollStitcher>>,
     finish_pending: bool,
-    capture: Arc<dyn ScrollCapture>,
-    input: Box<dyn ScrollInput>,
+    capture: Arc<dyn ScrollCapture + 'a>,
+    input: Box<dyn ScrollInput + 'a>,
     ui: Box<dyn ScrollUi>,
     /// Invoked with the stitched image once the controls are released.
     pub on_completed: Option<Box<dyn FnMut(FrameData)>>,
@@ -166,13 +166,13 @@ pub struct ScrollSession {
     pub on_cancelled: Option<Box<dyn FnMut()>>,
 }
 
-impl ScrollSession {
+impl<'a> ScrollSession<'a> {
     #[must_use]
     pub fn new(
         rect: Rect,
         horizontal: bool,
-        capture: Arc<dyn ScrollCapture>,
-        input: Box<dyn ScrollInput>,
+        capture: Arc<dyn ScrollCapture + 'a>,
+        input: Box<dyn ScrollInput + 'a>,
         ui: Box<dyn ScrollUi>,
     ) -> Self {
         let stitcher = ScrollStitcher::new(horizontal);
@@ -211,8 +211,8 @@ impl ScrollSession {
         rect: Rect,
         horizontal: bool,
         max_pixels: usize,
-        capture: Arc<dyn ScrollCapture>,
-        input: Box<dyn ScrollInput>,
+        capture: Arc<dyn ScrollCapture + 'a>,
+        input: Box<dyn ScrollInput + 'a>,
         ui: Box<dyn ScrollUi>,
     ) -> Self {
         let mut session = Self::new(rect, horizontal, capture, input, ui);
@@ -224,7 +224,7 @@ impl ScrollSession {
 
     /// A cloneable handle for grabbing and stitching on a worker thread.
     #[must_use]
-    pub fn worker(&self) -> ScrollWorker {
+    pub fn worker(&self) -> ScrollWorker<'_> {
         ScrollWorker {
             capture: Arc::clone(&self.capture),
             stitcher: Arc::clone(&self.stitcher),
@@ -832,7 +832,12 @@ mod tests {
     fn session(
         rect: Rect,
         reject_first: bool,
-    ) -> (ScrollSession, Log, Arc<Mutex<usize>>, Arc<Mutex<usize>>) {
+    ) -> (
+        ScrollSession<'static>,
+        Log,
+        Arc<Mutex<usize>>,
+        Arc<Mutex<usize>>,
+    ) {
         let log = Log::default();
         let completed = Arc::new(Mutex::new(0usize));
         let cancelled = Arc::new(Mutex::new(0usize));
@@ -1057,15 +1062,19 @@ mod tests {
             Box::new(NoUi),
         );
         session.running = true;
-        let worker = session.worker();
-        let handle = std::thread::spawn(move || {
-            worker.run(ScrollJob {
-                generation: 0,
-                rect: Rect::new(10, 10, 200, 100),
-                wait: false,
-            })
+        // The worker borrows the session's frame source, so the thread is
+        // scoped to the session's lifetime.
+        let result = std::thread::scope(|scope| {
+            let worker = session.worker();
+            let handle = scope.spawn(move || {
+                worker.run(ScrollJob {
+                    generation: 0,
+                    rect: Rect::new(10, 10, 200, 100),
+                    wait: false,
+                })
+            });
+            handle.join().expect("worker thread finishes")
         });
-        let result = handle.join().expect("worker thread finishes");
         assert!(result.is_ok(), "{result:?}");
         // The frame the worker stitched is visible to the session.
         assert!(session.output().is_some());

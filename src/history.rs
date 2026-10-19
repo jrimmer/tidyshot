@@ -56,6 +56,16 @@ impl HistoryRow {
         }
     }
 
+    /// A finished scrolling capture; a scroll stitch is a screenshot too, so
+    /// the annotate-last path still finds it.
+    #[must_use]
+    pub fn scroll(path: impl Into<PathBuf>, width: u32, height: u32, rect: Option<Rect>) -> Self {
+        Self {
+            kind: "scroll".to_owned(),
+            ..Self::screenshot(path, width, height, rect)
+        }
+    }
+
     /// Serialize the row for the history file.
     #[must_use]
     pub fn to_value(&self) -> Value {

@@ -42,6 +42,7 @@ pub mod raster;
 pub mod recording;
 pub mod render;
 pub mod scroll;
+pub mod scroll_runtime;
 pub mod settings;
 pub mod spotlight;
 pub mod stitch;
