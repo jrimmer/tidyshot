@@ -25,12 +25,14 @@ use crate::json::Value;
 use crate::mirror::MirrorRegistry;
 
 /// A completed capture on disk.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaptureResult {
     pub path: PathBuf,
     pub width: u32,
     pub height: u32,
     pub rect: Option<Rect>,
+    /// The focused monitor the preview anchors to, when one was resolved.
+    pub screen: Option<crate::overlay::ScreenRect>,
 }
 
 /// Why a capture could not complete.
@@ -307,6 +309,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             width,
             height,
             rect: frame.rect,
+            screen: None,
         })
     }
 
@@ -371,6 +374,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             width,
             height,
             rect: Some(bounds),
+            screen: None,
         })
     }
 
@@ -578,7 +582,13 @@ fn capture_on_worker(
         return Completion::Failed(RuntimeError::Cancelled.to_string());
     }
     match runtime.run_with_cancel(request, None, || cancel.load(Ordering::SeqCst)) {
-        Ok(result) => Completion::Captured(result),
+        Ok(mut result) => {
+            result.screen = crate::commands::hypr(&runner, "monitors")
+                .ok()
+                .and_then(|value| value.as_array().map(crate::preview::focused_monitor_screen))
+                .flatten();
+            Completion::Captured(result)
+        }
         Err(error) => Completion::Failed(error.to_string()),
     }
 }
@@ -877,17 +887,25 @@ impl qobject::Capture {
     fn run_app_command(mut self: Pin<&mut Self>, command: Command) {
         // Non-capture rows keep their own behaviour; the runtime only owns
         // the screenshot commands.
-        if let Command::Capture {
-            command,
-            geometry,
-            delay,
-            ..
-        } = command
-        {
-            self.as_mut().start_command(
+        match command {
+            Command::Capture {
+                command,
+                geometry,
+                delay,
+                ..
+            } => self.as_mut().start_command(
                 CaptureRequest::resolve(&command, geometry.as_deref(), delay, 3),
                 command == "window",
-            );
+            ),
+            Command::Overlay(path) => crate::preview::publish_file(path),
+            Command::Restore => {
+                if let Some(path) = crate::history::newest_path(&crate::settings::data_dir()) {
+                    crate::preview::publish_file(path);
+                }
+            }
+            Command::CloseAll => crate::preview::publish_dismiss(),
+            Command::SaveAll => crate::preview::publish_save(),
+            _ => {}
         }
     }
 
@@ -974,6 +992,12 @@ impl qobject::Capture {
                     "Saved {} × {}",
                     result.width, result.height
                 )));
+                crate::preview::publish_capture(
+                    result.path.clone(),
+                    result.width,
+                    result.height,
+                    result.screen,
+                );
                 self.as_mut().captured_signal(
                     &QString::from(path),
                     result.width as i32,

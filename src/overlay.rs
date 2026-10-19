@@ -31,15 +31,15 @@ pub enum Corner {
 }
 
 impl Corner {
-    /// Parse the settings value, falling back to the bottom-left corner the
-    /// source uses.
+    /// Parse the settings value, falling back to the bottom-right corner a
+    /// fresh preview uses.
     #[must_use]
     pub fn parse(value: &str) -> Self {
         match value {
-            "bottom-right" => Self::BottomRight,
+            "bottom-left" => Self::BottomLeft,
             "top-left" => Self::TopLeft,
             "top-right" => Self::TopRight,
-            _ => Self::BottomLeft,
+            _ => Self::BottomRight,
         }
     }
 
@@ -289,8 +289,118 @@ impl Default for PreviewSettings {
             timeout: 0.0,
             auto_action: AutoAction::Close,
             close_after_drag: true,
-            corner: Corner::BottomLeft,
+            corner: Corner::BottomRight,
             margin: 18.0,
+        }
+    }
+}
+
+/// Settings keys the Quick Access preview reads, newest spelling first.
+///
+/// The source stores these under the quick-access tab; older settings files
+/// and the preview spellings are accepted so an existing install keeps its
+/// behavior.
+pub const TIMEOUT_KEYS: &[&str] = &[
+    "preview_timeout",
+    "quick_access_timeout",
+    "quickaccess_timeout",
+    "overlay_timeout",
+    "auto_close_timeout",
+    "preview_timeout_ms",
+];
+pub const ACTION_KEYS: &[&str] = &[
+    "preview_action",
+    "preview_auto_action",
+    "quick_access_action",
+    "quickaccess_action",
+    "overlay_action",
+    "auto_close_action",
+];
+pub const CLOSE_AFTER_DRAG_KEYS: &[&str] = &[
+    "close_after_drag",
+    "preview_close_after_drag",
+    "quick_access_close_after_drag",
+];
+pub const CORNER_KEYS: &[&str] = &[
+    "preview_corner",
+    "preview_position",
+    "quick_access_corner",
+    "quickaccess_corner",
+    "overlay_corner",
+];
+pub const MARGIN_KEYS: &[&str] = &["preview_margin", "quick_access_margin"];
+
+fn first_setting_key<'a>(
+    settings: &'a std::collections::BTreeMap<String, crate::json::Value>,
+    keys: &[&'a str],
+) -> Option<(&'a str, &'a crate::json::Value)> {
+    keys.iter()
+        .find_map(|key| settings.get(*key).map(|value| (*key, value)))
+}
+
+fn first_setting<'a>(
+    settings: &'a std::collections::BTreeMap<String, crate::json::Value>,
+    keys: &'a [&'a str],
+) -> Option<&'a crate::json::Value> {
+    first_setting_key(settings, keys).map(|(_, value)| value)
+}
+
+/// Read the Quick Access preview preferences from stored settings.
+///
+/// A missing or malformed value keeps the default, so a broken settings file
+/// never stops a capture from showing its preview.
+#[must_use]
+pub fn preview_settings(
+    settings: &std::collections::BTreeMap<String, crate::json::Value>,
+) -> PreviewSettings {
+    let mut preview = PreviewSettings::default();
+    if let Some((key, value)) = first_setting_key(settings, TIMEOUT_KEYS)
+        .and_then(|(key, value)| value.as_f64().map(|value| (key, value)))
+    {
+        // The settings UI stores seconds; a `_ms` spelling stores milliseconds.
+        let value = value.max(0.0);
+        preview.timeout = if key.ends_with("_ms") {
+            value / 1000.0
+        } else {
+            value
+        };
+    }
+    if let Some(value) = first_setting(settings, ACTION_KEYS).and_then(crate::json::Value::as_str) {
+        preview.auto_action = AutoAction::parse(value);
+    }
+    if let Some(value) =
+        first_setting(settings, CLOSE_AFTER_DRAG_KEYS).and_then(crate::json::Value::as_bool)
+    {
+        preview.close_after_drag = value;
+    }
+    if let Some(value) = first_setting(settings, CORNER_KEYS).and_then(crate::json::Value::as_str) {
+        preview.corner = Corner::parse(value);
+    }
+    if let Some(value) = first_setting(settings, MARGIN_KEYS).and_then(crate::json::Value::as_f64) {
+        preview.margin = value.max(0.0);
+    }
+    preview
+}
+
+impl PreviewSettings {
+    /// The auto-close delay in whole milliseconds, zero when disabled.
+    #[must_use]
+    pub fn auto_close_ms(&self) -> i32 {
+        if self.timeout <= 0.0 {
+            0
+        } else {
+            (self.timeout * 1000.0)
+                .round()
+                .clamp(1.0, f64::from(i32::MAX)) as i32
+        }
+    }
+
+    /// The auto-close action as the QML overlay spells it.
+    #[must_use]
+    pub const fn auto_close_action(&self) -> &'static str {
+        match self.auto_action {
+            AutoAction::Close => "close",
+            AutoAction::Save => "save",
         }
     }
 }

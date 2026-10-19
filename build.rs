@@ -23,6 +23,7 @@ fn main() {
     .files([
         "src/bridge.rs",
         "src/menu.rs",
+        "src/preview.rs",
         "src/capture_runtime.rs",
         "src/qml_load.rs",
         "src/text_result.rs",

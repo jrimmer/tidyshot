@@ -35,6 +35,7 @@ pub mod ocr;
 pub mod overlay;
 pub mod pin;
 pub mod pngzip;
+pub mod preview;
 pub mod project;
 pub mod qml_load;
 pub mod raster;
