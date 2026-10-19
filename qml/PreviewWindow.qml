@@ -1,0 +1,69 @@
+// Frameless Quick Access preview window for one completed capture.
+// Ported from omnishot/widgets.py (QuickOverlay window placement)
+//
+// The window owns only its chrome and key bindings; the Rust `Preview`
+// singleton supplies the position, settings and actions. Overlay.qml lays out
+// the body, so the same preview component serves the tests and the app.
+import QtQuick
+
+Window {
+    id: previewWindow
+
+    /// Whether the preview is showing.
+    property bool open: false
+    /// The capture's dimensions.
+    property string info: ""
+    /// The saved file to show.
+    property url contentUrl: ""
+    /// True when the file is a recording.
+    property bool video: false
+    /// Auto-close delay in milliseconds; zero keeps the preview open.
+    property int autoCloseMs: 0
+    /// "close" or "save" when the auto-close timer elapses.
+    property string autoCloseAction: "close"
+    /// Close after an accepted drag unless Alt was held.
+    property bool closeAfterDrag: true
+
+    signal annotateRequested()
+    signal copyRequested()
+    signal saveRequested()
+    signal pinRequested()
+    signal dismissed()
+
+    width: 355
+    height: 300
+    visible: open
+    color: "transparent"
+    title: "TidyShot Preview — TidyShot"
+    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+
+    // Enter copies and Escape closes; the window is built to be usable without
+    // moving the pointer back to a button.
+    Shortcut {
+        sequences: ["Return", "Enter"]
+        enabled: previewWindow.open
+        onActivated: previewWindow.copyRequested()
+    }
+    Shortcut {
+        sequences: ["Escape"]
+        enabled: previewWindow.open
+        onActivated: previewWindow.dismissed()
+    }
+
+    Overlay {
+        id: overlay
+        anchors.fill: parent
+        title: previewWindow.title
+        info: previewWindow.info
+        contentUrl: previewWindow.contentUrl
+        video: previewWindow.video
+        autoCloseMs: previewWindow.autoCloseMs
+        autoCloseAction: previewWindow.autoCloseAction
+        closeAfterDrag: previewWindow.closeAfterDrag
+        onActivate: previewWindow.annotateRequested()
+        onCopyRequested: previewWindow.copyRequested()
+        onSaveRequested: previewWindow.saveRequested()
+        onPinRequested: previewWindow.pinRequested()
+        onDismissed: previewWindow.dismissed()
+    }
+}

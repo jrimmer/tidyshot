@@ -52,8 +52,12 @@ ApplicationWindow {
         onDismissed: Qt.quit()
     }
 
-    // Hand the runtime this object so forwarded and startup commands reach it.
-    Component.onCompleted: Capture.bind()
+    // Hand the runtime these objects so forwarded and startup commands reach
+    // them; a capture that completed before QML loaded is replayed here.
+    Component.onCompleted: {
+        Capture.bind()
+        Preview.bind()
+    }
 
     // The Rust action table emits the activated capture row; the runtime then
     // performs it on a worker thread and reports back through its own signals.
@@ -82,19 +86,29 @@ ApplicationWindow {
         color: "#9a9a9a"
     }
 
-    // Corner preview for a completed capture. The overlay owns its layout;
-    // the captured path and dimensions come from the Rust runtime.
-    Overlay {
-        id: preview
-        anchors.left: parent.left
-        anchors.bottom: parent.bottom
-        anchors.margins: 12
-        height: preview.collapsed ? 52 : 260
-        visible: Capture.path !== ""
-        title: "Capture ready"
-        info: Capture.width > 0 ? Capture.width + " × " + Capture.height : ""
-        contentUrl: Capture.path !== "" ? Qt.resolvedUrl("file://" + Capture.path) : ""
-        onDismissed: Capture.clear()
+    // The frameless corner preview is its own always-on-top window, anchored
+    // by the Rust runtime to the focused monitor after every capture. The
+    // embedded overlay stays out of this window so a capture cannot cover
+    // itself with the menu.
+    PreviewWindow {
+        id: previewWindow
+        open: Preview.open
+        x: Preview.x
+        y: Preview.y
+        width: Preview.windowWidth
+        height: Preview.windowHeight
+        title: Preview.title
+        info: Preview.info
+        contentUrl: Preview.contentUrl
+        video: Preview.video
+        autoCloseMs: Preview.autoCloseMs
+        autoCloseAction: Preview.autoCloseAction
+        closeAfterDrag: Preview.closeAfterDrag
+        onAnnotateRequested: Preview.annotate()
+        onCopyRequested: Preview.copy()
+        onSaveRequested: Preview.save()
+        onPinRequested: Preview.pin()
+        onDismissed: Preview.dismiss()
     }
 
     // Window picker for a window capture; the client rectangles stay in Rust.

@@ -11,6 +11,7 @@ fn main() {
             "qml/MenuPanel.qml",
             "qml/WindowPicker.qml",
             "qml/Overlay.qml",
+            "qml/PreviewWindow.qml",
             "qml/TrayMenu.qml",
             "qml/TextResultDialog.qml",
         ]),

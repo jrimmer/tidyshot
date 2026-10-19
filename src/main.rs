@@ -95,23 +95,6 @@ where
 {
     if forward(args) { Some(0) } else { None }
 }
-/// Run a capture directly when no instance is running.
-///
-/// A capture that never reaches a window is the CLI's normal path: the
-/// invocation resolves its geometry, grabs the pixels and prints the saved
-/// file. Interactive `ocr` stays with the GUI because its review dialog is
-/// what presents the result. `None` means the command needs the window.
-fn direct_capture(args: &[String]) -> Option<i32> {
-    let argv_command =
-        tidyshot::app::route_and_resolve(args, &tidyshot::commands::SystemRunner).ok()?;
-    match &argv_command {
-        tidyshot::app::Command::Capture { command, .. } if command != "ocr" => {
-            Some(tidyshot::capture_runtime::cli(&argv_command))
-        }
-        _ => None,
-    }
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = run_subcommand(&args) {
@@ -130,9 +113,8 @@ fn main() {
     if let Some(code) = delivered {
         std::process::exit(code);
     }
-    if let Some(code) = direct_capture(&args) {
-        std::process::exit(code);
-    }
+    // A capture starts the window rather than saving and exiting, so its
+    // corner preview can offer copy, save, annotate, pin and drag.
     // Qt reads its hardware-decoding variable when the media backend starts,
     // so the preview policy is applied before the GUI constructs QGuiApplication.
     tidyshot::video_decoder::configure_preview_decoder(&tidyshot::settings::stored_settings());
@@ -141,7 +123,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_capture, dispatch, hand_off, run_subcommand, validate};
+    use super::{dispatch, hand_off, run_subcommand, validate};
 
     #[test]
     fn menu_subcommand_lists_actions_and_stays_headless() {
@@ -246,15 +228,5 @@ mod tests {
     #[test]
     fn without_an_instance_the_sender_starts_the_gui() {
         assert_eq!(hand_off(&["area".to_owned()], |_| false), None);
-    }
-
-    #[test]
-    fn only_a_capture_runs_directly_from_the_cli() {
-        // Non-capture commands have no direct execution path; they still need
-        // the window. The classification is what keeps a menu command from
-        // exiting the process early.
-        for command in ["menu", "history", "settings", "quit"] {
-            assert_eq!(direct_capture(&[command.to_owned()]), None, "{command}");
-        }
     }
 }
