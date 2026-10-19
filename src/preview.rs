@@ -258,6 +258,16 @@ impl PreviewWindow {
     }
 }
 
+/// The note shown when the preview cannot anchor to a real monitor.
+#[must_use]
+pub fn monitor_hint(screen: Option<ScreenRect>) -> &'static str {
+    if screen.is_some() {
+        ""
+    } else {
+        "Monitor unavailable; using the default corner"
+    }
+}
+
 /// The screen a preview assumes when the monitor query failed.
 ///
 /// The virtual desktop is unbounded, so the fallback is a desktop-sized area
@@ -558,7 +568,7 @@ impl PreviewRust {
             QUrl::from_local_file(&QString::from(window.path().display().to_string()));
         self.title = QString::from(window.title());
         self.info = QString::from(window.info());
-        self.message = QString::from("");
+        self.message = QString::from(monitor_hint(published.screen));
         self.video = window.is_video();
         self.collapsed = window.collapsed();
         let (x, y) = window.position();
@@ -770,6 +780,18 @@ mod tests {
         assert!(focused_monitor(&[]).is_none());
         let preview = PreviewWindow::new("/tmp/capture.png", 10, 10, settings(), None);
         assert_eq!(preview.position(), (1547.0, 762.0));
+    }
+
+    #[test]
+    fn a_failed_monitor_query_is_reported_on_the_window() {
+        assert_eq!(
+            monitor_hint(None),
+            "Monitor unavailable; using the default corner"
+        );
+        assert_eq!(
+            monitor_hint(Some(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0))),
+            ""
+        );
     }
 
     #[test]
