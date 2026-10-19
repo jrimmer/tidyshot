@@ -240,13 +240,17 @@ After every capture a frameless, always-on-top preview window
 (`qml/PreviewWindow.qml`) opens in the bottom-right corner of the focused
 monitor. It reuses `qml/Overlay.qml` for its body, so the preview shows the
 saved image or the recording's first frame with Copy, Save, Annotate/Edit,
-Pin, drag-out and close. Enter copies and Escape closes; the action results and
-any I/O failure appear on the window.
+Pin, drag-out and close. Enter copies and Escape closes while the preview is
+the active window, so the capture menu keeps its own keyboard handling; the
+action results and any I/O failure appear on the window. The annotate editor
+and the pin window are not ported yet, so those two actions say so instead of
+claiming a window opened.
 
 `src/preview.rs` owns the window: it resolves the focused monitor with
 `hyprctl -j monitors`, computes the anchor through `src/overlay.rs`, reads the
 Quick Access settings (`preview_timeout` or the grouped `quick_access` object,
-`preview_action`, `preview_corner`, `close_after_drag`) and performs the
+`preview_action`, `preview_corner`, `preview_margin`, `close_after_drag`) and
+performs the
 actions through the existing clipboard, storage, annotator and pin modules. A
 `tidyshot area` invocation saves, prints the path and then starts the preview
 instead of exiting, so the capture can still be acted on; closing that preview
