@@ -53,7 +53,7 @@ pub enum OpenRequest {
 }
 
 /// The editor state QML renders.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct EditorState {
     document: Option<Document>,
     path: Option<PathBuf>,
@@ -61,19 +61,6 @@ pub struct EditorState {
     dirty: bool,
     revision: u64,
     message: String,
-}
-
-impl Default for EditorState {
-    fn default() -> Self {
-        Self {
-            document: None,
-            path: None,
-            interaction: EditorInteraction::new(),
-            dirty: false,
-            revision: 0,
-            message: String::new(),
-        }
-    }
 }
 
 impl EditorState {
@@ -346,6 +333,8 @@ pub mod qobject {
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qstringlist.h");
         type QStringList = cxx_qt_lib::QStringList;
+        include!("cxx-qt-lib/qurl.h");
+        type QUrl = cxx_qt_lib::QUrl;
     }
 
     extern "RustQt" {
@@ -401,6 +390,11 @@ pub mod qobject {
         #[cxx_name = "openPath"]
         fn open_path(self: Pin<&mut Self>, path: &QString);
 
+        /// Open the local file a dialog URL names.
+        #[qinvokable]
+        #[cxx_name = "openUrl"]
+        fn open_url(self: Pin<&mut Self>, url: &QUrl);
+
         /// Show the file chooser.
         #[qinvokable]
         #[cxx_name = "openChooser"]
@@ -419,6 +413,11 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "saveAs"]
         fn save_as(self: Pin<&mut Self>, path: &QString);
+
+        /// Save to the local file a dialog URL names.
+        #[qinvokable]
+        #[cxx_name = "saveUrl"]
+        fn save_url(self: Pin<&mut Self>, url: &QUrl);
 
         /// Copy the rendered canvas to the clipboard.
         #[qinvokable]
@@ -601,6 +600,11 @@ impl Default for EditorRust {
         }
         rust
     }
+}
+
+/// The local path a dialog URL names, or `None` for a remote URL.
+fn local_path(url: &cxx_qt_lib::QUrl) -> Option<String> {
+    url.to_local_file().map(|path| path.to_string())
 }
 
 fn strings(values: Vec<String>) -> QStringList {
@@ -800,6 +804,18 @@ impl qobject::EditorApi {
             .apply_request(OpenRequest::Path(PathBuf::from(path.to_string())));
     }
 
+    /// Open the local file a dialog URL names.
+    pub fn open_url(mut self: Pin<&mut Self>, url: &cxx_qt_lib::QUrl) {
+        let Some(path) = local_path(url) else {
+            self.as_mut().rust_mut().get_mut().state.message =
+                "Choose a local image or project".to_owned();
+            self.as_mut().sync();
+            return;
+        };
+        self.as_mut()
+            .apply_request(OpenRequest::Path(PathBuf::from(path)));
+    }
+
     /// Show the file chooser.
     pub fn open_chooser(mut self: Pin<&mut Self>) {
         self.as_mut().set_open(true);
@@ -828,6 +844,17 @@ impl qobject::EditorApi {
             self.as_mut().rust_mut().get_mut().state.message = error.to_string();
         }
         self.as_mut().sync();
+    }
+
+    /// Save to the local file a dialog URL names.
+    pub fn save_url(mut self: Pin<&mut Self>, url: &cxx_qt_lib::QUrl) {
+        let Some(path) = local_path(url) else {
+            self.as_mut().rust_mut().get_mut().state.message =
+                "Choose a local file to save".to_owned();
+            self.as_mut().sync();
+            return;
+        };
+        self.as_mut().save_as(&QString::from(path));
     }
 
     /// Copy the rendered canvas to the clipboard.

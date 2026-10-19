@@ -348,7 +348,7 @@ Window {
         title: "Open an image or project"
         nameFilters: ["Images and projects (*.png *.jpg *.jpeg *.webp *.omnishot)", "All files (*)"]
         onAccepted: {
-            EditorApi.openPath(selectedFile)
+            EditorApi.openUrl(selectedFile)
             EditorApi.closeChooser()
         }
         onRejected: EditorApi.closeChooser()
@@ -362,7 +362,7 @@ Window {
         defaultSuffix: "png"
         nameFilters: ["PNG image (*.png)", "Editable project (*.omnishot)"]
         onAccepted: {
-            EditorApi.saveAs(selectedFile)
+            EditorApi.saveUrl(selectedFile)
             editorWindow.saveAsPrompt = false
         }
         onRejected: editorWindow.saveAsPrompt = false
