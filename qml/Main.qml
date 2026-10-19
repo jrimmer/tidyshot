@@ -106,6 +106,7 @@ ApplicationWindow {
         autoCloseMs: Preview.autoCloseMs
         autoCloseAction: Preview.autoCloseAction
         closeAfterDrag: Preview.closeAfterDrag
+        message: Preview.message
         onAnnotateRequested: Preview.annotate()
         onCopyRequested: Preview.copy()
         onSaveRequested: Preview.save()

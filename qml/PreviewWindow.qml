@@ -21,6 +21,8 @@ Window {
     property int autoCloseMs: 0
     /// "close" or "save" when the auto-close timer elapses.
     property string autoCloseAction: "close"
+    /// The outcome of the last action, including an I/O failure.
+    property string message: ""
     /// Close after an accepted drag unless Alt was held.
     property bool closeAfterDrag: true
 
@@ -67,5 +69,17 @@ Window {
         onSaveRequested: previewWindow.saveRequested()
         onPinRequested: previewWindow.pinRequested()
         onDismissed: previewWindow.dismissed()
+    }
+
+    Text {
+        objectName: "previewMessage"
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 10
+        text: previewWindow.message
+        color: "#FFD60A"
+        wrapMode: Text.WordWrap
+        visible: text !== ""
     }
 }

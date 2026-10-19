@@ -551,12 +551,11 @@ impl PreviewRust {
         self.window = Some(window);
     }
 
-    fn action_error(&mut self, result: Result<(), PreviewError>) {
-        if let Err(error) = result {
-            self.message = QString::from(error.to_string());
-        } else {
-            self.message = QString::from("");
-        }
+    fn action_error(&mut self, result: Result<(), PreviewError>, done: &str) {
+        self.message = match result {
+            Ok(()) => QString::from(done),
+            Err(error) => QString::from(error.to_string()),
+        };
     }
 }
 
@@ -588,28 +587,40 @@ impl qobject::Preview {
     pub fn copy(mut self: Pin<&mut Self>) {
         let path = PathBuf::from(self.path().to_string());
         let result = copy_capture(&crate::commands::SystemRunner, &path);
-        self.as_mut().rust_mut().get_mut().action_error(result);
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .action_error(result, "Copied to the clipboard");
     }
 
     /// Save the capture again through the atomic store.
     pub fn save(mut self: Pin<&mut Self>) {
         let path = PathBuf::from(self.path().to_string());
         let result = save_capture(&path);
-        self.as_mut().rust_mut().get_mut().action_error(result);
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .action_error(result, "Saved");
     }
 
     /// Open the capture in the annotate editor.
     pub fn annotate(mut self: Pin<&mut Self>) {
         let path = PathBuf::from(self.path().to_string());
         let result = annotate_capture(&path);
-        self.as_mut().rust_mut().get_mut().action_error(result);
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .action_error(result, "Ready to annotate");
     }
 
     /// Pin the capture at its starting size.
     pub fn pin(mut self: Pin<&mut Self>) {
         let path = PathBuf::from(self.path().to_string());
         let result = pin_capture(&path).map(|_| ());
-        self.as_mut().rust_mut().get_mut().action_error(result);
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .action_error(result, "Pinned");
     }
 
     /// Close the preview.

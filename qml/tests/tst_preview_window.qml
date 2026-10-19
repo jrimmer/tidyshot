@@ -96,6 +96,16 @@ TestCase {
         compare(saveSpy.count, 1)
     }
 
+    function test_a_message_is_shown_including_a_failure() {
+        preview.message = "Copied to the clipboard"
+        waitForRendering(preview.contentItem)
+        var message = findChild(preview, "previewMessage")
+        verify(message !== null)
+        compare(message.visible, true)
+        compare(message.text.toString(), "Copied to the clipboard")
+        preview.message = ""
+    }
+
     function test_a_recording_offers_edit_instead_of_pin() {
         preview.video = true
         compare(button("pinButton").visible, false)
