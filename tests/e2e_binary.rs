@@ -555,9 +555,11 @@ fn the_ocr_capture_reaches_stubbed_slurp_grim_and_ocr() {
 /// Flow 2b: `tidyshot scroll` without a window stitches real grim PPM frames
 /// and saves the composite.
 ///
-/// The stub `grim` answers a PPM request with two different rows followed by
-/// repeats, so the session stops at the repeated rows and the binary prints
-/// the saved path. A small region keeps the matching budget tiny.
+/// The stub `grim` answers every PPM request with the same frame, so the
+/// session stops at the repeated rows and the binary prints the saved path.
+/// A small region keeps the matching budget tiny. The process then stays alive
+/// with the corner preview, exactly as a one-shot CLI capture does, so the
+/// test stops it once the history row proves the save landed.
 #[test]
 fn a_headless_scrolling_capture_saves_a_composite() {
     if missing_binary() {
@@ -571,17 +573,44 @@ fn a_headless_scrolling_capture_saves_a_composite() {
         "echo \"grim $*\" >> \"$TIDYSHOT_E2E_MARKER\"\nprintf 'P6\\n4 4\\n255\\n'\nprintf '\\001\\002\\003\\004\\005\\006\\007\\010\\011\\012\\013\\014\\015\\016\\017\\020'\nprintf '\\021\\022\\023\\024\\025\\026\\027\\030\\031\\032\\033\\034\\035\\036\\037\\040'\nprintf '\\041\\042\\043\\044\\045\\046\\047\\050\\051\\052\\053\\054\\055\\056\\057\\060'\nprintf '\\061\\062\\063\\064\\065\\066\\067\\070\\071\\072\\073\\074\\075\\076\\077\\100'\n",
     );
     let marker = home.marker();
-    let output = run_bounded_with_env(
-        &home,
-        &["scroll", "--geometry", "0,0 4x4"],
-        &bin,
-        &marker,
-        Duration::from_secs(30),
-    );
+    let history_path = home.root.join("data/tidyshot/history.json");
+    let mut child = home
+        .command()
+        .args(["scroll", "--geometry", "0,0 4x4"])
+        .env("PATH", home.path_with_stubs(&bin))
+        .env("TIDYSHOT_E2E_MARKER", &marker)
+        .env("TIDYSHOT_NATIVE_DIR", home.native_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let saved = fs::read_to_string(&history_path)
+            .is_ok_and(|history| history.contains("\"kind\": \"scroll\""));
+        if saved {
+            break;
+        }
+        if child.try_wait().unwrap().is_some() {
+            panic!(
+                "scroll exited before saving: {}",
+                String::from_utf8_lossy(&child.wait_with_output().unwrap().stderr)
+            );
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("scroll did not save within the bound");
+        }
+        std::thread::sleep(POLL);
+    }
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
     assert_eq!(
         output.status.code(),
-        Some(0),
-        "scroll failed: {}",
+        None,
+        "scroll should stay with its preview, not exit: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let saved = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -595,42 +624,8 @@ fn a_headless_scrolling_capture_saves_a_composite() {
             .any(|line| line.starts_with("grim -g 0,0 4x4 -t ppm -")),
         "grim did not grab PPM frames: {text}"
     );
-    let history = fs::read_to_string(home.root.join("data/tidyshot/history.json"))
-        .expect("history was written");
+    let history = fs::read_to_string(&history_path).expect("history was written");
     assert!(history.contains("\"kind\": \"scroll\""), "{history}");
-}
-
-/// Run a command with the capture stubs and the marker variable.
-fn run_bounded_with_env(
-    home: &Home,
-    args: &[&str],
-    bin: &Path,
-    marker: &Path,
-    timeout: Duration,
-) -> Output {
-    let mut child = home
-        .command()
-        .args(args)
-        .env("PATH", home.path_with_stubs(bin))
-        .env("TIDYSHOT_E2E_MARKER", marker)
-        .env("TIDYSHOT_NATIVE_DIR", home.native_dir())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + timeout;
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("tidyshot {args:?} did not exit within {timeout:?}");
-        }
-        std::thread::sleep(POLL);
-    }
 }
 
 /// Flow 4: a `.omnishot` project written by the library is accepted by the
