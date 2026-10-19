@@ -160,6 +160,25 @@ ApplicationWindow {
         }
     }
 
+    // Controls for a scrolling capture. The frame count, status and auto
+    // state come from the Rust session; every button sends it a command.
+    ScrollControls {
+        id: scrollControls
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: 12
+        visible: Capture.scrollOpen
+        status: Capture.scrollStatus
+        frames: Capture.scrollFrames
+        autoScroll: Capture.scrollAuto
+        running: Capture.scrollRunning
+        horizontal: Capture.scrollHorizontal
+        onStartRequested: Capture.scrollStart()
+        onAutoToggled: Capture.scrollToggleAuto()
+        onDoneRequested: Capture.scrollDone()
+        onCancelRequested: Capture.scrollCancel()
+    }
+
     // Window picker for a window capture; the client rectangles stay in Rust.
     WindowPicker {
         id: windowPicker

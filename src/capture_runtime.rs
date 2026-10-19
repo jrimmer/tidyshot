@@ -23,6 +23,11 @@ use crate::geometry::Rect;
 use crate::history::{self, HistoryRow};
 use crate::json::Value;
 use crate::mirror::MirrorRegistry;
+use crate::scroll::{ScrollSession, SystemScrollCapture, SystemScrollInput};
+use crate::scroll_runtime::{
+    DriveMode, DriveOutcome, ScrollCommand, ScrollControl, ScrollPanel, ScrollStatus,
+    drive as drive_scroll,
+};
 
 /// A completed capture on disk.
 #[derive(Debug, Clone, PartialEq)]
@@ -113,7 +118,7 @@ fn encode_frame(frame: &crate::stitch::FrameData) -> Result<Image, RuntimeError>
     match frame.channels {
         4 => data.extend_from_slice(&frame.data[..pixels * 4]),
         3 => {
-            for pixel in frame.data[..pixels * 3].chunks_exact(3) {
+            for pixel in frame.data[..pixels * 3].as_chunks::<3>().0 {
                 data.extend_from_slice(pixel);
                 data.push(255);
             }
@@ -336,6 +341,13 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             return Err(RuntimeError::Cancelled);
         }
         let native = crate::scroll::native_dir().unwrap_or_else(|| self.native.clone());
+        if !native.join("scroll-helper").is_file() {
+            // A headless capture has no pointer to drive, so without the
+            // helper it could only save one viewport; say so instead.
+            return Err(RuntimeError::Scroll(
+                "Scrolling capture needs the scroll helper. Run bin/native to build it.".to_owned(),
+            ));
+        }
         let capture = std::sync::Arc::new(crate::scroll::SystemScrollCapture::new(
             self.runner,
             self.mirror,
@@ -393,6 +405,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             width,
             height,
             rect,
+            screen: None,
         })
     }
 
@@ -741,6 +754,92 @@ fn capture_on_worker(
     }
 }
 
+/// A panel that publishes the session to QML and reads the controls.
+struct QtScrollPanel {
+    control: ScrollControl,
+    thread: cxx_qt::CxxQtThread<qobject::Capture>,
+}
+
+impl ScrollPanel for QtScrollPanel {
+    fn publish(&mut self, status: &ScrollStatus) {
+        let status = status.clone();
+        self.control.publish(status.clone());
+        let _ = self.thread.queue(move |mut capture| {
+            capture.as_mut().apply_scroll_status(status);
+        });
+    }
+
+    fn wait_command(&mut self, timeout: std::time::Duration) -> Option<ScrollCommand> {
+        self.control.wait(timeout)
+    }
+}
+
+/// The worker half of an interactive scrolling capture.
+///
+/// The region is chosen first with slurp, then the controls drive the session
+/// through [`ScrollControl`]. The stitched image is saved on this thread when
+/// Done lands, so the Qt thread only receives the finished path.
+// Ported from omnishot/widgets.py (ScrollPanel start/tick/finish)
+fn scroll_on_worker(
+    rect: Option<Rect>,
+    horizontal: bool,
+    control: ScrollControl,
+    thread: cxx_qt::CxxQtThread<qobject::Capture>,
+    cancel: Arc<AtomicBool>,
+) -> Completion {
+    let runner = crate::commands::SystemRunner;
+    let runtime = CaptureRuntime::new(
+        &runner,
+        MirrorRegistry::global(),
+        crate::recording::native_dir(),
+        crate::settings::data_dir(),
+    );
+    let rect = match rect {
+        Some(rect) => rect,
+        None => match crate::capture_session::slurp_region(&runner, false, &[]) {
+            Ok(rect) => rect,
+            Err(crate::capture_session::CaptureRequestError::Selection) => {
+                return Completion::Failed(RuntimeError::Cancelled.to_string());
+            }
+            Err(error) => return Completion::Failed(error.to_string()),
+        },
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Completion::Failed(RuntimeError::Cancelled.to_string());
+    }
+    let native = crate::scroll::native_dir().unwrap_or_else(|| runtime.native.clone());
+    let capture = Arc::new(SystemScrollCapture::new(
+        &runner,
+        MirrorRegistry::global(),
+        native.clone(),
+    ));
+    let input = Box::new(SystemScrollInput {
+        runner: &runner,
+        native,
+    });
+    let mut session = ScrollSession::new(
+        rect,
+        horizontal,
+        capture,
+        input,
+        Box::new(crate::scroll::NoUi),
+    );
+    let mut panel = QtScrollPanel { control, thread };
+    match drive_scroll(
+        &mut session,
+        &mut panel,
+        DriveMode::Interactive,
+        &mut || cancel.load(Ordering::SeqCst),
+    ) {
+        DriveOutcome::Finished(frame) => match runtime.save_scroll(&frame, Some(rect)) {
+            Ok(result) => Completion::Captured(result),
+            Err(error) => Completion::Failed(error.to_string()),
+        },
+        DriveOutcome::Cancelled => Completion::Failed(RuntimeError::Cancelled.to_string()),
+        DriveOutcome::Failed(message) => Completion::Failed(message),
+    }
+}
+
 /// The Qt-side capture object, once QML has created it.
 static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::Capture>> =
     std::sync::OnceLock::new();
@@ -790,6 +889,12 @@ pub mod qobject {
         #[qproperty(bool, window_picker_open, cxx_name = "windowPickerOpen")]
         #[qproperty(QStringList, window_labels, cxx_name = "windowLabels")]
         #[qproperty(QStringList, window_details, cxx_name = "windowDetails")]
+        #[qproperty(bool, scroll_open, cxx_name = "scrollOpen")]
+        #[qproperty(QString, scroll_status, cxx_name = "scrollStatus")]
+        #[qproperty(i32, scroll_frames, cxx_name = "scrollFrames")]
+        #[qproperty(bool, scroll_auto, cxx_name = "scrollAuto")]
+        #[qproperty(bool, scroll_running, cxx_name = "scrollRunning")]
+        #[qproperty(bool, scroll_horizontal, cxx_name = "scrollHorizontal")]
         type Capture = super::CaptureRust;
 
         /// Start an area capture.
@@ -837,6 +942,26 @@ pub mod qobject {
         #[cxx_name = "captureWindow"]
         fn capture_window(self: Pin<&mut Self>, index: i32);
 
+        /// Begin grabbing frames for the open scrolling capture.
+        #[qinvokable]
+        #[cxx_name = "scrollStart"]
+        fn scroll_start(self: Pin<&mut Self>);
+
+        /// Flip auto-scroll for the open scrolling capture.
+        #[qinvokable]
+        #[cxx_name = "scrollToggleAuto"]
+        fn scroll_toggle_auto(self: Pin<&mut Self>);
+
+        /// Finish the scrolling capture and save the stitched image.
+        #[qinvokable]
+        #[cxx_name = "scrollDone"]
+        fn scroll_done(self: Pin<&mut Self>);
+
+        /// Abandon the scrolling capture without saving.
+        #[qinvokable]
+        #[cxx_name = "scrollCancel"]
+        fn scroll_cancel(self: Pin<&mut Self>);
+
         /// Clear the last result path and message.
         #[qinvokable]
         fn clear(self: Pin<&mut Self>);
@@ -875,8 +1000,15 @@ pub struct CaptureRust {
     window_picker_open: bool,
     window_labels: QStringList,
     window_details: QStringList,
+    scroll_open: bool,
+    scroll_status: QString,
+    scroll_frames: i32,
+    scroll_auto: bool,
+    scroll_running: bool,
+    scroll_horizontal: bool,
     cancel: Arc<AtomicBool>,
     windows: Vec<WindowInfo>,
+    scroll: Option<crate::scroll_runtime::ScrollControl>,
 }
 
 impl Default for CaptureRust {
@@ -890,8 +1022,15 @@ impl Default for CaptureRust {
             window_picker_open: false,
             window_labels: QStringList::default(),
             window_details: QStringList::default(),
+            scroll_open: false,
+            scroll_status: QString::from(""),
+            scroll_frames: 0,
+            scroll_auto: false,
+            scroll_running: false,
+            scroll_horizontal: false,
             cancel: Arc::new(AtomicBool::new(false)),
             windows: Vec::new(),
+            scroll: None,
         }
     }
 }
@@ -928,6 +1067,115 @@ impl qobject::Capture {
         self.as_mut().start_request("desktop", None, false);
     }
 
+    /// Start an interactive scrolling capture.
+    ///
+    /// A nil region runs slurp on the worker; the controls window then drives
+    /// Start, auto-scroll, Done and Cancel until the stitch is saved.
+    // Ported from omnishot/widgets.py (ScrollPanel)
+    fn start_scroll(mut self: Pin<&mut Self>, rect: Option<Rect>, horizontal: bool) {
+        if *self.busy() {
+            let message = "A capture is already in progress";
+            self.as_mut().set_message(QString::from(message));
+            self.as_mut().failed_signal(&QString::from(message));
+            return;
+        }
+        let control = ScrollControl::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.as_mut().rust_mut().get_mut().scroll = Some(control.clone());
+        self.as_mut().rust_mut().get_mut().cancel = Arc::clone(&cancel);
+        self.as_mut().set_scroll_open(true);
+        self.as_mut()
+            .set_scroll_status(QString::from("Choose an area to scroll"));
+        self.as_mut().set_scroll_frames(0);
+        self.as_mut().set_scroll_auto(false);
+        self.as_mut().set_scroll_running(false);
+        self.as_mut().set_scroll_horizontal(horizontal);
+        self.as_mut().set_busy(true);
+        self.as_mut()
+            .set_message(QString::from("Choose an area to scroll"));
+        let thread = self.qt_thread();
+        let worker_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            if !CaptureGate::enter() {
+                let _ = worker_thread.queue(move |mut capture| {
+                    capture
+                        .as_mut()
+                        .fail("A capture is already in progress".to_owned());
+                });
+                return;
+            }
+            let completion = {
+                let _lease = CaptureLease;
+                scroll_on_worker(rect, horizontal, control, thread, cancel)
+            };
+            let _ = worker_thread.queue(move |mut capture| {
+                capture.as_mut().apply_completion(completion);
+                capture.as_mut().set_busy(false);
+                capture.as_mut().set_scroll_open(false);
+                capture.as_mut().rust_mut().get_mut().scroll = None;
+            });
+        });
+    }
+
+    /// Publish one status snapshot from the scrolling worker.
+    fn apply_scroll_status(mut self: Pin<&mut Self>, status: ScrollStatus) {
+        self.as_mut().set_scroll_open(status.visible);
+        self.as_mut()
+            .set_scroll_status(QString::from(status.status.clone()));
+        self.as_mut().set_scroll_frames(status.frames as i32);
+        self.as_mut().set_scroll_auto(status.auto);
+        self.as_mut().set_scroll_running(status.running);
+        self.as_mut().set_scroll_horizontal(status.horizontal);
+        if status.visible || status.running {
+            self.as_mut()
+                .set_message(QString::from(if status.status.is_empty() {
+                    "Scrolling capture".to_owned()
+                } else {
+                    status.status.clone()
+                }));
+        }
+    }
+
+    /// Begin grabbing frames for the open scrolling capture.
+    pub fn scroll_start(mut self: Pin<&mut Self>) {
+        self.as_mut().send_scroll(ScrollCommand::Start);
+    }
+
+    /// Flip auto-scroll for the open scrolling capture.
+    pub fn scroll_toggle_auto(mut self: Pin<&mut Self>) {
+        self.as_mut().send_scroll(ScrollCommand::ToggleAuto);
+    }
+
+    /// Finish the scrolling capture and save the stitched image.
+    pub fn scroll_done(mut self: Pin<&mut Self>) {
+        self.as_mut().send_scroll(ScrollCommand::Done);
+    }
+
+    /// Abandon the scrolling capture without saving.
+    pub fn scroll_cancel(mut self: Pin<&mut Self>) {
+        self.as_mut().send_scroll(ScrollCommand::Cancel);
+    }
+
+    fn send_scroll(mut self: Pin<&mut Self>, command: ScrollCommand) {
+        match self.scroll.as_ref() {
+            Some(control) => {
+                control.send(command);
+                if command == ScrollCommand::Cancel {
+                    self.as_mut().set_scroll_open(false);
+                }
+            }
+            None => {
+                if command == ScrollCommand::Done {
+                    return;
+                }
+                self.as_mut()
+                    .set_message(QString::from("No scrolling capture is running"));
+                self.as_mut()
+                    .failed_signal(&QString::from("No scrolling capture is running"));
+            }
+        }
+    }
+
     /// Cancel a choice that is still open.
     pub fn cancel(mut self: Pin<&mut Self>) {
         self.cancel.store(true, Ordering::SeqCst);
@@ -949,12 +1197,8 @@ impl qobject::Capture {
             "desktop" => self.desktop(),
             "previous" => self.previous(),
             "timer" => self.as_mut().start_request("timer", None, false),
-            "scroll" | "scroll-horizontal" => {
-                self.as_mut()
-                    .set_message(QString::from("Scrolling capture is not wired yet"));
-                self.as_mut()
-                    .failed_signal(&QString::from("Scrolling capture is not wired yet"));
-            }
+            "scroll" => self.as_mut().start_scroll(None, false),
+            "scroll-horizontal" => self.as_mut().start_scroll(None, true),
             "ocr" => return false,
             _ => return false,
         }
@@ -1037,6 +1281,12 @@ impl qobject::Capture {
 
     /// Run one routed application command through the runtime worker.
     fn run_app_command(mut self: Pin<&mut Self>, command: Command) {
+        // `scroll-done` finishes whichever scrolling capture is open, which is
+        // what the shortcut sends while the controls window has no focus.
+        if command == Command::ScrollDone {
+            self.as_mut().scroll_done();
+            return;
+        }
         // Non-capture rows keep their own behaviour; the runtime only owns
         // the screenshot commands.
         match command {
@@ -1045,10 +1295,22 @@ impl qobject::Capture {
                 geometry,
                 delay,
                 ..
-            } => self.as_mut().start_command(
-                CaptureRequest::resolve(&command, geometry.as_deref(), delay, 3),
-                command == "window",
-            ),
+            } => {
+                // Scrolling captures drive an interactive session rather than
+                // the one-shot grab the other modes use.
+                if command == "scroll" || command == "scroll-horizontal" {
+                    let rect = geometry
+                        .as_deref()
+                        .and_then(|text| crate::geometry::parse_geometry(text).ok());
+                    self.as_mut()
+                        .start_scroll(rect, command == "scroll-horizontal");
+                    return;
+                }
+                self.as_mut().start_command(
+                    CaptureRequest::resolve(&command, geometry.as_deref(), delay, 3),
+                    command == "window",
+                );
+            }
             Command::Overlay(path) => crate::preview::publish_file(path),
             Command::Restore => {
                 if let Some(path) = crate::history::newest_path(&crate::settings::data_dir()) {
@@ -1466,17 +1728,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// One binary PPM frame filled with `color`.
+    fn ppm(width: usize, height: usize, color: [u8; 3]) -> Vec<u8> {
+        let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
+        for _ in 0..width * height {
+            out.extend_from_slice(&color);
+        }
+        out
+    }
+
     #[test]
-    fn scrolling_capture_reports_the_unwired_state() {
+    fn a_headless_scrolling_capture_saves_the_stitched_png() {
         let root = scratch("scroll");
         let runner = Fake::new(monitors(), clients(), active());
+        runner.push_text("slurp", "10,20 100x200\n");
+        // Every frame is identical, so the repeated-row stop condition ends
+        // the capture after the first frame without waiting for a scroll.
+        for _ in 0..6 {
+            runner.push("grim", ppm(100, 200, [12, 34, 56]));
+        }
+        let result = runtime(&runner, &root)
+            .run(request("scroll"), None)
+            .unwrap();
+        assert_eq!(result.rect, Some(Rect::new(10, 20, 100, 200)));
+        assert_eq!((result.width, result.height), (100, 200));
+        let rows = history::read(&root);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "scroll");
+        assert_eq!(rows[0].path, result.path);
+        let image = crate::pngzip::decode_png(&std::fs::read(&result.path).unwrap()).unwrap();
+        assert_eq!(image.pixel(0, 0), [12, 34, 56, 255]);
+        let seen = runner.seen();
+        assert!(
+            seen.iter().any(|spec| spec.program == "slurp"),
+            "a request without a region selects one"
+        );
+        let grim: Vec<&CommandSpec> = seen.iter().filter(|spec| spec.program == "grim").collect();
+        assert!(!grim.is_empty());
+        assert!(grim[0].args.iter().any(|arg| arg == "ppm"));
+        assert!(grim[0].args.contains(&"10,20 100x200".to_owned()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_scroll_request_with_a_region_does_not_run_the_selector() {
+        let root = scratch("scroll-fixed");
+        let runner = Fake::new(monitors(), clients(), active());
+        for _ in 0..6 {
+            runner.push("grim", ppm(80, 120, [1, 2, 3]));
+        }
+        let mut request = request("scroll-horizontal");
+        request.rect = Some(Rect::new(5, 6, 80, 120));
+        let result = runtime(&runner, &root).run(request, None).unwrap();
+        assert_eq!(result.rect, Some(Rect::new(5, 6, 80, 120)));
+        assert_eq!((result.width, result.height), (80, 120));
+        assert!(
+            runner.seen().iter().all(|spec| spec.program != "slurp"),
+            "a pinned region must skip the selector"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_scrolling_cancel_saves_nothing() {
+        let root = scratch("scroll-cancel");
+        let runner = Fake::new(monitors(), clients(), active());
+        let mut request = request("scroll");
+        request.rect = Some(Rect::new(0, 0, 100, 100));
         let error = runtime(&runner, &root)
-            .run(request("scroll-horizontal"), None)
+            .run_with_cancel(request, None, || true)
             .unwrap_err();
-        assert!(matches!(error, RuntimeError::Unsupported(_)), "{error}");
-        assert!(error.to_string().contains("not wired"), "{error}");
+        assert!(matches!(error, RuntimeError::Cancelled), "{error}");
         assert!(history::read(&root).is_empty());
-        assert!(runner.seen().iter().all(|spec| spec.program != "grim"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stitched_rgb_frame_is_saved_as_rgba_png() {
+        let root = scratch("scroll-encode");
+        let runner = Fake::new(monitors(), clients(), active());
+        let frame = crate::stitch::FrameData::new(vec![9, 8, 7, 6, 5, 4], 2, 1, 3);
+        let result = runtime(&runner, &root)
+            .save_scroll(&frame, Some(Rect::new(0, 0, 2, 1)))
+            .unwrap();
+        let image = crate::pngzip::decode_png(&std::fs::read(&result.path).unwrap()).unwrap();
+        assert_eq!(image.pixel(0, 0), [9, 8, 7, 255]);
+        assert_eq!(image.pixel(1, 0), [6, 5, 4, 255]);
+        assert_eq!(history::read(&root)[0].kind, "scroll");
         let _ = std::fs::remove_dir_all(&root);
     }
 

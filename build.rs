@@ -14,6 +14,7 @@ fn main() {
             "qml/PreviewWindow.qml",
             "qml/TrayMenu.qml",
             "qml/TextResultDialog.qml",
+            "qml/ScrollControls.qml",
         ]),
     )
     .qt_module("Quick")
