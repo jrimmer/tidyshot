@@ -25,6 +25,9 @@ Window {
     property string message: ""
     /// Close after an accepted drag unless Alt was held.
     property bool closeAfterDrag: true
+    /// Claim activation when the window opens; a command-line capture has no
+    /// menu behind it, so Enter and Escape work without a first click.
+    property bool takeFocus: false
 
     signal annotateRequested()
     signal copyRequested()
@@ -40,6 +43,14 @@ Window {
     color: "transparent"
     title: "TidyShot Preview"
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+
+    // The shortcuts are scoped to this window, so a capture with no menu
+    // behind it takes activation and its keys work straight away. A preview
+    // opened from the menu leaves focus there.
+    onOpenChanged: {
+        if (open && takeFocus)
+            previewWindow.requestActivate()
+    }
 
     // Enter copies and Escape closes while this window is active. The scope
     // is the preview window, not the application: a menu window in front must

@@ -97,6 +97,23 @@ TestCase {
         compare(copySpy.count, 1)
     }
 
+    function test_a_standalone_preview_takes_activation_and_its_keys() {
+        // A command-line capture has no menu behind it, so the preview claims
+        // activation when it opens and Enter copies straight away.
+        var window = previewComponent.createObject(null, { "open": false, "takeFocus": true })
+        verify(window !== null)
+        var spy = Qt.createQmlObject(
+            'import QtTest; SignalSpy { signalName: "copyRequested" }', window)
+        spy.target = window
+        window.open = true
+        tryCompare(window, "active", true)
+        keyClick(Qt.Key_Return)
+        compare(spy.count, 1)
+        window.destroy()
+        // Give activation back so the later key tests drive this preview.
+        preview.requestActivate()
+    }
+
     function test_the_key_shortcuts_belong_to_the_preview_window() {
         // An application-scoped shortcut would take Return from the capture
         // menu while a preview is open behind it.
