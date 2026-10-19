@@ -180,6 +180,26 @@ ApplicationWindow {
         onCancelRequested: Capture.scrollCancel()
     }
 
+    // cxx-qt singleton property notifications do not reach QML bindings in
+    // this build, so the scroll panel is fed from the singleton. The worker
+    // publishes a status for every frame, so this keeps the frame count and
+    // the Start/Retry label moving without touching the session.
+    Timer {
+        id: scrollSync
+        interval: 60
+        repeat: true
+        running: true
+        onTriggered: {
+            scrollControls.visible = Capture.scrollOpen
+            scrollControls.status = Capture.scrollStatus
+            scrollControls.startLabel = Capture.scrollStartLabel
+            scrollControls.frames = Capture.scrollFrames
+            scrollControls.autoScroll = Capture.scrollAuto
+            scrollControls.running = Capture.scrollRunning
+            scrollControls.horizontal = Capture.scrollHorizontal
+        }
+    }
+
     // Window picker for a window capture; the client rectangles stay in Rust.
     WindowPicker {
         id: windowPicker
