@@ -671,6 +671,15 @@ fn strings(values: Vec<String>) -> QStringList {
 }
 
 fn apply_request(rust: &mut EditorRust, request: OpenRequest) {
+    // Opening another file must not silently discard unsaved annotations; the
+    // open file stays until the user saves or closes it.
+    if rust.state.dirty() && rust.state.is_open() {
+        rust.open = true;
+        rust.state.message =
+            "Save or discard the current edits before opening another file".to_owned();
+        rust.message = QString::from(rust.state.message.clone());
+        return;
+    }
     rust.standalone = request.standalone();
     match request {
         OpenRequest::Path { path, .. } => match rust.state.open(&path) {
@@ -1240,6 +1249,37 @@ mod tests {
         apply_request(&mut rust, OpenRequest::Chooser { standalone: false });
         assert!(rust.open && rust.chooser_open);
         assert!(!rust.standalone);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_open_request_does_not_replace_unsaved_edits() {
+        let dir =
+            std::env::temp_dir().join(format!("tidyshot-editor-dirty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.png");
+        let second = dir.join("second.png");
+        std::fs::write(&first, Image::new(20, 20, vec![0u8; 20 * 20 * 4]).to_png()).unwrap();
+        std::fs::write(&second, Image::new(30, 30, vec![0u8; 30 * 30 * 4]).to_png()).unwrap();
+        let mut rust = EditorRust::default();
+        apply_request(
+            &mut rust,
+            OpenRequest::Path {
+                path: first.clone(),
+                standalone: true,
+            },
+        );
+        rust.state.changed(true);
+        apply_request(&mut rust, OpenRequest::open(second));
+        rust.refresh();
+        assert_eq!(rust.state.path(), Some(first.as_path()));
+        assert_eq!((rust.canvas_width, rust.canvas_height), (20, 20));
+        assert!(
+            rust.message.to_string().contains("Save or discard"),
+            "message was {}",
+            rust.message.to_string()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
