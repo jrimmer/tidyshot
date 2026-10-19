@@ -369,7 +369,7 @@ pub fn publish_file(path: PathBuf) {
 }
 
 /// A command for the visible preview that may arrive before it is bound.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingAction {
     Save,
     Dismiss,
@@ -693,6 +693,18 @@ mod tests {
         assert_eq!(preview.auto_close_ms(), 0);
         assert!(preview.title().starts_with("TidyShot Preview"));
         assert_eq!(preview.info(), "640 × 480");
+    }
+
+    #[test]
+    fn save_and_close_wait_for_the_preview_to_bind() {
+        publish_dismiss();
+        publish_save();
+        let actions = std::mem::take(&mut *ACTIONS.lock().unwrap());
+        assert_eq!(
+            actions,
+            [PendingAction::Dismiss, PendingAction::Save],
+            "an action that arrives before the window is bound is replayed"
+        );
     }
 
     #[test]
