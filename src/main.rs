@@ -160,12 +160,14 @@ fn main() {
     match capture_before_gui(&args) {
         Some(Ok(result)) => {
             println!("{}", result.path.display());
-            // An after-capture annotate action from a shortcut or URL opens the
-            // editor on the saved file once the GUI exists.
+            // An after-capture annotate action from a shortcut or URL opens
+            // only the editor on the saved file; a preview behind it would
+            // dismiss the process before the annotations are finished.
             if wants_annotate(&args) {
                 tidyshot::editor_window::publish_open(result.path.clone());
+            } else {
+                tidyshot::preview::set_startup_preview(result);
             }
-            tidyshot::preview::set_startup_preview(result);
             startup_argv.clear();
         }
         Some(Err(code)) => std::process::exit(code),

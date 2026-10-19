@@ -90,6 +90,10 @@ pub fn run_with(argv: &[String]) {
     cxx_qt::init_qml_module!("tidyshot");
     note_startup_ocr();
     match app::route_and_resolve(argv, &commands::SystemRunner) {
+        // An `open` command starts only the editor window; the menu would be
+        // an empty window behind it, and closing the editor ends the process.
+        Ok(app::Command::Edit(path)) => editor_window::publish_open(path),
+        Ok(app::Command::EditChooser) => editor_window::publish_chooser(),
         Ok(command) => capture_runtime::dispatch(command),
         Err(error) => {
             eprintln!("tidyshot: {error}");
