@@ -22,8 +22,8 @@ use crate::stitch::FrameData;
 /// How long a running session waits for a command before it grabs a frame.
 pub const COMMAND_POLL: Duration = Duration::from_millis(100);
 
-/// How long the capture surfaces stay hidden before a grab, so the compositor
-/// has presented the desktop without them.
+/// How long the controls stay hidden before a grab, so the compositor presents
+/// the desktop without them and the controls never land in a frame.
 pub const HIDE_DELAY: Duration = Duration::from_millis(150);
 
 /// A command the controls send to the running session.
@@ -292,6 +292,9 @@ pub fn drive<'a>(
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> DriveOutcome {
     let headless = mode.headless();
+    // The controls stay on screen for an interactive capture; a headless one
+    // has no controls to show.
+    let controls_visible = !headless;
     if let DriveMode::Headless { autoscroll } = mode {
         session.auto = autoscroll;
         session.start();
@@ -306,14 +309,14 @@ pub fn drive<'a>(
         if !session.is_running() {
             if headless {
                 // A failed start or a stopped session keeps what it stitched.
-                let status = snapshot(session, false);
+                let status = snapshot(session, controls_visible);
                 panel.publish(&status);
                 return match session.output() {
                     Some(frame) => DriveOutcome::Finished(frame),
                     None => DriveOutcome::Failed(status.status),
                 };
             }
-            panel.publish(&snapshot(session, true));
+            panel.publish(&snapshot(session, controls_visible));
             match panel.wait_command(COMMAND_POLL) {
                 Some(ScrollCommand::Start) => session.start(),
                 Some(ScrollCommand::Done) => {
@@ -351,16 +354,16 @@ pub fn drive<'a>(
             }
             Some(ScrollCommand::ToggleAuto) => {
                 session.toggle_auto();
-                panel.publish(&snapshot(session, true));
+                panel.publish(&snapshot(session, controls_visible));
                 continue;
             }
             Some(ScrollCommand::SetAuto(enabled)) => {
                 session.set_auto(enabled);
-                panel.publish(&snapshot(session, true));
+                panel.publish(&snapshot(session, controls_visible));
                 continue;
             }
             Some(ScrollCommand::Start) => {
-                panel.publish(&snapshot(session, true));
+                panel.publish(&snapshot(session, controls_visible));
                 continue;
             }
             None => {}
@@ -369,14 +372,14 @@ pub fn drive<'a>(
         let Some(job) = session.begin_grab() else {
             continue;
         };
-        // The controls sit on top of the desktop and would land in the frame,
-        // so hide them and let the compositor present before grabbing.
-        panel.publish(&snapshot(session, false));
-        std::thread::sleep(HIDE_DELAY);
+        if controls_visible {
+            panel.publish(&snapshot(session, false));
+            std::thread::sleep(HIDE_DELAY);
+        }
         let result = session.run_job(job);
         let changed = result.as_ref().ok().map(|(changed, _)| *changed);
         let completed = session.complete(job, result);
-        panel.publish(&snapshot(session, true));
+        panel.publish(&snapshot(session, controls_visible));
         if let Some(frame) = completed {
             panel.publish(&snapshot(session, false));
             return DriveOutcome::Finished(frame);
@@ -401,7 +404,7 @@ pub fn drive<'a>(
                 if idle >= END_AFTER_UNCHANGED || session.reached_end {
                     let outcome = finish(session);
                     if !deferred(&outcome) {
-                        panel.publish(&snapshot(session, false));
+                        panel.publish(&snapshot(session, controls_visible));
                         return outcome;
                     }
                 }
@@ -409,7 +412,7 @@ pub fn drive<'a>(
             None => {
                 // A failed grab or an over-limit frame stops the session but
                 // keeps the rows already stitched, so Done still works.
-                panel.publish(&snapshot(session, false));
+                panel.publish(&snapshot(session, controls_visible));
                 return match session.output() {
                     Some(frame) => DriveOutcome::Finished(frame),
                     None => DriveOutcome::Failed(session.status().to_owned()),
@@ -417,7 +420,7 @@ pub fn drive<'a>(
             }
         }
         if !session.is_running() {
-            panel.publish(&snapshot(session, false));
+            panel.publish(&snapshot(session, controls_visible));
             return match session.output() {
                 Some(frame) => DriveOutcome::Finished(frame),
                 None => DriveOutcome::Failed(session.status().to_owned()),
@@ -619,9 +622,11 @@ mod tests {
         assert_eq!(image.height, 800);
         assert_eq!(session.stitcher().accepted(), 7);
         let statuses = published.lock().unwrap();
-        assert!(statuses.iter().any(|status| status.visible));
+        assert!(
+            statuses.iter().all(|status| !status.visible),
+            "a headless capture has no controls to show"
+        );
         assert!(statuses.iter().any(|status| status.frames > 0));
-        assert!(!statuses.last().expect("published").visible);
     }
 
     #[test]
