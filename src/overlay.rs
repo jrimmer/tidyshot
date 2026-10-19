@@ -307,6 +307,8 @@ pub const TIMEOUT_KEYS: &[&str] = &[
     "overlay_timeout",
     "auto_close_timeout",
     "preview_timeout_ms",
+    "preview.auto_close",
+    "quick_access.timeout",
 ];
 pub const ACTION_KEYS: &[&str] = &[
     "preview_action",
@@ -315,11 +317,15 @@ pub const ACTION_KEYS: &[&str] = &[
     "quickaccess_action",
     "overlay_action",
     "auto_close_action",
+    "preview.auto_close_action",
+    "quick_access.action",
 ];
 pub const CLOSE_AFTER_DRAG_KEYS: &[&str] = &[
     "close_after_drag",
     "preview_close_after_drag",
     "quick_access_close_after_drag",
+    "preview.close_after_drag",
+    "quick_access.close_after_drag",
 ];
 pub const CORNER_KEYS: &[&str] = &[
     "preview_corner",
@@ -327,6 +333,8 @@ pub const CORNER_KEYS: &[&str] = &[
     "quick_access_corner",
     "quickaccess_corner",
     "overlay_corner",
+    "preview.corner",
+    "quick_access.position",
 ];
 pub const MARGIN_KEYS: &[&str] = &["preview_margin", "quick_access_margin"];
 
@@ -334,8 +342,15 @@ fn first_setting_key<'a>(
     settings: &'a std::collections::BTreeMap<String, crate::json::Value>,
     keys: &[&'a str],
 ) -> Option<(&'a str, &'a crate::json::Value)> {
-    keys.iter()
-        .find_map(|key| settings.get(*key).map(|value| (*key, value)))
+    keys.iter().find_map(|key| {
+        // A dotted key reaches into the grouped object an older settings file
+        // may use (`"quick_access": {"timeout": 5}`).
+        let value = match key.split_once('.') {
+            Some((group, field)) => settings.get(group).and_then(|value| value.get(field)),
+            None => settings.get(*key),
+        }?;
+        Some((*key, value))
+    })
 }
 
 fn first_setting<'a>(
@@ -823,6 +838,40 @@ mod tests {
         assert!(!preview.timer_armed());
         preview.leave();
         assert!(preview.timer_armed());
+    }
+
+    #[test]
+    fn preview_settings_read_aliases_and_grouped_keys() {
+        let settings = crate::json::parse(
+            r#"{"quick_access":{"timeout":3,"position":"top-left"},"preview_action":"save"}"#,
+        )
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+        let preview = preview_settings(&settings);
+        assert_eq!(preview.auto_close_ms(), 3000);
+        assert_eq!(preview.auto_close_action(), "save");
+        assert_eq!(preview.corner, Corner::TopLeft);
+
+        let milliseconds = crate::json::parse(r#"{"preview_timeout_ms":1500}"#)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(preview_settings(&milliseconds).auto_close_ms(), 1500);
+
+        // A negative or malformed delay never closes a capture immediately.
+        let negative = crate::json::parse(r#"{"preview_timeout":-4}"#)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(preview_settings(&negative).auto_close_ms(), 0);
+        assert_eq!(
+            preview_settings(&std::collections::BTreeMap::new()).corner,
+            Corner::BottomRight
+        );
     }
 
     #[test]
