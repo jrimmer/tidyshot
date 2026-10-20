@@ -216,6 +216,9 @@ ApplicationWindow {
                 rows.push(JSON.parse(Capture.windowRows[r]))
             window.hoverFrames = frames
             window.hoverRows = rows
+            window.hoverOpen = Capture.windowHoverOpen
+            window.hoverAccent = Capture.windowAccent
+            window.hoverHint = Capture.windowHint
         }
     }
 
@@ -225,6 +228,9 @@ ApplicationWindow {
     // picker below.
     property var hoverFrames: []
     property var hoverRows: []
+    property bool hoverOpen: false
+    property string hoverAccent: "#FFD60A"
+    property string hoverHint: "Click a window · Shift for transparency · Tab switches windows · Esc cancels"
     Repeater {
         id: hoverPickers
         model: window.hoverFrames
@@ -232,9 +238,9 @@ ApplicationWindow {
             required property var modelData
             frame: modelData
             rows: window.hoverRows
-            accent: Capture.windowAccent
-            hint: Capture.windowHint
-            visible: Capture.windowHoverOpen
+            accent: window.hoverAccent
+            hint: window.hoverHint
+            visible: window.hoverOpen
             onChosen: function (index, transparent, forceCopy) {
                 Capture.captureWindowHover(index, transparent, forceCopy)
             }
