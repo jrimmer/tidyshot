@@ -43,6 +43,7 @@ pub mod project;
 pub mod qml_load;
 pub mod raster;
 pub mod recording;
+pub mod recording_runtime;
 pub mod render;
 pub mod scroll;
 pub mod scroll_runtime;

@@ -39,25 +39,28 @@ pub const GUARD_LIBRARY: &str = "recording-guard.so";
 /// is borrowed from [`super::journal::Journal`]; it stays open as long as the
 /// journal does.
 #[derive(Debug)]
-pub struct RecordGuard<'a> {
+pub struct RecordGuard {
     owner: OwnedFd,
     library: OwnedFd,
-    lease: Option<BorrowedFd<'a>>,
+    lease: Option<OwnedFd>,
     library_path: PathBuf,
 }
 
-impl<'a> RecordGuard<'a> {
+impl RecordGuard {
     /// Open the guard against the installed native directory.
     ///
     /// `lease` is the journal lock the encoder must inherit. Fails with
     /// `NotFound` when `recording-guard.so` is missing, so a take never starts
     /// without its lifetime guard.
-    pub fn open(lease: Option<BorrowedFd<'a>>) -> io::Result<Self> {
+    pub fn open(lease: Option<BorrowedFd<'_>>) -> io::Result<Self> {
         Self::open_in(&super::native_dir(), lease)
     }
 
     /// Like [`RecordGuard::open`], against an explicit directory.
-    pub fn open_in(native_dir: &Path, lease: Option<BorrowedFd<'a>>) -> io::Result<Self> {
+    pub fn open_in(native_dir: &Path, lease: Option<BorrowedFd<'_>>) -> io::Result<Self> {
+        // The encoder outlives the journal borrow, so keep its own descriptor
+        // for the lease instead of borrowing one from the caller.
+        let lease = lease.map(|fd| fd.try_clone_to_owned()).transpose()?;
         let library_path = native_dir.join(GUARD_LIBRARY);
         let library = std::fs::OpenOptions::new()
             .read(true)
@@ -96,7 +99,7 @@ impl<'a> RecordGuard<'a> {
     /// The journal lease the child holds, passed as `OMNISHOT_RECORD_LEASE_FD`.
     #[must_use]
     pub fn lease_fd(&self) -> Option<i32> {
-        self.lease.map(|fd| fd.as_raw_fd())
+        self.lease.as_ref().map(AsRawFd::as_raw_fd)
     }
 
     /// The path the guard library was opened from.
@@ -184,7 +187,7 @@ impl Encoder {
     pub fn launch(
         command: &[String],
         env: &BTreeMap<String, String>,
-        guard: &RecordGuard<'_>,
+        guard: &RecordGuard,
     ) -> io::Result<Self> {
         let Some((program, args)) = command.split_first() else {
             return Err(io::Error::new(
@@ -255,6 +258,32 @@ impl Encoder {
             .ok()
             .flatten()
             .map(|status| status.code().unwrap_or(-1))
+    }
+
+    /// Suspend the encoder's whole process group without closing its output.
+    ///
+    /// gpu-screen-recorder has no pause flag, so a paused take is a suspended
+    /// encoder: the file stays open and no frames are committed until it
+    /// resumes.
+    pub fn pause(&mut self) -> io::Result<()> {
+        if self.has_exited()? {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "The recorder is no longer running",
+            ));
+        }
+        self.signal(libc::SIGSTOP)
+    }
+
+    /// Resume a suspended encoder.
+    pub fn resume(&mut self) -> io::Result<()> {
+        if self.has_exited()? {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "The recorder is no longer running",
+            ));
+        }
+        self.signal(libc::SIGCONT)
     }
 
     /// Stop a discarded encoder without leaving it running.
@@ -356,13 +385,13 @@ mod tests {
         dir
     }
 
-    fn guard<'a>(name: &str, lease: &'a std::fs::File) -> (RecordGuard<'a>, PathBuf) {
+    fn guard(name: &str, lease: &std::fs::File) -> (RecordGuard, PathBuf) {
         let dir = native_dir(name);
         let guard = RecordGuard::open_in(&dir, Some(lease.as_fd())).unwrap();
         (guard, dir)
     }
 
-    fn encoder(body: &str, guard: &RecordGuard<'_>) -> Encoder {
+    fn encoder(body: &str, guard: &RecordGuard) -> Encoder {
         let command = vec!["sh".to_owned(), "-c".to_owned(), body.to_owned()];
         Encoder::launch(&command, &BTreeMap::new(), guard).unwrap()
     }

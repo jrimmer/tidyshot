@@ -66,6 +66,16 @@ impl HistoryRow {
         }
     }
 
+    /// A finished recording.
+    #[must_use]
+    pub fn video(path: impl Into<PathBuf>, width: u32, height: u32) -> Self {
+        Self {
+            kind: "video".to_owned(),
+            rect: None,
+            ..Self::screenshot(path, width, height, None)
+        }
+    }
+
     /// Serialize the row for the history file.
     #[must_use]
     pub fn to_value(&self) -> Value {

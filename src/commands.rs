@@ -9,9 +9,11 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
-use std::process::{Command, Output, Stdio};
+#[cfg(unix)]
+use std::os::fd::RawFd;
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A captured command result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +99,11 @@ pub struct CommandSpec {
     /// (`wl-copy`); reading them to EOF blocks until that owner exits. A file
     /// never makes the caller wait for the owner.
     pub stderr_to_file: bool,
+    /// Descriptors the spawned process must inherit across `execve`.
+    ///
+    /// A recorder inherits its journal lease so recovery can tell a live take
+    /// from an abandoned one after the app crashes.
+    pub inherit_fds: Vec<i32>,
 }
 
 impl CommandSpec {
@@ -142,6 +149,34 @@ impl CommandSpec {
         self.stderr_to_file = on;
         self
     }
+
+    /// Make `fd` inheritable by the spawned process.
+    #[must_use]
+    pub fn inherit_fd(mut self, fd: i32) -> Self {
+        self.inherit_fds.push(fd);
+        self
+    }
+}
+
+/// A long-lived child process the runtime can pause, resume and stop.
+pub trait RunningCommand: Send {
+    /// The child's process id.
+    fn pid(&self) -> u32;
+
+    /// Suspend the child's process group.
+    fn pause(&mut self) -> Result<(), CommandError>;
+
+    /// Resume a suspended child.
+    fn resume(&mut self) -> Result<(), CommandError>;
+
+    /// Wait for the child to exit and report its status.
+    fn wait(&mut self) -> Result<CommandOutput, CommandError>;
+
+    /// True while the child is still running.
+    fn running(&mut self) -> Result<bool, CommandError>;
+
+    /// Stop the child, escalating from SIGINT to SIGKILL without hanging.
+    fn stop(&mut self) -> Result<CommandOutput, CommandError>;
 }
 
 /// A `wl-copy` invocation that does not wait on the clipboard owner.
@@ -201,6 +236,20 @@ pub trait CommandRunner: Send + Sync {
     /// Convenience wrapper that requires success and returns stdout.
     fn run_stdout(&self, spec: &CommandSpec) -> Result<Vec<u8>, CommandError> {
         Ok(self.run(spec)?.stdout)
+    }
+
+    /// Start a long-lived process for a recorder or another interactive tool.
+    ///
+    /// The default refuses, so a test runner only implements the paths it
+    /// actually exercises and a recorder never starts by accident.
+    fn spawn(&self, spec: &CommandSpec) -> Result<Box<dyn RunningCommand>, CommandError> {
+        Err(CommandError::Spawn {
+            program: spec.program.clone(),
+            source: io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this command runner cannot start a long-lived process",
+            ),
+        })
     }
 }
 
@@ -288,6 +337,36 @@ impl CommandRunner for SystemRunner {
         }
     }
 
+    fn spawn(&self, spec: &CommandSpec) -> Result<Box<dyn RunningCommand>, CommandError> {
+        let mut command = Command::new(&spec.program);
+        command.args(&spec.args);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+        for (key, value) in &spec.env {
+            command.env(key, value);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        #[cfg(unix)]
+        let _restore =
+            make_inheritable(&spec.inherit_fds).map_err(|source| CommandError::Spawn {
+                program: spec.program.clone(),
+                source,
+            })?;
+        let child = command.spawn().map_err(|source| CommandError::Spawn {
+            program: spec.program.clone(),
+            source,
+        })?;
+        Ok(Box::new(SystemRunningCommand {
+            child,
+            program: spec.program.clone(),
+        }))
+    }
+
     fn run_streaming(
         &self,
         spec: &CommandSpec,
@@ -360,6 +439,156 @@ impl CommandRunner for SystemRunner {
             }
         })
     }
+}
+
+/// A child of [`SystemRunner::spawn`].
+struct SystemRunningCommand {
+    child: Child,
+    program: String,
+}
+
+impl RunningCommand for SystemRunningCommand {
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn pause(&mut self) -> Result<(), CommandError> {
+        self.signal(libc::SIGSTOP)
+    }
+
+    fn resume(&mut self) -> Result<(), CommandError> {
+        self.signal(libc::SIGCONT)
+    }
+
+    fn running(&mut self) -> Result<bool, CommandError> {
+        self.exited().map(|exited| !exited)
+    }
+
+    fn wait(&mut self) -> Result<CommandOutput, CommandError> {
+        let status = self.child.wait().map_err(|source| CommandError::Spawn {
+            program: self.program.clone(),
+            source,
+        })?;
+        Ok(CommandOutput {
+            status: status.code().unwrap_or(-1),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn stop(&mut self) -> Result<CommandOutput, CommandError> {
+        for (signal, wait) in [
+            (libc::SIGINT, Duration::from_secs(3)),
+            (libc::SIGTERM, Duration::from_secs(2)),
+            (libc::SIGKILL, Duration::from_secs(2)),
+        ] {
+            if self.exited()? {
+                break;
+            }
+            // A paused process ignores SIGINT until it is continued.
+            if signal != libc::SIGCONT {
+                let _ = self.signal(libc::SIGCONT);
+            }
+            self.signal(signal)?;
+            let exited =
+                wait_for_exit(&mut self.child, wait).map_err(|source| CommandError::Spawn {
+                    program: self.program.clone(),
+                    source,
+                })?;
+            if exited {
+                break;
+            }
+        }
+        self.wait()
+    }
+}
+
+impl SystemRunningCommand {
+    fn exited(&mut self) -> Result<bool, CommandError> {
+        self.child
+            .try_wait()
+            .map(|status| status.is_some())
+            .map_err(|source| CommandError::Spawn {
+                program: self.program.clone(),
+                source,
+            })
+    }
+
+    fn signal(&self, signal: i32) -> Result<(), CommandError> {
+        let group = -(self.child.id() as i32);
+        // SAFETY: `kill` only sends a signal to this child's process group.
+        if unsafe { libc::kill(group, signal) } < 0 {
+            let error = io::Error::last_os_error();
+            // ESRCH means the child is already gone; the caller's wait then
+            // reports the real exit status.
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(CommandError::Spawn {
+                    program: self.program.clone(),
+                    source: error,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Wait up to `limit` for `child` to exit, polling so a stop never hangs.
+fn wait_for_exit(child: &mut Child, limit: Duration) -> io::Result<bool> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+fn fd_flags(fd: RawFd) -> io::Result<i32> {
+    // SAFETY: `fcntl` with `F_GETFD` only reads this descriptor's flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(flags)
+}
+
+#[cfg(unix)]
+fn set_fd_flags(fd: RawFd, flags: i32) -> io::Result<()> {
+    // SAFETY: `fcntl` with `F_SETFD` only changes this descriptor's flags.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Clear `FD_CLOEXEC` for the spawn and put it back afterwards.
+#[cfg(unix)]
+struct RestoreCloexec(Vec<(RawFd, i32)>);
+
+#[cfg(unix)]
+impl Drop for RestoreCloexec {
+    fn drop(&mut self) {
+        for (fd, flags) in &self.0 {
+            let _ = set_fd_flags(*fd, *flags);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn make_inheritable(fds: &[i32]) -> io::Result<RestoreCloexec> {
+    let mut saved = Vec::with_capacity(fds.len());
+    for fd in fds {
+        saved.push((*fd, fd_flags(*fd)?));
+    }
+    let restore = RestoreCloexec(saved);
+    for fd in fds {
+        set_fd_flags(*fd, fd_flags(*fd)? & !libc::FD_CLOEXEC)?;
+    }
+    Ok(restore)
 }
 
 /// Wait for `child` in a helper thread; kill it if `timeout` elapses.
