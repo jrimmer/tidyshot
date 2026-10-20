@@ -231,7 +231,9 @@ ApplicationWindow {
     property bool hoverOpen: false
     property string hoverAccent: "#FFD60A"
     property string hoverHint: "Click a window · Shift for transparency · Tab switches windows · Esc cancels"
-    Repeater {
+    // A Repeater only accepts Item delegates, so an Instantiator owns the
+    // per-output windows instead; it keeps each one for the life of its row.
+    Instantiator {
         id: hoverPickers
         model: window.hoverFrames
         delegate: WindowHover {

@@ -305,7 +305,9 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
                         let identity = window.identity().ok_or_else(|| {
                             RuntimeError::Window("Invalid selected window".to_owned())
                         })?;
-                        return self.capture_window(&window, &identity, false, false);
+                        // The include-cursor setting applies to a window
+                        // capture the same way it does to the hover path.
+                        return self.capture_window(&window, &identity, self.options.cursor, false);
                     }
                     let rect = self.select_region(request.mode)?;
                     if should_cancel() {
