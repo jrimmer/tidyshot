@@ -692,7 +692,14 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
         };
         let mut metadata = workspace.metadata(&plan.encoder_path);
         if let Value::Object(entries) = &mut metadata {
-            entries.insert("kind".to_owned(), Value::String("video".to_owned()));
+            // A GIF take replaces its intermediate MP4, so its sidecar says
+            // `gif`; recovery uses the kind to find the file it kept.
+            let kind = if plan.options.format == CaptureFormat::Gif {
+                "gif"
+            } else {
+                "video"
+            };
+            entries.insert("kind".to_owned(), Value::String(kind.to_owned()));
             entries.insert("created".to_owned(), Value::Number(now_seconds()));
             entries.insert("width".to_owned(), Value::Number(f64::from(width)));
             entries.insert("height".to_owned(), Value::Number(f64::from(height)));
@@ -702,8 +709,12 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
                 Value::Number(status.seconds as f64),
             );
         }
+        // The sidecar lives beside the take as `<stem>.json`; a GIF's keeps the
+        // same name as its intermediate MP4's, which is the file recovery reads.
         workspace.atomic_json(&plan.output_path, &metadata)?;
-        if plan.output_path != plan.encoder_path {
+        if plan.output_path != plan.encoder_path
+            && plan.encoder_path.with_extension("json") != plan.output_path.with_extension("json")
+        {
             let encoder_sidecar = plan.encoder_path.with_extension("json");
             let _ = std::fs::remove_file(encoder_sidecar);
         }
@@ -1318,6 +1329,37 @@ mod tests {
         assert!(result.path.exists());
         assert!(!result.path.with_extension("mp4").exists());
         assert!(runner.seen().iter().any(|spec| spec.program == "ffmpeg"));
+        // The GIF keeps its metadata sidecar even though the intermediate MP4
+        // shared its stem and was removed.
+        let sidecar = result.path.with_extension("json");
+        let text = std::fs::read_to_string(&sidecar).expect("the committed sidecar survives");
+        let value = crate::json::parse(&text).unwrap();
+        assert_eq!(value.get("kind").and_then(Value::as_str), Some("gif"));
+        assert_eq!(value.get("width").and_then(Value::as_f64), Some(640.0));
+        assert!(value.get("created").is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stopping_a_paused_take_saves_it() {
+        let root = scratch("paused-stop");
+        let runner = Fake::new();
+        let control = RecordingControl::new();
+        control.send(RecordingCommand::TogglePause);
+        control.send(RecordingCommand::Stop);
+        let mut paused_seen = false;
+        let result = runtime(&runner, &root)
+            .run(
+                RecordOptions::default(),
+                Some("0,0 320x200"),
+                &control,
+                &mut |status| paused_seen |= status.paused,
+            )
+            .unwrap()
+            .expect("a paused take stopped by the user is saved");
+        assert!(paused_seen, "the take was paused before it stopped");
+        assert!(result.path.exists());
+        assert!(result.path.with_extension("json").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 
