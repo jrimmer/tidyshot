@@ -394,9 +394,15 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
             .root
             .join("captures")
             .join(format!("{stem}.{extension}"));
+        // A take owns its stem: the video, its sidecar and its journal all share
+        // it, so either output format or any leftover marker means the stem is
+        // taken and a second take must not reuse it.
         while candidate.exists()
-            || candidate.with_extension("recording.json").exists()
             || candidate.with_extension("mp4").exists()
+            || candidate.with_extension("gif").exists()
+            || candidate.with_extension("json").exists()
+            || candidate.with_extension("recording.json").exists()
+            || candidate.with_extension("discarding.json").exists()
         {
             candidate = self
                 .root
@@ -1392,6 +1398,86 @@ mod tests {
             .unwrap();
         assert_ne!(first.path, second.path);
         assert!(first.path.exists() && second.path.exists());
+        assert!(first.path.with_extension("json").is_file());
+        assert!(second.path.with_extension("json").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_take_after_a_gif_does_not_reuse_its_stem() {
+        let root = scratch("gif-then-mp4");
+        let runner = Fake::new();
+        let runtime = runtime(&runner, &root);
+        let gif_control = RecordingControl::new();
+        gif_control.send(RecordingCommand::Stop);
+        let gif = runtime
+            .run(
+                RecordOptions {
+                    format: CaptureFormat::Gif,
+                    gif_width: 0,
+                    ..RecordOptions::default()
+                },
+                Some("0,0 100x100"),
+                &gif_control,
+                &mut |_| {},
+            )
+            .unwrap()
+            .unwrap();
+        let mp4_control = RecordingControl::new();
+        mp4_control.send(RecordingCommand::Stop);
+        let video = runtime
+            .run(
+                RecordOptions::default(),
+                Some("0,0 100x100"),
+                &mp4_control,
+                &mut |_| {},
+            )
+            .unwrap()
+            .unwrap();
+        assert_ne!(gif.path, video.path);
+        assert!(gif.path.exists() && video.path.exists());
+        // The GIF kept its own metadata after the MP4 take committed.
+        let text = std::fs::read_to_string(gif.path.with_extension("json")).unwrap();
+        let value = crate::json::parse(&text).unwrap();
+        assert_eq!(value.get("kind").and_then(Value::as_str), Some("gif"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_restart_keeps_the_options_the_first_take_normalized() {
+        let root = scratch("restart-options");
+        let runner = Fake::new();
+        let control = RecordingControl::new();
+        control.send(RecordingCommand::Restart);
+        control.send(RecordingCommand::Stop);
+        let options = RecordOptions {
+            format: CaptureFormat::Gif,
+            gif_width: 0,
+            system: true,
+            microphone: true,
+            size: "1920x1080".to_owned(),
+            scale_video: true,
+            ..RecordOptions::default()
+        };
+        let result = runtime(&runner, &root)
+            .run(options, Some("0,0 100x100"), &control, &mut |_| {})
+            .unwrap()
+            .unwrap();
+        let starts: Vec<_> = runner
+            .seen()
+            .into_iter()
+            .filter(|spec| spec.program == "gpu-screen-recorder")
+            .collect();
+        assert_eq!(starts.len(), 2, "the restart started a second encoder");
+        // A GIF take is audio-free and native-size on both attempts.
+        for start in &starts {
+            assert!(!start.args.contains(&"-a".to_owned()), "{start:?}");
+            assert!(!start.args.contains(&"-s".to_owned()), "{start:?}");
+        }
+        assert_eq!(
+            result.path.extension().and_then(|ext| ext.to_str()),
+            Some("gif")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
