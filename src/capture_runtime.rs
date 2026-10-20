@@ -599,7 +599,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         style.shadow = shadow;
         let mut background = style.background(image.width, window.rect.width);
         if wallpaper_enabled && background.color.alpha == 0 {
-            let wallpaper = crate::wallpaper::WallpaperSettings::from_settings(&settings);
+            let wallpaper = crate::wallpaper::WallpaperSettings::from_settings(settings);
             match crate::wallpaper::capture_wallpaper(self.runner, &wallpaper, &self.root) {
                 Ok(image) => background = style.with_wallpaper(background, image),
                 Err(error) => {

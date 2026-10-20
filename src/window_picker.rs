@@ -296,9 +296,7 @@ pub fn projections(model: &PickerModel) -> (Vec<String>, Vec<String>) {
         value.to_string_compact()
     });
     let rows = model.rows.iter().flat_map(|row| {
-        let Some(frame) = model.frames.get(row.monitor) else {
-            return None;
-        };
+        let frame = model.frames.get(row.monitor)?;
         let mut value = row_json(row, frame);
         if let Value::Object(object) = &mut value {
             object.insert("monitor".to_owned(), Value::Number(row.monitor as f64));
