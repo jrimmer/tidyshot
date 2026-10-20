@@ -157,6 +157,9 @@ pub fn build(
     let windows = focus_order(&visible_windows(clients, monitors));
     let rows = windows
         .into_iter()
+        // TidyShot's own previews must never be offered: they are always on
+        // top, so the picker would capture itself.
+        .filter(|window| !window.is_own_preview())
         .filter_map(|window| {
             let monitor = frames.iter().position(|frame| {
                 frame.contains(
@@ -410,6 +413,19 @@ mod tests {
         assert!(rows[0].contains("\"monitor\":0"), "{}", rows[0]);
         assert!(frames[0].contains("\"index\":0"), "{}", frames[0]);
         assert!(rows[0].contains("\"x\":0"), "{}", rows[0]);
+    }
+
+    #[test]
+    fn tidy_shot_previews_are_never_offered() {
+        let clients = crate::json::parse(&format!(
+            "[{},{}]",
+            window("0x1", "One", 10, 10, 0),
+            r#"{"address":"0x2","title":"TidyShot Preview","class":"tidyshot","at":[500,500],"size":[100,80],"workspace":{"name":"1"},"mapped":true,"focusHistoryID":1}"#
+        ))
+        .unwrap();
+        let picker = build(&clients, &monitors(), frames(), "#ff0000".to_owned());
+        assert_eq!(picker.rows.len(), 1);
+        assert_eq!(picker.rows[0].window.title, "One");
     }
 
     #[test]
