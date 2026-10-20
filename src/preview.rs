@@ -842,6 +842,23 @@ mod tests {
     }
 
     #[test]
+    fn a_composed_preview_shows_its_picture_but_acts_on_the_capture() {
+        let mut preview = PreviewWindow::new(
+            "/tmp/composed.png",
+            640,
+            480,
+            settings(),
+            Some(MonitorScreen::new(ScreenRect::new(
+                0.0, 0.0, 1920.0, 1080.0,
+            ))),
+        );
+        preview.set_capture_path(PathBuf::from("/tmp/capture.png"));
+        assert_eq!(preview.path(), Path::new("/tmp/composed.png"));
+        assert_eq!(preview.capture_path(), Path::new("/tmp/capture.png"));
+        assert_eq!(preview.info(), "640 × 480");
+    }
+
+    #[test]
     fn a_command_line_capture_is_marked_standalone() {
         let result = crate::capture_runtime::CaptureResult {
             path: PathBuf::from("/tmp/capture.png"),
