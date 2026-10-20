@@ -748,6 +748,38 @@ mod tests {
         assert_eq!(error.to_string(), "no such output");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_paused_child_continues_it_and_ends_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("tidyshot-paused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("sleeper");
+        // A stopper takes no action while stopped, so only SIGCONT plus the
+        // stop escalation can end it.
+        std::fs::write(&script, "#!/bin/sh\ntrap '' INT TERM\nsleep 120\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let spec = CommandSpec::new(script.to_string_lossy().into_owned());
+        let mut child = SystemRunner.spawn(&spec).unwrap();
+        child.pause().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(child.running().unwrap(), "the paused child is still live");
+
+        let started = std::time::Instant::now();
+        child.stop().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "stop escalated without hanging on the paused child"
+        );
+        assert!(!child.running().unwrap(), "the paused child stopped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn spec_records_arguments_in_order() {
         let runner = FakeRunner::default();

@@ -512,21 +512,32 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
         let mut last_status_write = Instant::now();
         let mut outcome = LoopOutcome::Cancelled;
         let mut stopped_externally = false;
+        let mut command_failure: Option<String> = None;
 
         loop {
             let command = control.wait(POLL);
             if let Some(command) = command {
                 match command {
                     RecordingCommand::TogglePause => {
+                        let signal = if status.paused {
+                            child.resume()
+                        } else {
+                            child.pause()
+                        };
+                        if let Err(error) = signal {
+                            // The take is no longer controllable, so report the
+                            // failure instead of leaving the widget believing it
+                            // records. The marker stays for recovery.
+                            command_failure = Some(error.to_string());
+                            break;
+                        }
                         if status.paused {
-                            child.resume()?;
                             if let Some(at) = paused_at.take() {
                                 paused_total += at.elapsed();
                             }
                             status.paused = false;
                             update_phase(&mut journal, "recording");
                         } else {
-                            child.pause()?;
                             paused_at = Some(Instant::now());
                             status.paused = true;
                             update_phase(&mut journal, "paused");
@@ -590,6 +601,19 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
                     break;
                 }
             }
+        }
+
+        if let Some(message) = command_failure {
+            let _ = child.stop();
+            if let Some(checkpoint) = checkpoint.as_ref() {
+                checkpoint.stop();
+            }
+            clear_status(&self.status_path);
+            status.recording = false;
+            status.message = message.clone();
+            publish(&status);
+            control.publish(status);
+            return Err(RecordingError::Command(message));
         }
 
         if stopped_externally && matches!(outcome, LoopOutcome::Cancelled) {
@@ -985,6 +1009,8 @@ mod tests {
     struct FakeEncoder {
         stopped: bool,
         paused: bool,
+        /// When set, the next pause command fails like a vanished process.
+        fail_pause: bool,
     }
 
     struct FakeChild {
@@ -998,7 +1024,14 @@ mod tests {
         }
 
         fn pause(&mut self) -> Result<(), CommandError> {
-            self.state.lock().unwrap().paused = true;
+            let mut state = self.state.lock().unwrap();
+            if state.fail_pause {
+                return Err(CommandError::Spawn {
+                    program: "gpu-screen-recorder".to_owned(),
+                    source: io::Error::other("no such process"),
+                });
+            }
+            state.paused = true;
             Ok(())
         }
 
@@ -1343,6 +1376,36 @@ mod tests {
         assert_eq!(value.get("kind").and_then(Value::as_str), Some("gif"));
         assert_eq!(value.get("width").and_then(Value::as_f64), Some(640.0));
         assert!(value.get("created").is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failed_pause_reports_instead_of_leaving_a_running_widget() {
+        let root = scratch("pause-failure");
+        let runner = Fake::new();
+        runner.state.lock().unwrap().fail_pause = true;
+        let control = RecordingControl::new();
+        control.send(RecordingCommand::TogglePause);
+        let mut statuses = Vec::new();
+        let error = runtime(&runner, &root)
+            .run(
+                RecordOptions::default(),
+                Some("0,0 320x200"),
+                &control,
+                &mut |status| statuses.push(status.clone()),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("no such process"), "{error}");
+        assert!(
+            !root.join(STATUS_FILE).exists(),
+            "the widget stops showing a take that cannot be paused"
+        );
+        assert!(
+            statuses.last().is_some_and(|status| !status.recording),
+            "the controls learned the take ended"
+        );
+        // The encoder was stopped and its take left for recovery.
+        assert!(runner.state.lock().unwrap().stopped);
         let _ = std::fs::remove_dir_all(&root);
     }
 
