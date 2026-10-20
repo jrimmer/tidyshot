@@ -8,6 +8,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The recording runtime: `gpu-screen-recorder` takes leased by the journal and
+  checkpoint, area or display capture, pause/resume, stop, restart and cancel,
+  the always-on-top controls strip, the bar widget status file, GIF conversion,
+  and crash recovery on launch with a preview of the recovered file. `record`,
+  `stop`, `pause` and `restart` reach it from the menu, the CLI and the URL API.
 - The annotate editor window: select, arrow, line, rectangle, ellipse, text,
   counter, pencil, highlighter, blur, pixelate and crop tools over the existing
   document, renderer and undo model, with one undo step per drag, Ctrl+Z and

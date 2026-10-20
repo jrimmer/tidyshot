@@ -266,6 +266,30 @@ If alignment fails, scroll back slightly or slow down. Captures are limited to
 contain the source image; share a flattened PNG/JPEG/WebP when concealing
 information.
 
+## Recording
+
+`src/recording_runtime.rs` is the one recording path. It plans the take from
+`hyprctl -j monitors` (an explicit `--geometry` region or the display under the
+pointer), leases it with `recording::journal::Journal`, spawns
+`gpu-screen-recorder` through the command runner, and commits the MP4 or GIF
+with its sidecar, history row and corner preview. `RecordOptions` honours the
+saved FPS, quality, size, audio, cursor, Studio and GIF preferences.
+
+While a take runs the runtime writes `$XDG_RUNTIME_DIR/tidyshot-status.json`
+with `recording`, `paused`, `seconds`, `show_time` and `updated`, so the bar
+widget shows its timer and its Stop and Pause/Resume rows. The
+`qml/RecordingControls.qml` strip is its own always-on-top window with elapsed
+time, Pause/Resume, Stop, Restart and Cancel; a Hyprland rule keeps it out of
+the recording on compositors that can exclude a window from a screencast.
+`tidyshot record`, `stop`, `pause` and `restart` drive the same runtime, from
+the command line, a URL or the bar panel.
+
+Pause suspends the encoder's process group and Resume continues it, so no
+frames are committed while paused. A take whose encoder dies keeps its journal
+marker and Studio checkpoint; the next launch recovers the playable file,
+restores the checkpoint, appends its history row and shows it in the preview,
+while a cancelled take is discarded.
+
 ## Command surface
 
 `src/cli.rs` parses the same argument vector the OmniShot launcher uses;
