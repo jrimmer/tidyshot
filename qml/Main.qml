@@ -200,6 +200,48 @@ ApplicationWindow {
         }
     }
 
+    // The frozen-frame picker takes JSON rows from the capture singleton,
+    // for the same reason: property notifications do not reach QML here.
+    Timer {
+        id: windowSync
+        interval: 60
+        repeat: true
+        running: true
+        onTriggered: {
+            var frames = []
+            for (var f = 0; f < Capture.windowFrames.length; ++f)
+                frames.push(JSON.parse(Capture.windowFrames[f]))
+            var rows = []
+            for (var r = 0; r < Capture.windowRows.length; ++r)
+                rows.push(JSON.parse(Capture.windowRows[r]))
+            window.hoverFrames = frames
+            window.hoverRows = rows
+        }
+    }
+
+    // Fullscreen frozen-frame pickers, one per output. Each takes the frozen
+    // frame it draws and the focus-sorted rows, and reports the chosen row.
+    // A window capture that cannot freeze the desktop falls back to the list
+    // picker below.
+    property var hoverFrames: []
+    property var hoverRows: []
+    Repeater {
+        id: hoverPickers
+        model: window.hoverFrames
+        delegate: WindowHover {
+            required property var modelData
+            frame: modelData
+            rows: window.hoverRows
+            accent: Capture.windowAccent
+            hint: Capture.windowHint
+            visible: Capture.windowHoverOpen
+            onChosen: function (index, transparent, forceCopy) {
+                Capture.captureWindowHover(index, transparent, forceCopy)
+            }
+            onDismissed: Capture.closeWindowPicker()
+        }
+    }
+
     // Window picker for a window capture; the client rectangles stay in Rust.
     WindowPicker {
         id: windowPicker

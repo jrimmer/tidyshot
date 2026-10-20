@@ -59,6 +59,8 @@ pub enum RuntimeError {
     Image(String),
     /// The scrolling session stopped without an image worth saving.
     Scroll(String),
+    /// The isolated window capture failed or the window vanished.
+    Window(String),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -72,6 +74,7 @@ impl std::fmt::Display for RuntimeError {
             Self::Io(message) => f.write_str(message),
             Self::Image(message) => f.write_str(message),
             Self::Scroll(message) => f.write_str(message),
+            Self::Window(message) => f.write_str(message),
         }
     }
 }
@@ -273,6 +276,21 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             )?;
             match outcome {
                 CaptureOutcome::NeedsSelection => {
+                    if request.mode == crate::capture_session::CaptureMode::Window {
+                        // A window capture is not a rectangle grab: the list
+                        // fallback chooses the window, then the export helper
+                        // copies its own surface.
+                        let Some(window) = self.select_window()? else {
+                            return Err(RuntimeError::Cancelled);
+                        };
+                        if should_cancel() {
+                            return Err(RuntimeError::Cancelled);
+                        }
+                        let identity = window.identity().ok_or_else(|| {
+                            RuntimeError::Window("Invalid selected window".to_owned())
+                        })?;
+                        return self.capture_window(&window, &identity, false);
+                    }
                     let rect = self.select_region(request.mode)?;
                     if should_cancel() {
                         return Err(RuntimeError::Cancelled);
@@ -389,25 +407,70 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
 
     /// Run the interactive selector, restricted to client rectangles for a
     /// window capture.
+    ///
+    /// The rectangles are slurp's fallback list; when the user picks one, the
+    /// window is captured through the export helper instead of cropping the
+    /// desktop at that rectangle.
     fn select_region(
         &self,
         mode: crate::capture_session::CaptureMode,
     ) -> Result<Rect, RuntimeError> {
-        let clients = if mode == crate::capture_session::CaptureMode::Window {
-            self.windows()?
-                .iter()
-                .filter(|window| !window.is_own_preview())
+        if mode == crate::capture_session::CaptureMode::Window {
+            return self
+                .select_window()?
                 .map(|window| window.rect)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
+                .ok_or(RuntimeError::Cancelled);
+        }
+        slurp_region(self.runner, false, &[]).map_err(RuntimeError::from)
+    }
+
+    /// Run the window list selector.
+    ///
+    /// This is the keyboard fallback: the interactive GUI offers the frozen
+    /// hover picker, while a headless invocation has only slurp's list.
+    // Ported from omnishot/backend.py (select_window)
+    pub fn select_window(&self) -> Result<Option<WindowInfo>, RuntimeError> {
+        let windows: Vec<WindowInfo> = self
+            .windows()?
+            .into_iter()
+            .filter(|window| !window.is_own_preview())
+            .collect();
+        if windows.is_empty() {
+            return Err(RuntimeError::Window(
+                "There are no windows to capture".to_owned(),
+            ));
+        }
+        let rows: String = windows
+            .iter()
+            .map(|window| {
+                format!(
+                    "{} {}\n",
+                    crate::geometry::geometry_text(window.rect),
+                    window.address
+                )
+            })
+            .collect();
+        let spec = crate::commands::CommandSpec::new("slurp")
+            .args([
+                "-r",
+                "-f",
+                "%l",
+                "-b",
+                "#00000000",
+                "-c",
+                "#ffffffff",
+                "-w",
+                "2",
+            ])
+            .stdin(rows.into_bytes())
+            .timeout(std::time::Duration::from_secs(180));
+        let output = match self.runner.run(&spec) {
+            Ok(output) => output,
+            Err(crate::commands::CommandError::Failure { .. }) => return Ok(None),
+            Err(error) => return Err(RuntimeError::Command(error)),
         };
-        slurp_region(
-            self.runner,
-            mode == crate::capture_session::CaptureMode::Window,
-            &clients,
-        )
-        .map_err(RuntimeError::from)
+        let address = output.stdout_string().trim().to_owned();
+        Ok(windows.into_iter().find(|window| window.address == address))
     }
 
     /// The visible windows from `hyprctl -j clients`.
@@ -422,6 +485,48 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         Ok(crate::window::windows_from(&Value::Array(vec![value]))
             .into_iter()
             .next())
+    }
+
+    /// Capture one window's own surface and save it.
+    ///
+    /// This is the fidelity path: the export helper copies the window without
+    /// overlap or wallpaper, preserving alpha. The saved pixels keep that
+    /// window's rectangle in history; the styling is a later, editable step.
+    // Ported from omnishot/app.py (capture_window) and omnishot/backend.py
+    // (grab_window)
+    pub fn capture_window(
+        &self,
+        window: &WindowInfo,
+        identity: &crate::window::WindowIdentity,
+        cursor: bool,
+    ) -> Result<CaptureResult, RuntimeError> {
+        if !crate::window::helper_available(&self.native) {
+            return Err(RuntimeError::Window(
+                crate::window::helper_missing_message().to_owned(),
+            ));
+        }
+        let image = crate::window::capture(self.runner, &self.native, identity, cursor)
+            .map_err(|error| RuntimeError::Window(error.to_string()))?;
+        let png = image.to_png();
+        let path = self.capture_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::storage::atomic_write_file(&path, &png)?;
+        let row = HistoryRow::screenshot(
+            path.clone(),
+            image.width as u32,
+            image.height as u32,
+            Some(window.rect),
+        );
+        history::prepend(&self.root, &row)?;
+        Ok(CaptureResult {
+            path,
+            width: image.width as u32,
+            height: image.height as u32,
+            rect: Some(window.rect),
+            screen: None,
+        })
     }
 
     /// Save a grabbed frame and append its history row.
@@ -679,6 +784,42 @@ fn capture_on_worker(
     }
 }
 
+/// The worker half of an isolated window capture.
+///
+/// The window identity is re-resolved and the helper run on this thread; only
+/// the finished path crosses back to the Qt thread. `transparent` and
+/// `force_copy` are carried through so the capture keeps the user's modifier
+/// choice for the following step.
+// Ported from omnishot/app.py (capture_window)
+fn window_on_worker(
+    window: WindowInfo,
+    identity: crate::window::WindowIdentity,
+    _transparent: bool,
+    _force_copy: bool,
+    cancel: Arc<AtomicBool>,
+) -> Completion {
+    if cancel.load(Ordering::SeqCst) {
+        return Completion::Failed(RuntimeError::Cancelled.to_string());
+    }
+    let runner = crate::commands::SystemRunner;
+    let runtime = CaptureRuntime::new(
+        &runner,
+        MirrorRegistry::global(),
+        crate::recording::native_dir(),
+        crate::settings::data_dir(),
+    );
+    match runtime.capture_window(&window, &identity, runtime.options.cursor) {
+        Ok(mut result) => {
+            result.screen = crate::commands::hypr(&runner, "monitors")
+                .ok()
+                .and_then(|value| value.as_array().map(crate::preview::focused_monitor_screen))
+                .flatten();
+            Completion::Captured(result)
+        }
+        Err(error) => Completion::Failed(error.to_string()),
+    }
+}
+
 /// A panel that publishes the session to QML and reads the controls.
 struct QtScrollPanel {
     control: ScrollControl,
@@ -815,6 +956,11 @@ pub mod qobject {
         #[qproperty(i32, width)]
         #[qproperty(i32, height)]
         #[qproperty(bool, window_picker_open, cxx_name = "windowPickerOpen")]
+        #[qproperty(bool, window_hover_open, cxx_name = "windowHoverOpen")]
+        #[qproperty(QStringList, window_frames, cxx_name = "windowFrames")]
+        #[qproperty(QStringList, window_rows, cxx_name = "windowRows")]
+        #[qproperty(QString, window_accent, cxx_name = "windowAccent")]
+        #[qproperty(QString, window_hint, cxx_name = "windowHint")]
         #[qproperty(QStringList, window_labels, cxx_name = "windowLabels")]
         #[qproperty(QStringList, window_details, cxx_name = "windowDetails")]
         #[qproperty(bool, scroll_open, cxx_name = "scrollOpen")]
@@ -856,15 +1002,25 @@ pub mod qobject {
         #[cxx_name = "captureRow"]
         fn capture_row(self: Pin<&mut Self>, id: &QString) -> bool;
 
-        /// Load the visible window list for the picker.
+        /// Load the frozen frames and the visible window list for the picker.
         #[qinvokable]
         #[cxx_name = "openWindowPicker"]
         fn open_window_picker(self: Pin<&mut Self>);
 
-        /// Close the picker without capturing.
+        /// Close either picker without capturing.
         #[qinvokable]
         #[cxx_name = "closeWindowPicker"]
         fn close_window_picker(self: Pin<&mut Self>);
+
+        /// Capture the row chosen in the frozen-frame hover picker.
+        #[qinvokable]
+        #[cxx_name = "captureWindowHover"]
+        fn capture_window_hover(
+            self: Pin<&mut Self>,
+            index: i32,
+            transparent: bool,
+            force_copy: bool,
+        );
 
         /// Capture the window at `index` in the loaded picker list.
         #[qinvokable]
@@ -927,6 +1083,11 @@ pub struct CaptureRust {
     width: i32,
     height: i32,
     window_picker_open: bool,
+    window_hover_open: bool,
+    window_frames: QStringList,
+    window_rows: QStringList,
+    window_accent: QString,
+    window_hint: QString,
     window_labels: QStringList,
     window_details: QStringList,
     scroll_open: bool,
@@ -938,6 +1099,8 @@ pub struct CaptureRust {
     scroll_horizontal: bool,
     cancel: Arc<AtomicBool>,
     windows: Vec<WindowInfo>,
+    picker: Option<crate::window_picker::PickerModel>,
+    frozen: Option<PathBuf>,
     scroll: Option<crate::scroll_runtime::ScrollControl>,
     pending_action: Option<String>,
 }
@@ -951,6 +1114,11 @@ impl Default for CaptureRust {
             width: 0,
             height: 0,
             window_picker_open: false,
+            window_hover_open: false,
+            window_frames: QStringList::default(),
+            window_rows: QStringList::default(),
+            window_accent: QString::from("#FFD60A"),
+            window_hint: QString::from(crate::window_picker::HINT),
             window_labels: QStringList::default(),
             window_details: QStringList::default(),
             scroll_open: false,
@@ -962,6 +1130,8 @@ impl Default for CaptureRust {
             scroll_horizontal: false,
             cancel: Arc::new(AtomicBool::new(false)),
             windows: Vec::new(),
+            picker: None,
+            frozen: None,
             scroll: None,
             pending_action: None,
         }
@@ -1158,53 +1328,153 @@ impl qobject::Capture {
         true
     }
 
-    /// Load the visible window list for the picker.
+    /// Freeze every output and load the visible window list.
+    ///
+    /// The frozen-frame hover picker is the primary chooser; the list stays
+    /// available as the keyboard fallback whenever the frames cannot be used.
+    // Ported from omnishot/app.py (window_selection)
     pub fn open_window_picker(mut self: Pin<&mut Self>) {
         let runner = crate::commands::SystemRunner;
+        let native = crate::recording::native_dir();
         let runtime = CaptureRuntime::new(
             &runner,
             MirrorRegistry::global(),
-            crate::recording::native_dir(),
+            native.clone(),
             crate::settings::data_dir(),
         );
-        match runtime.windows() {
-            Ok(windows) => {
-                let windows: Vec<WindowInfo> = windows
-                    .into_iter()
-                    .filter(|window| !window.is_own_preview())
-                    .collect();
-                let mut labels = QStringList::default();
-                let mut details = QStringList::default();
-                for window in &windows {
-                    labels.append(QString::from(window.label()));
-                    details.append(QString::from(window.detail()));
-                }
-                let count = windows.len();
-                self.as_mut().rust_mut().get_mut().windows = windows;
-                self.as_mut().set_window_labels(labels);
-                self.as_mut().set_window_details(details);
-                self.as_mut().set_window_picker_open(count > 0);
-                self.as_mut()
-                    .set_message(QString::from(format!("Choose a window ({count} found)")));
-                if count == 0 {
-                    self.as_mut()
-                        .set_message(QString::from("No window to capture"));
-                    self.as_mut().set_window_picker_open(false);
-                    self.as_mut()
-                        .failed_signal(&QString::from("No window to capture"));
-                }
-            }
+        let monitors = match crate::commands::hypr(&runner, "monitors") {
+            Ok(value) => value,
             Err(error) => {
-                self.as_mut().set_message(QString::from(error.to_string()));
-                self.as_mut()
-                    .failed_signal(&QString::from(error.to_string()));
+                self.as_mut().fail(error.to_string());
+                return;
             }
+        };
+        let clients = match crate::commands::hypr(&runner, "clients") {
+            Ok(value) => value,
+            Err(error) => {
+                self.as_mut().fail(error.to_string());
+                return;
+            }
+        };
+        let directory = runtime.root.join("frozen");
+        let session = crate::capture_session::CaptureSession {
+            runner: &runner,
+            mirror: MirrorRegistry::global(),
+            native,
+        };
+        let frames = crate::window_picker::freeze_outputs(&monitors, &directory, |display| {
+            session
+                .grab(
+                    None,
+                    runtime.options.cursor,
+                    Some(&display.name),
+                    Some(display.geometry.scale),
+                )
+                .map_err(|error| error.to_string())
+        });
+        let accent = crate::ui_scale::accent();
+        let model = crate::window_picker::build(&clients, &monitors, frames, accent.clone());
+        let mut windows: Vec<WindowInfo> = model
+            .rows
+            .iter()
+            .filter(|row| !row.window.is_own_preview())
+            .map(|row| row.window.clone())
+            .collect();
+        if windows.is_empty() {
+            windows = runtime
+                .windows()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|window| !window.is_own_preview())
+                .collect();
+        }
+        let count = windows.len();
+        if count == 0 {
+            self.as_mut()
+                .set_message(QString::from("No window to capture"));
+            self.as_mut()
+                .failed_signal(&QString::from("No window to capture"));
+            return;
+        }
+        let mut labels = QStringList::default();
+        let mut details = QStringList::default();
+        for window in &windows {
+            labels.append(QString::from(window.label()));
+            details.append(QString::from(window.detail()));
+        }
+        let (frames, rows) = crate::window_picker::projections(&model);
+        let mut frame_list = QStringList::default();
+        for frame in frames {
+            frame_list.append(QString::from(frame));
+        }
+        let mut row_list = QStringList::default();
+        for row in rows {
+            row_list.append(QString::from(row));
+        }
+        let hover = model.frozen_usable();
+        {
+            let rust = self.as_mut().rust_mut();
+            let state = rust.get_mut();
+            state.windows = windows;
+            state.picker = Some(model);
+            state.frozen = Some(directory);
+        }
+        self.as_mut().set_window_labels(labels);
+        self.as_mut().set_window_details(details);
+        self.as_mut().set_window_frames(frame_list);
+        self.as_mut().set_window_rows(row_list);
+        self.as_mut().set_window_accent(QString::from(accent));
+        self.as_mut().set_window_hover_open(hover);
+        self.as_mut().set_window_picker_open(!hover);
+        self.as_mut()
+            .set_message(QString::from(format!("Choose a window ({count} found)")));
+    }
+
+    /// Close either picker without capturing.
+    pub fn close_window_picker(mut self: Pin<&mut Self>) {
+        self.as_mut().set_window_picker_open(false);
+        self.as_mut().set_window_hover_open(false);
+        self.as_mut().rust_mut().get_mut().picker = None;
+        if let Some(directory) = self.as_mut().rust_mut().get_mut().frozen.take() {
+            let _ = std::fs::remove_dir_all(directory);
         }
     }
 
-    /// Close the picker without capturing.
-    pub fn close_window_picker(mut self: Pin<&mut Self>) {
-        self.as_mut().set_window_picker_open(false);
+    /// Capture the row chosen in the frozen-frame picker.
+    pub fn capture_window_hover(
+        mut self: Pin<&mut Self>,
+        index: i32,
+        transparent: bool,
+        force_copy: bool,
+    ) {
+        let choice = {
+            let rust = self.as_mut().rust_mut();
+            let Some(model) = rust.get_mut().picker.as_mut() else {
+                self.as_mut()
+                    .fail("That window is no longer available".to_owned());
+                return;
+            };
+            model.set_hovered(Some(index.max(0) as usize));
+            model.choose(transparent, force_copy)
+        };
+        let Some(choice) = choice else {
+            self.as_mut()
+                .fail("That window is no longer available".to_owned());
+            return;
+        };
+        let window = self
+            .picker
+            .as_ref()
+            .and_then(|model| model.rows.get(choice.index))
+            .map(|row| row.window.clone());
+        let Some(window) = window else {
+            self.as_mut()
+                .fail("That window is no longer available".to_owned());
+            return;
+        };
+        self.as_mut().close_window_picker();
+        self.as_mut()
+            .start_window(window, choice.transparent, choice.force_copy);
     }
 
     /// Capture the window at `index` in the loaded list.
@@ -1215,9 +1485,52 @@ impl qobject::Capture {
                 .fail("That window is no longer available".to_owned());
             return;
         };
-        self.as_mut().set_window_picker_open(false);
+        self.as_mut().close_window_picker();
+        self.as_mut().start_window(window, false, false);
+    }
+
+    /// Run one isolated window capture on a worker thread.
+    fn start_window(
+        mut self: Pin<&mut Self>,
+        window: WindowInfo,
+        transparent: bool,
+        force_copy: bool,
+    ) {
+        if *self.busy() {
+            let message = "A capture is already in progress";
+            self.as_mut().set_message(QString::from(message));
+            self.as_mut().failed_signal(&QString::from(message));
+            return;
+        }
+        let Some(identity) = window.identity() else {
+            self.as_mut().fail("Invalid selected window".to_owned());
+            return;
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        self.as_mut().rust_mut().get_mut().cancel = cancel;
+        let qt_thread = self.qt_thread();
+        self.as_mut().set_busy(true);
         self.as_mut()
-            .start_request("window", Some(window.rect), true);
+            .set_message(QString::from("Capturing window…"));
+        std::thread::spawn(move || {
+            if !CaptureGate::enter() {
+                let _ = qt_thread.queue(move |mut capture| {
+                    capture
+                        .as_mut()
+                        .fail("A capture is already in progress".to_owned());
+                });
+                return;
+            }
+            let completion = {
+                let _lease = CaptureLease;
+                window_on_worker(window, identity, transparent, force_copy, worker_cancel)
+            };
+            let _ = qt_thread.queue(move |mut capture| {
+                capture.as_mut().apply_completion(completion);
+                capture.as_mut().set_busy(false);
+            });
+        });
     }
 
     /// Register this object for forwarded commands and run any queued ones.
@@ -1529,14 +1842,25 @@ mod tests {
 
     fn clients() -> &'static str {
         r#"[
-            {"title":"Editor","class":"code","at":[10,20],"size":[600,400],"monitor":0,"workspace":{"name":"1"},"mapped":true},
-            {"title":"Browser","class":"firefox","at":[700,100],"size":[800,600],"monitor":0,"workspace":{"name":"1"},"mapped":true},
-            {"title":"Hidden","class":"x","at":[0,0],"size":[100,100],"monitor":0,"workspace":{"name":"1"},"mapped":false}
+            {"address":"0x112345678","title":"Editor","class":"code","at":[10,20],"size":[600,400],"monitor":0,"workspace":{"name":"1"},"mapped":true,"focusHistoryID":0},
+            {"address":"0x1abcdef01","title":"Browser","class":"firefox","at":[700,100],"size":[800,600],"monitor":0,"workspace":{"name":"1"},"mapped":true,"focusHistoryID":1},
+            {"address":"0x100000002","title":"Hidden","class":"x","at":[0,0],"size":[100,100],"monitor":0,"workspace":{"name":"1"},"mapped":false}
         ]"#
     }
 
     fn active() -> &'static str {
         r#"{"title":"Editor","class":"code","at":[10,20],"size":[600,400],"monitor":0,"workspace":{"name":"1"},"mapped":true}"#
+    }
+
+    fn window_pam(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
+        let mut data = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+        )
+        .into_bytes();
+        for _ in 0..width * height {
+            data.extend_from_slice(&pixel);
+        }
+        data
     }
 
     fn png(width: usize, height: usize, color: [u8; 4]) -> Vec<u8> {
@@ -1565,14 +1889,16 @@ mod tests {
         for name in [crate::mirror::MIRROR_PLUGIN, crate::mirror::CAPTURE_PLUGIN] {
             std::fs::write(path.join(name), b"plugin").unwrap();
         }
-        // The auto-scroll helper is a built native binary, not a tracked file,
-        // so a test supplies a stand-in that the fake runner answers.
-        let helper = path.join("scroll-helper");
-        std::fs::write(&helper, b"#!/bin/sh\n").unwrap();
+        // The helpers are built native binaries, not tracked files, so a test
+        // supplies stand-ins that the fake runner answers.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for name in ["scroll-helper", crate::window::HELPER] {
+                let helper = path.join(name);
+                std::fs::write(&helper, b"#!/bin/sh\n").unwrap();
+                std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
         path
     }
@@ -1674,21 +2000,33 @@ mod tests {
     fn a_window_capture_offers_the_client_rectangles_to_slurp() {
         let root = scratch("window");
         let runner = Fake::new(monitors(), clients(), active());
-        runner.push_text("slurp", "700,100 800x600\n");
-        runner.push("grim", png(800, 600, [5, 6, 7, 255]));
+        runner.push_text("slurp", "0x1abcdef01\n");
+        let helper = native_dir().join(crate::window::HELPER);
+        runner.push(
+            &helper.to_string_lossy(),
+            window_pam(800, 600, [5, 6, 7, 128]),
+        );
         let result = runtime(&runner, &root)
             .run(request("window"), None)
             .unwrap();
+        // The saved pixels are the window's own surface, not a desktop crop.
         assert_eq!(result.rect, Some(Rect::new(700, 100, 800, 600)));
+        assert_eq!((result.width, result.height), (800, 600));
+        let saved = crate::pngzip::decode_png(&std::fs::read(&result.path).unwrap()).unwrap();
+        assert_eq!(saved.pixel(0, 0), [5, 6, 7, 128]);
         let seen = runner.seen();
         let slurp = seen.iter().find(|spec| spec.program == "slurp").unwrap();
         assert!(slurp.args.contains(&"-r".to_owned()));
         let rows = String::from_utf8(slurp.stdin.clone().unwrap_or_default()).unwrap();
-        assert!(rows.contains("10,20 600x400"), "{rows}");
-        assert!(rows.contains("700,100 800x600"), "{rows}");
+        assert!(rows.contains("10,20 600x400 0x112345678"), "{rows}");
+        assert!(rows.contains("700,100 800x600 0x1abcdef01"), "{rows}");
         assert!(
-            !rows.contains("0,0 100x100"),
+            !rows.contains("0x100000002"),
             "hidden windows must not be offered: {rows}"
+        );
+        assert!(
+            seen.iter().all(|spec| spec.program != "grim"),
+            "an isolated window must not fall back to a rectangle grab"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

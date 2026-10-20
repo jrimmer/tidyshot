@@ -231,7 +231,7 @@ impl PickerModel {
     /// The chosen capture.
     #[must_use]
     pub fn choose(&self, transparent: bool, force_copy: bool) -> Option<Choice> {
-        self.current().map(|row| Choice {
+        self.current().map(|_row| Choice {
             index: self.hovered.expect("a current row is hovered"),
             transparent,
             force_copy,
