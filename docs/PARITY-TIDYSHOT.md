@@ -91,10 +91,10 @@ runtime caller; **Absent** = no implementation.
 | OCR | Local text extraction, languages, line breaks, QR | **Partial** | `TextOutput` drives `tidyshot ocr <file>` and startup `capture-text`/`ocr-lines`/`ocr-single-line` over `tesseract` + `zbarimg`, with the recognized-text dialog and explicit Open Link. `tidyshot ocr` (no file) selects with slurp, grabs, then recognizes (`capture_then_recognize`). Gaps: the menu OCR row does nothing (`capture_row("ocr") → false`), a forwarded `Command::Ocr` is dropped (only the first process notes startup OCR), and there is no language-selection or preference UI. |
 | History | Restore, filters, search, delete, retention up to a month | **Partial** | Captures are appended to `history.json` and `captures/` by `capture_runtime`; `last_area` feeds `previous`. No history window, filmstrip, restore, search, filter, delete, trash, retention or import. `history`, `restore`, `last`, `last-screenshot` route then drop. |
 | Files | PNG/JPEG/WebP/HEIC, clipboard, drag/drop, external app, multipage print | **Absent** | Only PNG is written (`pngzip`). No JPEG/WebP/HEIC encoder, no print, no image clipboard or drag-out (`clipboard.rs` and `drag.rs` are test only; `wl-copy` is used for recognized text only), no external-app launch path. |
-| Recording | Area/window/display, H.264 MP4/GIF, FPS/quality/resolution | **Test only** | The full recorder lives in `recording::recorder` (`recorder_command`, `gpu-screen-recorder`, clean capture), `recording::gif`, `recording::options` and `recording::display`; none has a production caller. `record`, `stop`, `pause`, `restart` are routed and dropped. No recording setup UI. |
+| Recording | Area/window/display, H.264 MP4/GIF, FPS/quality/resolution | **Partial** | `recording_runtime::RecordingRuntime` plans a take from `hyprctl -j monitors` (an explicit `--geometry` region or the display under the pointer), leases it with `recording::journal::Journal`, launches `recording::recorder::recorder_command` through the command runner, and commits the MP4 or GIF with its sidecar, history row and preview. `record`, `stop`, `pause` and `restart` reach it from the menu, CLI and URL API. FPS/quality/size/audio/cursor/Studio/GIF choices come from settings; there is still no recording setup dialog. |
 | Audio/camera | Mic/system audio, meter, camera shape/size/position/fullscreen | **Test only** | `recording::audio`, `video_audio_tracks`, `video_camera`, `video_position`, `camera` logic exists with tests; no capture path and no meter/camera preview window. |
 | Video audio edits | Independent source inclusion/gain, mono, playback/export | **Test only** | `video_audio_tracks` and `studio` audio filter planning are tested in `tests/video_studio.rs`; nothing calls them in the app. |
-| Recorder controls | Countdown, timer, pause/resume/restart/cancel, hidden controls | **Absent** | No recording window or controls. The bar widget expects `$XDG_RUNTIME_DIR/tidyshot-status.json` for its recording timer, Stop and Pause/Resume rows, and the app never writes that file (grep finds only the widget reader), so the widget always looks idle. |
+| Recorder controls | Countdown, timer, pause/resume/restart/cancel, hidden controls | **Partial** | `qml/RecordingControls.qml` is an always-on-top strip with elapsed time, Pause/Resume, Stop, Restart and Cancel, fed by the `Recording` singleton; a Hyprland rule marks the strip `no_screen_share` for compositors that exclude it. The runtime writes `$XDG_RUNTIME_DIR/tidyshot-status.json` (`recording`, `paused`, `seconds`, `show_time`, `updated`) while a take runs, so the bar widget activates its timer and Stop/Pause rows. A recording setup dialog and countdown are still missing. |
 | Presentation | Cursor/click effects, keystrokes, DND, clean desktop | **Test only** | `studio` paints cursor/clicks/keys, `video_clicks`/`video_keys`/`video_cursor` model events, `motion_blur` blurs; no recording runtime consumes them. |
 | Video preview | Full-screen composition, transport, seek, keyboard return | **Test only** | `video_preview` and `video_ui` build transport/placement models with tests; no video window is opened. |
 | Video timeline | Source thumbnails, zoom, scroll, edit gestures | **Test only** | `timeline`, `timeline_thumbnails`, `video_splits`, `zoom_focus` are covered by tests and `tests/video_studio.rs`; no timeline UI. |
@@ -117,12 +117,11 @@ runtime caller; **Absent** = no implementation.
 Ordered by how much of the documented workflow each unlocks. "Reachable"
 means a production caller and a UI or CLI entry exist.
 
-1. **Recording has no runtime.** No production caller reaches `recorder_command`,
-   `Journal`, `CheckpointWriter`, `recover`, the encoder guard or the export
-   planner; `record`/`stop`/`pause`/`restart` are routed then dropped, and there
-   is no setup/controls window. Recording is the largest absent user workflow
-   and the durability core (journal, checkpoint, recovery) is already ported
-   and tested, so wiring it is the highest-value next step.
+1. **Recording has a runtime but no setup dialog.** `recording_runtime` reaches
+   `recorder_command`, `Journal`, `CheckpointWriter`, the encoder guard, the
+   controls strip and the launch recovery; the missing pieces are a recording
+   setup dialog, the countdown, and a Studio/camera capture path. The video
+   editor remains test only.
 2. **Non-capture commands are dropped after routing.** `capture_runtime::dispatch`
    and `run_app_command` handle `Command::Capture` only; `Quit` is handled only
    by the socket server. `history`, `settings`, `pin`, `open`, `clipboard`,
