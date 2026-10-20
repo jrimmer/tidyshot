@@ -8,7 +8,7 @@
 //! QML bridge in this module calls it from a worker thread; a command-line
 //! capture calls it directly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -38,6 +38,8 @@ pub struct CaptureResult {
     pub rect: Option<Rect>,
     /// The focused monitor the preview anchors to, when one was resolved.
     pub screen: Option<crate::overlay::ScreenRect>,
+    /// The composed picture to show, when it differs from the saved capture.
+    pub display: Option<PathBuf>,
 }
 
 /// Why a capture could not complete.
@@ -289,7 +291,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
                         let identity = window.identity().ok_or_else(|| {
                             RuntimeError::Window("Invalid selected window".to_owned())
                         })?;
-                        return self.capture_window(&window, &identity, false);
+                        return self.capture_window(&window, &identity, false, false);
                     }
                     let rect = self.select_region(request.mode)?;
                     if should_cancel() {
@@ -402,6 +404,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             height,
             rect,
             screen: None,
+            display: None,
         })
     }
 
@@ -499,6 +502,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         window: &WindowInfo,
         identity: &crate::window::WindowIdentity,
         cursor: bool,
+        transparent: bool,
     ) -> Result<CaptureResult, RuntimeError> {
         if !crate::window::helper_available(&self.native) {
             return Err(RuntimeError::Window(
@@ -520,13 +524,67 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             Some(window.rect),
         );
         history::prepend(&self.root, &row)?;
+        let display = if transparent {
+            None
+        } else {
+            self.style_window_frame(&path, &image, window)?
+        };
         Ok(CaptureResult {
             path,
             width: image.width as u32,
             height: image.height as u32,
             rect: Some(window.rect),
             screen: None,
+            display,
         })
+    }
+
+    /// Compose the editable shadow, wallpaper and rounded frame for a window.
+    ///
+    /// The raw isolated window stays the history capture; this writes the
+    /// project and its preview beside it, so the framing can be reopened and
+    /// edited. A styling failure is reported, never silently skipped.
+    // Ported from omnishot/app.py (finished_capture) and
+    // omnishot/backend.py (window_background)
+    fn style_window_frame(
+        &self,
+        capture: &Path,
+        image: &crate::pngzip::Image,
+        window: &WindowInfo,
+    ) -> Result<Option<PathBuf>, RuntimeError> {
+        let settings = crate::settings::stored_settings();
+        let shadow = settings
+            .get("window_shadow")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let padding = settings
+            .get("window_padding")
+            .and_then(Value::as_f64)
+            .map_or(crate::window::DEFAULT_PADDING, |value| value as i32);
+        let wallpaper_enabled = settings
+            .get("window_wallpaper")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let mut style = crate::window::hyprland_style(
+            self.runner,
+            &window.address,
+            window.rect.width.max(1) as f64,
+            window.fullscreen,
+        );
+        style.padding = padding;
+        style.shadow = shadow;
+        let mut background = style.background(image.width, window.rect.width);
+        if wallpaper_enabled && background.color.alpha == 0 {
+            let wallpaper = crate::wallpaper::WallpaperSettings::from_settings(&settings);
+            match crate::wallpaper::capture_wallpaper(self.runner, &wallpaper, &self.root) {
+                Ok(image) => background = style.with_wallpaper(background, image),
+                Err(error) => eprintln!("tidyshot: the wallpaper background is unavailable: {error}"),
+            }
+        }
+        let project = crate::window_edit::project_for(image.clone(), Some(background));
+        crate::window_edit::save_editable(&self.root, capture, &project)
+            .map(Some)
+            .map_err(|error| RuntimeError::Window(error.to_string()))
     }
 
     /// Save a grabbed frame and append its history row.
@@ -546,6 +604,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             height,
             rect: frame.rect,
             screen: None,
+            display: None,
         })
     }
 
@@ -611,6 +670,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             height,
             rect: Some(bounds),
             screen: None,
+            display: None,
         })
     }
 
@@ -794,7 +854,7 @@ fn capture_on_worker(
 fn window_on_worker(
     window: WindowInfo,
     identity: crate::window::WindowIdentity,
-    _transparent: bool,
+    transparent: bool,
     _force_copy: bool,
     cancel: Arc<AtomicBool>,
 ) -> Completion {
@@ -808,7 +868,7 @@ fn window_on_worker(
         crate::recording::native_dir(),
         crate::settings::data_dir(),
     );
-    match runtime.capture_window(&window, &identity, runtime.options.cursor) {
+    match runtime.capture_window(&window, &identity, runtime.options.cursor, transparent) {
         Ok(mut result) => {
             result.screen = crate::commands::hypr(&runner, "monitors")
                 .ok()

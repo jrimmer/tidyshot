@@ -71,7 +71,9 @@ pub mod video_project;
 pub mod video_splits;
 pub mod video_styles;
 pub mod video_ui;
+pub mod wallpaper;
 pub mod window;
+pub mod window_edit;
 pub mod window_picker;
 pub mod zoom_focus;
 

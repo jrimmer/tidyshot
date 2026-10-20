@@ -791,6 +791,7 @@ mod tests {
             height: 10,
             rect: None,
             screen: Some(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0)),
+            display: None,
         };
         set_startup_preview(result);
         assert!(
