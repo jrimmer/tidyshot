@@ -300,10 +300,9 @@ fn window_from(value: &Value) -> Option<WindowInfo> {
             .get("pinned")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        fullscreen: value
-            .get("fullscreen")
-            .and_then(Value::as_f64)
-            .is_some_and(|mode| mode != 0.0),
+        // Hyprland reports 2 for a real fullscreen surface; 1 and 3 are the
+        // maximized states, which keep their rounding, as the source does.
+        fullscreen: value.get("fullscreen").and_then(Value::as_f64) == Some(2.0),
     })
 }
 
@@ -910,5 +909,18 @@ mod tests {
             ..WindowStyle::default()
         };
         assert_eq!(style.background(600, 600).radius, 0.0);
+    }
+
+    #[test]
+    fn only_a_real_fullscreen_client_loses_its_rounding() {
+        let clients = r#"[
+            {"address":"0x1","title":"Full","class":"code","at":[0,0],"size":[10,10],"workspace":{"name":"1"},"mapped":true,"fullscreen":2},
+            {"address":"0x2","title":"Maximized","class":"code","at":[0,0],"size":[10,10],"workspace":{"name":"1"},"mapped":true,"fullscreen":1},
+            {"address":"0x3","title":"Windowed","class":"code","at":[0,0],"size":[10,10],"workspace":{"name":"1"},"mapped":true}
+        ]"#;
+        let windows = windows_from(&crate::json::parse(clients).unwrap());
+        assert!(windows[0].fullscreen);
+        assert!(!windows[1].fullscreen);
+        assert!(!windows[2].fullscreen);
     }
 }
