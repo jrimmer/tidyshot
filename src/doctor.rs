@@ -65,10 +65,10 @@ impl CheckResult {
 
 /// The native helpers TidyShot builds into `native/` and loads or runs.
 ///
-/// `build.rs` and `bin/native` build `scroll-helper`; nothing else in this
-/// tree produces a native binary. The TidyShot plugin libraries have no build
-/// here, so they are not checked.
-pub const NATIVE_FILES: &[&str] = &["scroll-helper"];
+/// `build.rs` and `bin/native` build `scroll-helper` and `window-helper`;
+/// nothing else in this tree produces a native binary. The TidyShot plugin
+/// libraries have no build here, so they are not checked.
+pub const NATIVE_FILES: &[&str] = &["scroll-helper", "window-helper"];
 
 /// Commands the app runs, with the Omarchy package that provides each.
 pub const RUNTIME_COMMANDS: &[(&str, &str)] = &[

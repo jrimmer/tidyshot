@@ -44,6 +44,7 @@ fn the_pkgbuild_installs_the_binary_desktop_entry_and_icon() {
         "usr/share/icons/hicolor/scalable/apps/tidyshot.svg",
         "usr/share/mime/packages/tidyshot.xml",
         "usr/lib/tidyshot/native/scroll-helper",
+        "usr/lib/tidyshot/native/window-helper",
     ] {
         assert!(
             pkgbuild.contains(needle),

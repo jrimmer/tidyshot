@@ -62,12 +62,14 @@ if [[ -n ${TIDYSHOT_PREBUILT:-} ]]; then
     exit 1
   fi
   bash "$task_root/bin/native"
-  if [[ ! -x $task_root/native/scroll-helper ]]; then
-    printf 'The prebuilt TidyShot install has no auto-scroll helper; install wayland-scanner and wayland-client headers.\n' >&2
-    exit 1
-  fi
+  for task_helper in scroll-helper window-helper; do
+    if [[ ! -x $task_root/native/$task_helper ]]; then
+      printf 'The prebuilt TidyShot install has no %s; install wayland-scanner and wayland-client headers.\n' "$task_helper" >&2
+      exit 1
+    fi
+  done
   mkdir -p -- "$task_root/build/native"
-  cp -- "$task_root/native/scroll-helper" "$task_root/build/native/scroll-helper"
+  cp -- "$task_root/native/scroll-helper" "$task_root/native/window-helper" "$task_root/build/native/"
   # generate-icon comes from the same release as build/tidyshot: scripts/setup.sh
   # only stages a tarball whose sha256 matches checksums.txt and whose members
   # pass its path, link and special-file checks, so running it here carries the

@@ -1232,7 +1232,7 @@ fn the_real_install_script_takes_a_prebuilt_release_without_the_toolchain() {
     fs::create_dir_all(fixture.source.join("bin")).unwrap();
     fs::write(
         fixture.source.join("bin/native"),
-        "#!/bin/sh\nmkdir -p native\nprintf helper >native/scroll-helper\nchmod +x native/scroll-helper\n",
+        "#!/bin/sh\nmkdir -p native\nprintf helper >native/scroll-helper\nprintf helper >native/window-helper\nchmod +x native/scroll-helper native/window-helper\n",
     )
     .unwrap();
     fs::write(
@@ -1270,8 +1270,13 @@ fn the_real_install_script_takes_a_prebuilt_release_without_the_toolchain() {
     assert!(result.status.success(), "{stderr}");
     assert!(stderr.contains("prebuilt"), "{stderr}");
     assert!(fixture.source.join("native/scroll-helper").exists());
+    assert!(fixture.source.join("native/window-helper").exists());
     assert_eq!(
         fs::read_to_string(fixture.source.join("build/native/scroll-helper")).unwrap(),
+        "helper"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.source.join("build/native/window-helper")).unwrap(),
         "helper"
     );
     assert!(!cargo_called(&fixture), "the source build must not run");

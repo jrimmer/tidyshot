@@ -146,49 +146,12 @@ fn encode_frame(frame: &crate::stitch::FrameData) -> Result<Image, RuntimeError>
     })
 }
 
-/// One selectable window from `hyprctl -j clients`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WindowInfo {
-    pub title: String,
-    pub class: String,
-    pub rect: Rect,
-    pub monitor: String,
-    pub workspace: String,
-}
-
-impl WindowInfo {
-    /// The line the picker shows for this window.
-    #[must_use]
-    pub fn label(&self) -> String {
-        if self.title.is_empty() {
-            self.class.clone()
-        } else {
-            format!("{} — {}", self.class, self.title)
-        }
-    }
-
-    /// True when this client is one of TidyShot's own windows.
-    ///
-    /// A preview or pin is always on top, so leaving it in the window picker
-    /// would offer the user a capture of TidyShot itself. The desktop id and
-    /// the binary name are both matched, because the compositor's class comes
-    /// from whichever of them Qt used when the window was mapped.
-    #[must_use]
-    pub fn is_own_preview(&self) -> bool {
-        self.class.starts_with("tidyshot")
-            || self.class.starts_with("org.omarchy.TidyShot")
-            || self.class.starts_with("com.jasonrimmer.tidyshot")
-    }
-
-    /// The detail line: monitor, workspace and size.
-    #[must_use]
-    pub fn detail(&self) -> String {
-        format!(
-            "{} · {} · {} × {}",
-            self.monitor, self.workspace, self.rect.width, self.rect.height
-        )
-    }
-}
+/// The windows from `hyprctl -j clients`, projected for the picker.
+///
+/// The picker model, identity and focus ordering live in [`crate::window`];
+/// this stays a thin alias so callers of the runtime keep one name.
+// Ported from omnishot/backend.py (window list)
+pub use crate::window::WindowInfo;
 
 /// The runtime configuration a capture runs with.
 pub struct CaptureRuntime<'a, R: CommandRunner> {
@@ -456,7 +419,9 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
     /// The active window's absolute rectangle, when there is one.
     pub fn active_window(&self) -> Result<Option<WindowInfo>, RuntimeError> {
         let value = hypr(self.runner, "activewindow")?;
-        Ok(window_from(&value))
+        Ok(crate::window::windows_from(&Value::Array(vec![value]))
+            .into_iter()
+            .next())
     }
 
     /// Save a grabbed frame and append its history row.
@@ -629,64 +594,9 @@ pub fn request_for_id(id: &str, remembered: Option<Rect>) -> Option<CaptureReque
 }
 
 /// Parse `hyprctl -j clients` into the picker model.
-// Ported from omnishot/backend.py (window list)
 #[must_use]
 pub fn windows_from(value: &Value) -> Vec<WindowInfo> {
-    value
-        .as_array()
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(window_from)
-        .collect()
-}
-
-fn window_from(value: &Value) -> Option<WindowInfo> {
-    if value
-        .get("hidden")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || value
-            .get("mapped")
-            .and_then(Value::as_bool)
-            .is_some_and(|mapped| !mapped)
-    {
-        return None;
-    }
-    let at = value.get("at").and_then(Value::as_array)?;
-    let size = value.get("size").and_then(Value::as_array)?;
-    if at.len() < 2 || size.len() < 2 {
-        return None;
-    }
-    let x = at[0].as_f64()? as i32;
-    let y = at[1].as_f64()? as i32;
-    let width = size[0].as_f64()? as i32;
-    let height = size[1].as_f64()? as i32;
-    if width < 2 || height < 2 {
-        return None;
-    }
-    let workspace = value
-        .get("workspace")
-        .and_then(|workspace| workspace.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    Some(WindowInfo {
-        title: value
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        class: value
-            .get("class")
-            .and_then(Value::as_str)
-            .unwrap_or("Window")
-            .to_owned(),
-        rect: Rect::new(x, y, width, height),
-        monitor: value
-            .get("monitor")
-            .and_then(Value::as_f64)
-            .map_or_else(String::new, |monitor| monitor.to_string()),
-        workspace: workspace.to_owned(),
-    })
+    crate::window::windows_from(value)
 }
 
 /// The display list for a `hyprctl -j monitors` reply.

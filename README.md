@@ -34,9 +34,10 @@ fractional scale 1.6 and mixed-scale displays. This release requires Omarchy's
 Lua-based Hyprland configuration and shell plugin API. Other Hyprland versions
 and distributions are not currently supported.
 
-Auto-Scroll needs the standalone `native/scroll-helper`, which is built
-against the running compositor's Wayland virtual-pointer protocol. GPU
-recording requires a working `gpu-screen-recorder` setup.
+Auto-Scroll needs the standalone `native/scroll-helper`, and isolated window
+capture needs `native/window-helper`; both are built against the running
+compositor's Wayland protocols. GPU recording requires a working
+`gpu-screen-recorder` setup.
 
 ## Install
 

@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# bin/native — build the Wayland scroll helper into native/scroll-helper.
+# bin/native — build the standalone Wayland helpers into native/.
 #
-# The helper speaks zwlr_virtual_pointer_v1 so auto-scroll can advance a page
-# without synthesising key events. It is generated from the protocol XML in
+# scroll-helper speaks zwlr_virtual_pointer_v1 so auto-scroll can advance a page
+# without synthesising key events. window-helper speaks Hyprland's
+# toplevel-export protocol so a window capture copies the window's own surface
+# instead of a desktop rectangle. Both are generated from the protocol XML in
 # this directory, so the build stays self-contained.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if ! command -v wayland-scanner >/dev/null; then
-    echo "wayland-scanner is required to build native/scroll-helper" >&2
+    echo "wayland-scanner is required to build the native helpers" >&2
     exit 1
 fi
 if ! pkg-config --exists wayland-client; then
-    echo "wayland-client development files are required to build native/scroll-helper" >&2
+    echo "wayland-client development files are required to build the native helpers" >&2
     exit 1
 fi
 
@@ -26,3 +28,13 @@ gcc -Wall -Wextra -O2 -I"$build_dir" \
     -o native/scroll-helper \
     $(pkg-config --cflags --libs wayland-client)
 echo "built native/scroll-helper"
+
+wayland-scanner client-header native/hyprland-toplevel-export-v1.xml "$build_dir/toplevel-export.h"
+wayland-scanner private-code native/hyprland-toplevel-export-v1.xml "$build_dir/toplevel-export.c"
+wayland-scanner client-header native/wlr-foreign-toplevel-management-unstable-v1.xml "$build_dir/foreign-toplevel.h"
+wayland-scanner private-code native/wlr-foreign-toplevel-management-unstable-v1.xml "$build_dir/foreign-toplevel.c"
+gcc -Wall -Wextra -O2 -I"$build_dir" \
+    native/window-helper.c "$build_dir/toplevel-export.c" "$build_dir/foreign-toplevel.c" \
+    -o native/window-helper \
+    $(pkg-config --cflags --libs wayland-client)
+echo "built native/window-helper"

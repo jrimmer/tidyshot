@@ -10,13 +10,15 @@ cd "$(dirname "$0")/.."
 mkdir -p build/native
 cargo build --release --offline
 bin/native
-if [ ! -x native/scroll-helper ]; then
-    echo "build/tidyshot would have no auto-scroll helper; install wayland-scanner and wayland-client headers" >&2
-    exit 1
-fi
+for helper in scroll-helper window-helper; do
+    if [ ! -x "native/$helper" ]; then
+        echo "build/tidyshot would have no $helper; install wayland-scanner and wayland-client headers" >&2
+        exit 1
+    fi
+done
 cp target/release/tidyshot build/tidyshot
 cp target/release/generate-icon build/generate-icon
-cp native/scroll-helper build/native/scroll-helper
+cp native/scroll-helper native/window-helper build/native/
 # The icon follows the live theme; regenerate it for the checkout too.
 if [ -n "${HOME:-}" ]; then
     build/generate-icon build/tidyshot.svg >/dev/null

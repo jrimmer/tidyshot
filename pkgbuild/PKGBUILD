@@ -43,4 +43,6 @@ package() {
     # The app looks for its native helpers beside the executable.
     install -Dm755 native/scroll-helper \
         "$pkgdir/usr/lib/tidyshot/native/scroll-helper"
+    install -Dm755 native/window-helper \
+        "$pkgdir/usr/lib/tidyshot/native/window-helper"
 }
