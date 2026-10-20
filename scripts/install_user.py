@@ -114,6 +114,7 @@ o.window({ class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$", title = "^TidySh
 o.window({ title = "^TidyShot Pin.*", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
 o.window({ title = "^TidyShot Locked Pin.*", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_focus = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
 o.window({ title = "^TidyShot (Recording Controls|Camera Preview|Self Timer)$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_initial_focus = true, no_follow_mouse = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
+o.window({ title = "^TidyShot Recording Controls$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { no_screen_share = true })
 o.window({ title = "^TidyShot Scrolling (Guide.*|Preview)$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { no_focus = true, no_initial_focus = true, no_blur = true, no_shadow = true, no_dim = true, border_size = 0, rounding = 0 })
 o.window({ title = "^TidyShot Recording Dim .*", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_focus = true, no_initial_focus = true, no_blur = true, no_shadow = true, no_dim = true, border_size = 0, rounding = 0 })
 o.window({ title = "^TidyShot Scrolling Capture$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { no_initial_focus = true, no_follow_mouse = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 10 })

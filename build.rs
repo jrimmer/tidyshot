@@ -15,6 +15,7 @@ fn main() {
             "qml/TrayMenu.qml",
             "qml/TextResultDialog.qml",
             "qml/ScrollControls.qml",
+            "qml/RecordingControls.qml",
             "qml/Editor.qml",
             "qml/EditorToolbar.qml",
             "qml/WindowHover.qml",
@@ -33,6 +34,7 @@ fn main() {
         "src/capture_runtime.rs",
         "src/qml_load.rs",
         "src/text_result.rs",
+        "src/recording_runtime.rs",
         "src/editor_window.rs",
         "src/editor_image.rs",
     ]);

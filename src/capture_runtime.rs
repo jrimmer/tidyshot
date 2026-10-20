@@ -1499,6 +1499,10 @@ impl qobject::Capture {
             "timer" => self.as_mut().start_request("timer", None, false),
             "scroll" => self.as_mut().start_scroll(None, false, false, false),
             "scroll-horizontal" => self.as_mut().start_scroll(None, true, false, false),
+            "record" => crate::recording_runtime::request_start(None),
+            "stop" => crate::recording_runtime::request_stop(),
+            "pause" => crate::recording_runtime::request_pause(),
+            "restart" => crate::recording_runtime::request_restart(),
             "ocr" => return false,
             _ => return false,
         }
@@ -1756,6 +1760,12 @@ impl qobject::Capture {
             }
             Command::CloseAll => crate::preview::publish_dismiss(),
             Command::SaveAll => crate::preview::publish_save(),
+            Command::Record { geometry, .. } => {
+                crate::recording_runtime::request_start(geometry);
+            }
+            Command::Stop => crate::recording_runtime::request_stop(),
+            Command::Pause => crate::recording_runtime::request_pause(),
+            Command::Restart => crate::recording_runtime::request_restart(),
             _ => {}
         }
     }

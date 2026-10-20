@@ -113,6 +113,7 @@ pub fn run_with(argv: &[String]) {
     // Bind the socket after the application exists so a forwarded `quit`
     // reaches a live event loop.
     start_instance();
+    recover_recordings();
     let mut engine = cxx_qt_lib::QQmlApplicationEngine::new();
     if let Some(mut engine) = engine.as_mut() {
         // The editor publishes its rendered canvas through this provider.
@@ -161,6 +162,32 @@ fn start_instance() {
             // Keep accepting: only `quit` ends the loop.
             true
         });
+    });
+}
+
+/// Recover recordings a crashed instance left behind.
+///
+/// A take still leased by a live encoder is left alone; a finished take is
+/// committed and shown in the preview, and a cancelled one is discarded. This
+/// runs on a worker thread so a slow probe never delays the first window.
+///
+// Ported from omnishot/recording_journal.py (recover_interrupted)
+fn recover_recordings() {
+    std::thread::spawn(|| {
+        let runner = commands::SystemRunner;
+        match recording_runtime::recover_on_start(&settings::data_dir(), &runner) {
+            Ok(outcome) => {
+                for (path, _message) in &outcome.recovered {
+                    preview::publish_file(std::path::PathBuf::from(path));
+                }
+                for path in &outcome.failed {
+                    eprintln!("tidyshot: could not recover the recording {path}");
+                }
+            }
+            Err(error) => {
+                eprintln!("tidyshot: could not check for an interrupted recording: {error}")
+            }
+        }
     });
 }
 

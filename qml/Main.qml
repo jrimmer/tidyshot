@@ -59,7 +59,7 @@ ApplicationWindow {
     Component.onCompleted: {
         Capture.bind()
         Preview.bind()
-
+        Recording.bind()
     }
 
     // The Rust action table emits the activated capture row; the runtime then
@@ -157,6 +157,47 @@ ApplicationWindow {
 
             if (!Preview.open && Preview.standalone)
                 Qt.quit()
+        }
+    }
+
+    // The recording controls are their own always-on-top window so they never
+    // take focus from the app being recorded. A Hyprland rule keeps them out
+    // of the take, and the status feed carries their display position.
+    Timer {
+        id: recordingSync
+        interval: 100
+        repeat: true
+        running: true
+        onTriggered: {
+            recordingWindow.visible = Recording.open
+            recordingWindow.x = Recording.x
+            recordingWindow.y = Recording.y
+            recordingControls.elapsed = Recording.elapsed
+            recordingControls.paused = Recording.paused
+            recordingControls.status = Recording.message
+        }
+    }
+
+    Window {
+        id: recordingWindow
+        transientParent: null
+        visible: Recording.open
+        title: "TidyShot Recording Controls"
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+        color: "transparent"
+        width: Recording.windowWidth
+        height: Recording.windowHeight
+
+        RecordingControls {
+            id: recordingControls
+            anchors.fill: parent
+            elapsed: Recording.elapsed
+            paused: Recording.paused
+            status: Recording.message
+            onPauseRequested: Recording.pause()
+            onStopRequested: Recording.stop()
+            onRestartRequested: Recording.restart()
+            onCancelRequested: Recording.cancel()
         }
     }
 

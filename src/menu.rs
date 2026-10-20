@@ -75,7 +75,10 @@ impl ActionRow {
     /// Whether this row can be performed today.
     #[must_use]
     pub const fn implemented(self) -> bool {
-        matches!(self.action, MenuAction::Capture(_))
+        matches!(
+            self.action,
+            MenuAction::Capture(_) | MenuAction::Record | MenuAction::Stop | MenuAction::Pause
+        )
     }
 }
 
@@ -232,6 +235,8 @@ pub const ACTIONS: &[ActionRow] = &[
 pub enum Invocation {
     /// Hand the request to the capture module.
     Capture(CaptureRequest),
+    /// Hand the command word to the recording runtime.
+    Recording(&'static str),
     /// The action's module has not landed yet.
     NotImplemented(&'static str),
 }
@@ -253,6 +258,9 @@ pub fn index_of(id: &str) -> Option<usize> {
 pub fn invoke(row: &ActionRow) -> Invocation {
     match row.action {
         MenuAction::Capture(request) => Invocation::Capture(request),
+        MenuAction::Record => Invocation::Recording("record"),
+        MenuAction::Stop => Invocation::Recording("stop"),
+        MenuAction::Pause => Invocation::Recording("pause"),
         _ => Invocation::NotImplemented(row.id),
     }
 }
@@ -674,7 +682,7 @@ impl qobject::Menu {
             return false;
         };
         self.as_mut().set_selected_index(index as i32);
-        if matches!(invoke(row), Invocation::Capture(_)) {
+        if row.implemented() {
             self.as_mut().row_activated(&QString::from(row.id));
             true
         } else {
@@ -686,7 +694,7 @@ impl qobject::Menu {
     pub fn activate_id(mut self: Pin<&mut Self>, id: &QString) -> bool {
         let id = id.to_string();
         match find(&id) {
-            Some(row) if matches!(invoke(row), Invocation::Capture(_)) => {
+            Some(row) if row.implemented() => {
                 self.as_mut().row_activated(&QString::from(row.id));
                 true
             }
@@ -828,6 +836,15 @@ mod tests {
             let row = find(id).unwrap_or_else(|| panic!("{id} row"));
             assert_eq!(row.action, MenuAction::Capture(request));
             assert_eq!(invoke(row), Invocation::Capture(request));
+            assert!(row.implemented());
+        }
+    }
+
+    #[test]
+    fn recording_rows_route_to_the_recording_runtime() {
+        for (id, command) in [("record", "record"), ("stop", "stop"), ("pause", "pause")] {
+            let row = find(id).unwrap_or_else(|| panic!("{id} row"));
+            assert_eq!(invoke(row), Invocation::Recording(command));
             assert!(row.implemented());
         }
     }

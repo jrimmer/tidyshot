@@ -83,6 +83,53 @@ fn every_documented_cli_subcommand_routes() {
 }
 
 #[test]
+fn recording_commands_route_to_the_recording_runtime() {
+    assert_eq!(
+        route(&parse(&["record"])).unwrap(),
+        Command::Record {
+            geometry: None,
+            coordinates: None,
+        }
+    );
+    assert_eq!(route(&parse(&["stop"])).unwrap(), Command::Stop);
+    assert_eq!(route(&parse(&["pause"])).unwrap(), Command::Pause);
+    assert_eq!(route(&parse(&["restart"])).unwrap(), Command::Restart);
+    // The recording rows of the shared action table are live now, so the
+    // panel, tray and CLI listing can start and drive a take.
+    for id in ["record", "stop", "pause"] {
+        let row = tidyshot::menu::find(id).unwrap_or_else(|| panic!("{id} row"));
+        assert!(row.implemented(), "{id} must be implemented");
+        assert!(
+            matches!(
+                tidyshot::menu::invoke(row),
+                tidyshot::menu::Invocation::Recording(_)
+            ),
+            "{id} must reach the recording runtime"
+        );
+    }
+}
+
+#[test]
+fn a_record_url_keeps_its_region_and_action() {
+    let parsed = parse(&["omnishot://record-screen?x=10&y=20&width=300&height=200"]);
+    match route(&parsed).unwrap() {
+        Command::Record {
+            coordinates: Some(coords),
+            ..
+        } => assert_eq!(coords.width, Some(300)),
+        other => panic!("{other:?}"),
+    }
+    let parsed = parse(&["record", "--geometry", "10,20 300x200"]);
+    assert_eq!(
+        route(&parsed).unwrap(),
+        Command::Record {
+            geometry: Some("10,20 300x200".to_owned()),
+            coordinates: None,
+        }
+    );
+}
+
+#[test]
 fn documented_url_parameters_survive_parsing_and_routing() {
     // After-capture actions.
     for action in ["overlay", "copy", "save", "annotate", "pin"] {

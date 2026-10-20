@@ -456,8 +456,7 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
             path: Some(plan.output_path.clone()),
             message: String::new(),
         };
-        publish(&status);
-        control.publish(status.clone());
+        write_live_status(&self.status_path, &mut status, publish, control);
 
         let checkpoint = if plan.options.studio {
             match CheckpointScheduler::start(&plan.encoder_path, &options_value) {
@@ -533,6 +532,7 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
                     }
                 }
                 publish_status(
+                    &self.status_path,
                     control,
                     publish,
                     &mut status,
@@ -545,6 +545,7 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
             if elapsed > status.seconds {
                 status.seconds = elapsed;
                 publish_status(
+                    &self.status_path,
                     control,
                     publish,
                     &mut status,
@@ -756,7 +757,23 @@ fn update_phase(journal: &mut Journal, phase: &str) {
     let _ = journal.update(update);
 }
 
+/// Publish the first status of a take and write the widget's file.
+fn write_live_status(
+    path: &Path,
+    status: &mut RecordingStatus,
+    publish: &mut dyn FnMut(&RecordingStatus),
+    control: &RecordingControl,
+) {
+    status.updated = now_seconds();
+    if let Err(error) = write_status(path, status) {
+        status.message = error.to_string();
+    }
+    control.publish(status.clone());
+    publish(status);
+}
+
 fn publish_status(
+    path: &Path,
     control: &RecordingControl,
     publish: &mut dyn FnMut(&RecordingStatus),
     status: &mut RecordingStatus,
@@ -766,6 +783,9 @@ fn publish_status(
 ) {
     status.seconds = elapsed_seconds(*started, paused_total, paused_at);
     status.updated = now_seconds();
+    if let Err(error) = write_status(path, status) {
+        status.message = error.to_string();
+    }
     control.publish(status.clone());
     publish(status);
 }
@@ -1099,12 +1119,21 @@ mod tests {
         let control = RecordingControl::new();
         control.send(RecordingCommand::Stop);
         let mut statuses = Vec::new();
+        let mut status_file_seen = false;
+        let status_file = root.join(STATUS_FILE);
         let result = runtime(&runner, &root)
             .run(
                 RecordOptions::default(),
                 Some("10,20 640x480"),
                 &control,
-                &mut |status| statuses.push(status.clone()),
+                &mut |status| {
+                    if !status_file_seen && let Ok(text) = std::fs::read_to_string(&status_file) {
+                        let value = crate::json::parse(&text).unwrap();
+                        assert_eq!(value.get("recording").and_then(Value::as_bool), Some(true));
+                        status_file_seen = true;
+                    }
+                    statuses.push(status.clone());
+                },
             )
             .unwrap()
             .expect("a stopped take is saved");
@@ -1123,6 +1152,7 @@ mod tests {
         assert!(spawn.args.contains(&"640x480+10+20".to_owned()));
         assert!(!spawn.inherit_fds.is_empty(), "the encoder holds the lease");
         // The status file follows the recording and is removed on completion.
+        assert!(status_file_seen, "the widget was fed while the take ran");
         assert!(!root.join(STATUS_FILE).exists());
         assert!(statuses.iter().any(|status| status.recording));
         assert!(statuses.last().is_some_and(|status| !status.recording));
@@ -1347,4 +1377,387 @@ mod tests {
         assert_eq!(y, 1440 - CONTROLS_HEIGHT as i32 - CONTROLS_MARGIN as i32);
         assert_eq!(controls_position((0, 0, 0, 0)), (0, 0));
     }
+}
+
+// --- QML bridge: the Recording singleton ---------------------------------
+
+/// A recording command that arrived before the QML singleton existed.
+#[derive(Debug, Clone, PartialEq)]
+enum PendingRecording {
+    Start(Option<String>),
+    Pause,
+    Stop,
+    Restart,
+    Cancel,
+}
+
+/// The Qt-side recording object, once QML has created it.
+static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::Recording>> =
+    std::sync::OnceLock::new();
+
+/// Commands that arrived before the recording object existed.
+static PENDING: Mutex<Vec<PendingRecording>> = Mutex::new(Vec::new());
+
+/// Start a take from a forwarded command or the command line.
+///
+/// `geometry` is an explicit `x,y WxH` region; `None` records the display
+/// under the pointer. The request waits for QML when the window is not up yet.
+pub fn request_start(geometry: Option<String>) {
+    enqueue(PendingRecording::Start(geometry));
+}
+
+/// Suspend or resume the active take.
+pub fn request_pause() {
+    enqueue(PendingRecording::Pause);
+}
+
+/// Finish the active take and keep it.
+pub fn request_stop() {
+    enqueue(PendingRecording::Stop);
+}
+
+/// Finish the active take without keeping it and start another.
+pub fn request_restart() {
+    enqueue(PendingRecording::Restart);
+}
+
+/// Abandon the active take.
+pub fn request_cancel() {
+    enqueue(PendingRecording::Cancel);
+}
+
+fn enqueue(command: PendingRecording) {
+    match BOUND.get() {
+        Some(thread) => {
+            let _ = thread.queue(move |mut recording| {
+                recording.as_mut().apply_command(command);
+            });
+        }
+        None => PENDING
+            .lock()
+            .expect("pending recording queue poisoned")
+            .push(command),
+    }
+}
+
+#[cxx_qt::bridge]
+pub mod qobject {
+    unsafe extern "C++" {
+        include!("cxx-qt-lib/qstring.h");
+        type QString = cxx_qt_lib::QString;
+    }
+
+    extern "RustQt" {
+        /// The recording controls and status QML drives.
+        #[qobject]
+        #[qml_element]
+        #[qml_singleton]
+        #[qproperty(bool, open)]
+        #[qproperty(bool, active)]
+        #[qproperty(bool, paused)]
+        #[qproperty(QString, elapsed)]
+        #[qproperty(QString, message)]
+        #[qproperty(i32, x)]
+        #[qproperty(i32, y)]
+        #[qproperty(i32, window_width, cxx_name = "windowWidth")]
+        #[qproperty(i32, window_height, cxx_name = "windowHeight")]
+        type Recording = super::RecordingRust;
+
+        /// Register this object and replay requests that arrived first.
+        #[qinvokable]
+        fn bind(self: Pin<&mut Self>);
+
+        /// Start a take, optionally on an explicit `x,y WxH` region.
+        #[qinvokable]
+        fn start(self: Pin<&mut Self>, geometry: &QString);
+
+        /// Suspend or resume the active take.
+        #[qinvokable]
+        fn pause(self: Pin<&mut Self>);
+
+        /// Finish the active take and keep it.
+        #[qinvokable]
+        fn stop(self: Pin<&mut Self>);
+
+        /// Finish the active take without keeping it and start another.
+        #[qinvokable]
+        fn restart(self: Pin<&mut Self>);
+
+        /// Abandon the active take.
+        #[qinvokable]
+        fn cancel(self: Pin<&mut Self>);
+    }
+
+    impl cxx_qt::Threading for Recording {}
+}
+
+use core::pin::Pin;
+use cxx_qt::CxxQtType as _;
+use cxx_qt::Threading as _;
+use cxx_qt_lib::QString;
+
+/// Rust state behind the QML `Recording` singleton.
+pub struct RecordingRust {
+    open: bool,
+    active: bool,
+    paused: bool,
+    elapsed: QString,
+    message: QString,
+    x: i32,
+    y: i32,
+    window_width: i32,
+    window_height: i32,
+    control: Option<RecordingControl>,
+}
+
+impl Default for RecordingRust {
+    fn default() -> Self {
+        Self {
+            open: false,
+            active: false,
+            paused: false,
+            elapsed: QString::from("00:00"),
+            message: QString::from(""),
+            x: 0,
+            y: 0,
+            window_width: CONTROLS_WIDTH as i32,
+            window_height: CONTROLS_HEIGHT as i32,
+            control: None,
+        }
+    }
+}
+
+impl qobject::Recording {
+    /// Register this object and replay any queued request.
+    pub fn bind(mut self: Pin<&mut Self>) {
+        let queued = {
+            let mut pending = PENDING.lock().expect("pending recording queue poisoned");
+            std::mem::take(&mut *pending)
+        };
+        let _ = BOUND.set(self.qt_thread());
+        for command in queued {
+            self.as_mut().apply_command(command);
+        }
+    }
+
+    /// Start a take with the configured options.
+    pub fn start(mut self: Pin<&mut Self>, geometry: &QString) {
+        self.as_mut().apply_command(PendingRecording::Start(
+            Some(geometry.to_string()).filter(|value| !value.is_empty()),
+        ));
+    }
+
+    /// Suspend or resume the active take.
+    pub fn pause(mut self: Pin<&mut Self>) {
+        self.as_mut().apply_command(PendingRecording::Pause);
+    }
+
+    /// Finish the active take and keep it.
+    pub fn stop(mut self: Pin<&mut Self>) {
+        self.as_mut().apply_command(PendingRecording::Stop);
+    }
+
+    /// Finish the active take without keeping it and start another.
+    pub fn restart(mut self: Pin<&mut Self>) {
+        self.as_mut().apply_command(PendingRecording::Restart);
+    }
+
+    /// Abandon the active take.
+    pub fn cancel(mut self: Pin<&mut Self>) {
+        self.as_mut().apply_command(PendingRecording::Cancel);
+    }
+
+    fn apply_command(mut self: Pin<&mut Self>, command: PendingRecording) {
+        match command {
+            PendingRecording::Start(geometry) => self.as_mut().begin(geometry),
+            PendingRecording::Pause => match self.control.clone() {
+                Some(control) => control.send(RecordingCommand::TogglePause),
+                None => self.as_mut().report("No recording is running"),
+            },
+            PendingRecording::Stop => match self.control.clone() {
+                Some(control) => control.send(RecordingCommand::Stop),
+                None => self.as_mut().report("No recording is running"),
+            },
+            PendingRecording::Restart => match self.control.clone() {
+                Some(control) => control.send(RecordingCommand::Restart),
+                None => self.as_mut().report("No recording is running"),
+            },
+            PendingRecording::Cancel => match self.control.clone() {
+                Some(control) => control.send(RecordingCommand::Cancel),
+                None => self.as_mut().report("No recording is running"),
+            },
+        }
+    }
+
+    fn report(mut self: Pin<&mut Self>, message: &str) {
+        self.as_mut().set_message(QString::from(message));
+    }
+
+    /// Start the worker that owns the encoder.
+    fn begin(mut self: Pin<&mut Self>, geometry: Option<String>) {
+        if *self.active() {
+            self.as_mut().report("A recording is already in progress");
+            return;
+        }
+        let control = RecordingControl::new();
+        self.as_mut().rust_mut().get_mut().control = Some(control.clone());
+        self.as_mut().set_open(true);
+        self.as_mut().set_active(true);
+        self.as_mut().set_paused(false);
+        self.as_mut().set_elapsed(QString::from("00:00"));
+        self.as_mut().set_message(QString::from("Recording"));
+        let thread = self.qt_thread();
+        let worker_control = control.clone();
+        std::thread::spawn(move || {
+            let runner = crate::commands::SystemRunner;
+            let runtime = RecordingRuntime::new(
+                &runner,
+                crate::settings::data_dir(),
+                crate::recording::native_dir(),
+            );
+            let options = configured_record_options();
+            let mut publish = {
+                let thread = thread.clone();
+                move |status: &RecordingStatus| {
+                    let status = status.clone();
+                    let _ = thread.queue(move |mut recording| {
+                        recording.as_mut().apply_status(&status);
+                    });
+                }
+            };
+            let completion =
+                runtime.run(options, geometry.as_deref(), &worker_control, &mut publish);
+            let _ = thread.queue(move |mut recording| {
+                recording.as_mut().apply_completion(completion);
+            });
+        });
+    }
+
+    /// Apply one status snapshot from the worker.
+    fn apply_status(mut self: Pin<&mut Self>, status: &RecordingStatus) {
+        self.as_mut().set_active(status.recording);
+        self.as_mut().set_open(status.recording);
+        self.as_mut().set_paused(status.paused);
+        self.as_mut()
+            .set_elapsed(QString::from(status.elapsed_text()));
+        self.as_mut().set_x(status.x);
+        self.as_mut().set_y(status.y);
+        if !status.message.is_empty() {
+            self.as_mut()
+                .set_message(QString::from(status.message.clone()));
+        }
+    }
+
+    fn apply_completion(
+        mut self: Pin<&mut Self>,
+        completion: Result<Option<RecordingResult>, RecordingError>,
+    ) {
+        self.as_mut().rust_mut().get_mut().control = None;
+        self.as_mut().set_active(false);
+        self.as_mut().set_open(false);
+        self.as_mut().set_paused(false);
+        match completion {
+            Ok(Some(result)) => {
+                self.as_mut()
+                    .set_message(QString::from(format!("Saved {}", result.path.display())));
+                let screen = crate::commands::hypr(&crate::commands::SystemRunner, "monitors")
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .as_array()
+                            .and_then(crate::preview::focused_monitor_screen)
+                    });
+                crate::preview::publish_capture(
+                    result.path.clone(),
+                    result.width,
+                    result.height,
+                    screen,
+                );
+            }
+            Ok(None) => self
+                .as_mut()
+                .set_message(QString::from("Recording cancelled")),
+            Err(error) => {
+                let message = QString::from(error.to_string());
+                self.as_mut().set_message(message);
+            }
+        }
+    }
+}
+
+/// The recording options a take reads from settings, defaulting like the source.
+#[must_use]
+pub fn configured_record_options() -> RecordOptions {
+    record_options_from(&crate::settings::stored_settings())
+}
+
+/// Build recording options from stored settings, ignoring unknown or bad values.
+#[must_use]
+pub fn record_options_from(settings: &BTreeMap<String, crate::json::Value>) -> RecordOptions {
+    let mut options = RecordOptions::default();
+    let string = |key: &str| settings.get(key).and_then(crate::json::Value::as_str);
+    let number = |key: &str| settings.get(key).and_then(crate::json::Value::as_f64);
+    let flag = |key: &str| settings.get(key).and_then(crate::json::Value::as_bool);
+    if let Some(value) = string("recording_fps").and_then(|value| value.parse().ok()) {
+        options.fps = value;
+    }
+    if let Some(value) = string("recording_quality") {
+        options.quality = value.to_owned();
+    }
+    if let Some(value) = string("recording_size") {
+        options.size = value.to_owned();
+    }
+    if let Some(value) = flag("recording_scale") {
+        options.scale_video = value;
+    }
+    if let Some(value) = flag("recording_audio") {
+        options.system = value;
+    }
+    if let Some(value) = flag("recording_microphone") {
+        options.microphone = value;
+    }
+    if let Some(value) = flag("recording_mono") {
+        options.mono = value;
+    }
+    if let Some(value) = flag("recording_separate_audio") {
+        options.separate_audio = value;
+    }
+    if let Some(value) = flag("recording_cursor") {
+        options.cursor = value;
+    }
+    if let Some(value) = flag("recording_studio") {
+        options.studio = value;
+    }
+    if let Some(value) = flag("recording_show_controls") {
+        options.show_controls = value;
+    }
+    if let Some(value) = flag("recording_show_time") {
+        options.show_time = value;
+    }
+    if let Some(true) = flag("recording_gif") {
+        options.format = CaptureFormat::Gif;
+    }
+    if let Some(value) = string("recording_format") {
+        options.format = if value.eq_ignore_ascii_case("gif") {
+            CaptureFormat::Gif
+        } else {
+            CaptureFormat::Mp4
+        };
+    }
+    if let Some(value) = number("recording_gif_width") {
+        options.gif_width = value.max(0.0) as u32;
+    }
+    if let Some(value) = number("recording_gif_quality") {
+        options.gif_quality = value.clamp(1.0, 100.0) as u32;
+    }
+    if let Some(value) = flag("recording_gif_optimize") {
+        options.gif_optimize = value;
+    }
+    if let Some(value) = string("recording_system_device") {
+        options.system_device = Some(value.to_owned());
+    }
+    if let Some(value) = string("recording_microphone_device") {
+        options.microphone_device = Some(value.to_owned());
+    }
+    options
 }

@@ -263,6 +263,18 @@ mod tests {
     }
 
     #[test]
+    fn recording_commands_start_the_gui_instead_of_a_headless_capture() {
+        for command in ["record", "stop", "pause", "restart"] {
+            let argv = vec![command.to_owned()];
+            let routed = tidyshot::app::route_argv(&argv).unwrap();
+            assert!(
+                !super::runs_before_gui(&routed),
+                "{command} needs the recording controls"
+            );
+        }
+    }
+
+    #[test]
     fn only_an_annotate_capture_asks_the_editor_to_open() {
         assert!(super::wants_annotate(&[
             "area".to_owned(),
