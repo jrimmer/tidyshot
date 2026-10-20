@@ -1046,6 +1046,11 @@ struct PreparedPicker {
 fn prepare_window_picker() -> Result<PreparedPicker, String> {
     let runner = crate::commands::SystemRunner;
     let native = crate::recording::native_dir();
+    // Refusing here names the missing build step before the desktop is
+    // frozen, instead of offering a picker whose capture would always fail.
+    if !crate::window::helper_available(&native) {
+        return Err(crate::window::helper_missing_message().to_owned());
+    }
     let runtime = CaptureRuntime::new(
         &runner,
         MirrorRegistry::global(),
@@ -1700,6 +1705,14 @@ impl qobject::Capture {
                 action,
                 ..
             } => {
+                // A window command without a region opens the picker, the
+                // same chooser the menu row opens, so a forwarded link and a
+                // menu click cannot diverge.
+                // Ported from omnishot/app.py (capture)
+                if command == "window" && geometry.is_none() {
+                    self.as_mut().open_window_picker();
+                    return;
+                }
                 // Scrolling captures drive an interactive session rather than
                 // the one-shot grab the other modes use.
                 if command == "scroll" || command == "scroll-horizontal" {
