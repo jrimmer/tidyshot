@@ -54,6 +54,23 @@ impl Corner {
     }
 }
 
+/// A `file://` URL for a local path, percent-encoding the bytes that need it.
+#[must_use]
+pub fn local_file_url(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let mut url = String::with_capacity(text.len() + 7);
+    url.push_str("file://");
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                url.push(byte as char);
+            }
+            other => url.push_str(&format!("%{other:02X}")),
+        }
+    }
+    url
+}
+
 /// A monitor's usable rectangle in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenRect {

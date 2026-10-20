@@ -72,6 +72,7 @@ pub mod video_splits;
 pub mod video_styles;
 pub mod video_ui;
 pub mod window;
+pub mod window_picker;
 pub mod zoom_focus;
 
 /// Initialise the cxx-qt registrations and run the application.

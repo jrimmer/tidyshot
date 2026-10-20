@@ -17,6 +17,7 @@ fn main() {
             "qml/ScrollControls.qml",
             "qml/Editor.qml",
             "qml/EditorToolbar.qml",
+            "qml/WindowHover.qml",
         ]),
     )
     .qt_module("Quick")
