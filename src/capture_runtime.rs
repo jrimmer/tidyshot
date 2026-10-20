@@ -540,15 +540,19 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             Some(window.rect),
         );
         history::prepend(&self.root, &row)?;
+        let width = image.width as u32;
+        let height = image.height as u32;
+        // The composition owns the window pixels, so the decoded frame moves
+        // into it instead of being copied for the project.
         let display = if transparent {
             None
         } else {
-            self.style_window_frame(&path, &image, window)?
+            self.style_window_frame(&path, image, window)?
         };
         Ok(CaptureResult {
             path,
-            width: image.width as u32,
-            height: image.height as u32,
+            width,
+            height,
             rect: Some(window.rect),
             screen: None,
             display,
@@ -565,7 +569,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
     fn style_window_frame(
         &self,
         capture: &Path,
-        image: &crate::pngzip::Image,
+        image: crate::pngzip::Image,
         window: &WindowInfo,
     ) -> Result<Option<PathBuf>, RuntimeError> {
         self.style_window_frame_with(capture, image, window, &crate::settings::stored_settings())
@@ -575,7 +579,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
     fn style_window_frame_with(
         &self,
         capture: &Path,
-        image: &crate::pngzip::Image,
+        image: crate::pngzip::Image,
         window: &WindowInfo,
         settings: &std::collections::BTreeMap<String, Value>,
     ) -> Result<Option<PathBuf>, RuntimeError> {
@@ -609,7 +613,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
                 }
             }
         }
-        let project = crate::window_edit::project_for(image.clone(), Some(background));
+        let project = crate::window_edit::project_for(image, Some(background));
         crate::window_edit::save_editable(&self.root, capture, &project)
             .map(Some)
             .map_err(|error| RuntimeError::Window(error.to_string()))
