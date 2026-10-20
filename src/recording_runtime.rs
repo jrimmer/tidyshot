@@ -70,6 +70,8 @@ pub struct RecordingStatus {
     pub seconds: u64,
     /// Whether the widget shows the elapsed time.
     pub show_time: bool,
+    /// Whether the always-on-top controls should be visible.
+    pub show_controls: bool,
     /// Unix seconds when this snapshot was written.
     pub updated: f64,
     /// Where the controls window belongs.
@@ -96,6 +98,7 @@ impl RecordingStatus {
         object.insert("paused".to_owned(), Value::Bool(self.paused));
         object.insert("seconds".to_owned(), Value::Number(self.seconds as f64));
         object.insert("show_time".to_owned(), Value::Bool(self.show_time));
+        object.insert("show_controls".to_owned(), Value::Bool(self.show_controls));
         object.insert("updated".to_owned(), Value::Number(self.updated));
         if let Some(path) = &self.path {
             object.insert("path".to_owned(), Value::String(path.display().to_string()));
@@ -450,6 +453,7 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
             paused: false,
             seconds: 0,
             show_time: plan.options.show_time,
+            show_controls: plan.options.show_controls,
             updated: now_seconds(),
             x,
             y,
@@ -496,6 +500,9 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
         let mut paused_total = Duration::ZERO;
         let mut paused_at: Option<Instant> = None;
         let mut last_checkpoint = Instant::now();
+        // The widget treats a stale file as idle, so refresh it even while the
+        // clock is frozen by a pause.
+        let mut last_status_write = Instant::now();
         let mut outcome = LoopOutcome::Cancelled;
         let mut stopped_externally = false;
 
@@ -542,7 +549,7 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
                 );
             }
             let elapsed = elapsed_seconds(started, paused_total, paused_at);
-            if elapsed > status.seconds {
+            if elapsed > status.seconds || last_status_write.elapsed() >= Duration::from_secs(1) {
                 status.seconds = elapsed;
                 publish_status(
                     &self.status_path,
@@ -553,6 +560,7 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
                     paused_total,
                     paused_at,
                 );
+                last_status_write = Instant::now();
             }
             if let Some(checkpoint) = checkpoint.as_ref()
                 && last_checkpoint.elapsed() >= crate::recording::checkpoint::CHECKPOINT_INTERVAL
@@ -1172,6 +1180,7 @@ mod tests {
             paused: true,
             seconds: 75,
             show_time: true,
+            show_controls: true,
             updated: 42.0,
             x: 1,
             y: 2,
@@ -1183,6 +1192,10 @@ mod tests {
         assert_eq!(value.get("paused").and_then(Value::as_bool), Some(true));
         assert_eq!(value.get("seconds").and_then(Value::as_f64), Some(75.0));
         assert_eq!(value.get("show_time").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            value.get("show_controls").and_then(Value::as_bool),
+            Some(true)
+        );
         assert_eq!(value.get("updated").and_then(Value::as_f64), Some(42.0));
         assert_eq!(status.elapsed_text(), "01:15");
     }
@@ -1368,6 +1381,87 @@ mod tests {
     }
 
     #[test]
+    fn a_crashed_studio_take_restores_its_checkpoint() {
+        let root = scratch("studio-crash");
+        let runner = Fake {
+            crash: true,
+            ..Fake::new()
+        };
+        let control = RecordingControl::new();
+        let options = RecordOptions {
+            studio: true,
+            ..RecordOptions::default()
+        };
+        runtime(&runner, &root)
+            .run(options, Some("0,0 320x200"), &control, &mut |_| {})
+            .unwrap_err();
+        let captures = crate::history::captures_dir(&root);
+        let take = std::fs::read_dir(&captures)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "mp4"))
+            .expect("the crashed take left its file");
+        let checkpoint = take.with_extension("studio.checkpoint");
+        assert!(checkpoint.is_file(), "the Studio checkpoint survived");
+
+        let outcome = recover_on_start(&root, &runner).unwrap();
+        assert_eq!(outcome.recovered.len(), 1);
+        let sidecar = take.with_extension("studio.json");
+        assert!(sidecar.is_file(), "the checkpoint was restored");
+        let restored = crate::json::parse(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(restored.get("version").and_then(Value::as_f64), Some(1.0));
+        assert!(restored.get("capture_options").is_some());
+        // The recovered take is a playable history row.
+        assert_eq!(crate::history::read(&root)[0].kind, "video");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_paused_take_keeps_the_widget_status_fresh() {
+        let root = scratch("paused-status");
+        let runner = Fake::new();
+        let control = RecordingControl::new();
+        control.send(RecordingCommand::TogglePause);
+        let status_file = root.join(STATUS_FILE);
+        let reader = std::thread::spawn({
+            let status_file = status_file.clone();
+            move || {
+                // Pause lands within one poll; the refresh then rewrites the
+                // file while the elapsed clock is frozen.
+                std::thread::sleep(Duration::from_millis(1_400));
+                std::fs::read_to_string(&status_file).ok()
+            }
+        });
+        std::thread::spawn({
+            let control = control.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(1_600));
+                control.send(RecordingCommand::Stop);
+            }
+        });
+        let result = runtime(&runner, &root)
+            .run(
+                RecordOptions::default(),
+                Some("0,0 320x200"),
+                &control,
+                &mut |_| {},
+            )
+            .unwrap()
+            .expect("the take was stopped");
+        assert!(result.path.exists());
+        let text = reader.join().unwrap().expect("the status file existed");
+        let value = crate::json::parse(&text).unwrap();
+        assert_eq!(value.get("recording").and_then(Value::as_bool), Some(true));
+        assert_eq!(value.get("paused").and_then(Value::as_bool), Some(true));
+        assert!(
+            !status_file.exists(),
+            "the status is cleared after the take"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn controls_sit_inside_the_chosen_display() {
         let (x, y) = controls_position((1920, 0, 2560, 1440));
         assert_eq!(
@@ -1457,6 +1551,7 @@ pub mod qobject {
         #[qproperty(bool, paused)]
         #[qproperty(QString, elapsed)]
         #[qproperty(QString, message)]
+        #[qproperty(bool, show_controls, cxx_name = "showControls")]
         #[qproperty(i32, x)]
         #[qproperty(i32, y)]
         #[qproperty(i32, window_width, cxx_name = "windowWidth")]
@@ -1503,6 +1598,7 @@ pub struct RecordingRust {
     paused: bool,
     elapsed: QString,
     message: QString,
+    show_controls: bool,
     x: i32,
     y: i32,
     window_width: i32,
@@ -1518,6 +1614,7 @@ impl Default for RecordingRust {
             paused: false,
             elapsed: QString::from("00:00"),
             message: QString::from(""),
+            show_controls: true,
             x: 0,
             y: 0,
             window_width: CONTROLS_WIDTH as i32,

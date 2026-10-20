@@ -169,7 +169,7 @@ ApplicationWindow {
         repeat: true
         running: true
         onTriggered: {
-            recordingWindow.visible = Recording.open
+            recordingWindow.visible = Recording.open && Recording.showControls
             recordingWindow.x = Recording.x
             recordingWindow.y = Recording.y
             recordingControls.elapsed = Recording.elapsed
