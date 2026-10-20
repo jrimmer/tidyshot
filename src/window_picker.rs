@@ -143,6 +143,17 @@ fn safe_name(name: &str) -> String {
         .collect()
 }
 
+/// The area, in square logical pixels, two rectangles share.
+fn overlap(window: &Rect, frame: &Rect) -> i64 {
+    let width = i64::from(window.right().min(frame.right()) - window.x.max(frame.x));
+    let height = i64::from(window.bottom().min(frame.bottom()) - window.y.max(frame.y));
+    if width <= 0 || height <= 0 {
+        0
+    } else {
+        width * height
+    }
+}
+
 /// Build the model from the live compositor state.
 ///
 /// Rows on an output without a frozen frame are dropped: the overlay draws
@@ -161,12 +172,16 @@ pub fn build(
         // top, so the picker would capture itself.
         .filter(|window| !window.is_own_preview())
         .filter_map(|window| {
-            let monitor = frames.iter().position(|frame| {
-                frame.contains(
-                    f64::from(window.rect.x) + f64::from(window.rect.width) / 2.0,
-                    f64::from(window.rect.y) + f64::from(window.rect.height) / 2.0,
-                )
-            })?;
+            // The overlay draws a row on one output, so a window that spans
+            // outputs belongs to the one showing most of it; a window whose
+            // centre is off-screen still gets a row instead of disappearing.
+            let monitor = frames
+                .iter()
+                .enumerate()
+                .map(|(index, frame)| (index, overlap(&window.rect, &frame.bounds)))
+                .filter(|(_, area)| *area > 0)
+                .max_by_key(|(_, area)| *area)
+                .map(|(index, _)| index)?;
             Some(PickerRow { window, monitor })
         })
         .collect();
@@ -411,6 +426,31 @@ mod tests {
         assert!(rows[0].contains("\"monitor\":0"), "{}", rows[0]);
         assert!(frames[0].contains("\"index\":0"), "{}", frames[0]);
         assert!(rows[0].contains("\"x\":0"), "{}", rows[0]);
+    }
+
+    #[test]
+    fn a_window_spanning_outputs_lands_on_the_one_showing_most_of_it() {
+        // The row carries an output index, so a window crossing the boundary
+        // is drawn on the output that shows most of it: 1200 px on DP-1
+        // against 800 on DP-2.
+        let picker = model(
+            r#"[{"address":"0x1","title":"Wide","class":"app","at":[720,10],"size":[2000,80],"workspace":{"name":"1"},"mapped":true,"focusHistoryID":0}]"#,
+        );
+        assert_eq!(picker.rows[0].monitor, 0);
+        let picker = model(
+            r#"[{"address":"0x1","title":"Wide","class":"app","at":[1000,10],"size":[2400,80],"workspace":{"name":"1"},"mapped":true,"focusHistoryID":0}]"#,
+        );
+        assert_eq!(picker.rows[0].monitor, 1);
+    }
+
+    #[test]
+    fn a_window_off_the_edge_still_has_a_row() {
+        // Its centre is outside every output, but the visible sliver is still
+        // hoverable, so dropping the row would make it uncapturable.
+        let picker = model(&format!("[{}]", window("0x2", "Left", -80, 10, 0)));
+        assert_eq!(picker.rows.len(), 1);
+        assert_eq!(picker.rows[0].monitor, 0);
+        assert_eq!(picker.rows[0].clipped_rect(&picker.frames[0]).width, 20);
     }
 
     #[test]
