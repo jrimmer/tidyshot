@@ -492,6 +492,7 @@ impl<'a, R: CommandRunner> RecordingRuntime<'a, R> {
                 if let Some(checkpoint) = checkpoint.as_ref() {
                     checkpoint.discard();
                 }
+                clear_status(&self.status_path);
                 return Err(RecordingError::Command(error.to_string()));
             }
         };
