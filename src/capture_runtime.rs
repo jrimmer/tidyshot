@@ -1031,6 +1031,69 @@ pub fn dispatch(command: Command) {
     }
 }
 
+/// A picker model prepared off the Qt thread.
+struct PreparedPicker {
+    windows: Vec<WindowInfo>,
+    model: crate::window_picker::PickerModel,
+    accent: String,
+    directory: PathBuf,
+}
+
+/// Freeze every output and load the visible window list on a worker thread.
+///
+/// The grabs and compositor queries never touch the Qt event loop. A failed
+/// query is returned with its message so the UI can show it.
+fn prepare_window_picker() -> Result<PreparedPicker, String> {
+    let runner = crate::commands::SystemRunner;
+    let native = crate::recording::native_dir();
+    let runtime = CaptureRuntime::new(
+        &runner,
+        MirrorRegistry::global(),
+        native.clone(),
+        crate::settings::data_dir(),
+    );
+    let monitors = crate::commands::hypr(&runner, "monitors").map_err(|error| error.to_string())?;
+    let clients = crate::commands::hypr(&runner, "clients").map_err(|error| error.to_string())?;
+    let directory = runtime.root.join("frozen");
+    let session = crate::capture_session::CaptureSession {
+        runner: &runner,
+        mirror: MirrorRegistry::global(),
+        native,
+    };
+    let frames = crate::window_picker::freeze_outputs(&monitors, &directory, |display| {
+        session
+            .grab(
+                None,
+                runtime.options.cursor,
+                Some(&display.name),
+                Some(display.geometry.scale),
+            )
+            .map_err(|error| error.to_string())
+    });
+    let accent = crate::ui_scale::accent();
+    let model = crate::window_picker::build(&clients, &monitors, frames, accent.clone());
+    let mut windows: Vec<WindowInfo> = model
+        .rows
+        .iter()
+        .filter(|row| !row.window.is_own_preview())
+        .map(|row| row.window.clone())
+        .collect();
+    if windows.is_empty() {
+        windows = runtime
+            .windows()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|window| !window.is_own_preview())
+            .collect();
+    }
+    Ok(PreparedPicker {
+        windows,
+        model,
+        accent,
+        directory,
+    })
+}
+
 // --- QML bridge: the Capture singleton -----------------------------------
 
 #[cxx_qt::bridge]
@@ -1430,65 +1493,36 @@ impl qobject::Capture {
 
     /// Freeze every output and load the visible window list.
     ///
-    /// The frozen-frame hover picker is the primary chooser; the list stays
-    /// available as the keyboard fallback whenever the frames cannot be used.
+    /// The grabs run on a worker thread so the menu keeps responding while a
+    /// large desktop is copied; the finished model is applied on the Qt
+    /// thread. The frozen-frame hover picker is the primary chooser; the list
+    /// stays available as the keyboard fallback when the frames cannot be used.
     // Ported from omnishot/app.py (window_selection)
     pub fn open_window_picker(mut self: Pin<&mut Self>) {
-        let runner = crate::commands::SystemRunner;
-        let native = crate::recording::native_dir();
-        let runtime = CaptureRuntime::new(
-            &runner,
-            MirrorRegistry::global(),
-            native.clone(),
-            crate::settings::data_dir(),
-        );
-        let monitors = match crate::commands::hypr(&runner, "monitors") {
-            Ok(value) => value,
-            Err(error) => {
-                self.as_mut().fail(error.to_string());
-                return;
-            }
-        };
-        let clients = match crate::commands::hypr(&runner, "clients") {
-            Ok(value) => value,
-            Err(error) => {
-                self.as_mut().fail(error.to_string());
-                return;
-            }
-        };
-        let directory = runtime.root.join("frozen");
-        let session = crate::capture_session::CaptureSession {
-            runner: &runner,
-            mirror: MirrorRegistry::global(),
-            native,
-        };
-        let frames = crate::window_picker::freeze_outputs(&monitors, &directory, |display| {
-            session
-                .grab(
-                    None,
-                    runtime.options.cursor,
-                    Some(&display.name),
-                    Some(display.geometry.scale),
-                )
-                .map_err(|error| error.to_string())
-        });
-        let accent = crate::ui_scale::accent();
-        let model = crate::window_picker::build(&clients, &monitors, frames, accent.clone());
-        let mut windows: Vec<WindowInfo> = model
-            .rows
-            .iter()
-            .filter(|row| !row.window.is_own_preview())
-            .map(|row| row.window.clone())
-            .collect();
-        if windows.is_empty() {
-            windows = runtime
-                .windows()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|window| !window.is_own_preview())
-                .collect();
+        if *self.window_hover_open() || *self.window_picker_open() {
+            return;
         }
-        let count = windows.len();
+        self.as_mut()
+            .set_message(QString::from("Preparing the window picker…"));
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let prepared = prepare_window_picker();
+            let _ = qt_thread.queue(move |mut capture| {
+                capture.as_mut().apply_window_picker(prepared);
+            });
+        });
+    }
+
+    /// Apply a picker prepared off the Qt thread.
+    fn apply_window_picker(mut self: Pin<&mut Self>, prepared: Result<PreparedPicker, String>) {
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.as_mut().fail(error);
+                return;
+            }
+        };
+        let count = prepared.windows.len();
         if count == 0 {
             self.as_mut()
                 .set_message(QString::from("No window to capture"));
@@ -1498,11 +1532,11 @@ impl qobject::Capture {
         }
         let mut labels = QStringList::default();
         let mut details = QStringList::default();
-        for window in &windows {
+        for window in &prepared.windows {
             labels.append(QString::from(window.label()));
             details.append(QString::from(window.detail()));
         }
-        let (frames, rows) = crate::window_picker::projections(&model);
+        let (frames, rows) = crate::window_picker::projections(&prepared.model);
         let mut frame_list = QStringList::default();
         for frame in frames {
             frame_list.append(QString::from(frame));
@@ -1511,19 +1545,20 @@ impl qobject::Capture {
         for row in rows {
             row_list.append(QString::from(row));
         }
-        let hover = model.frozen_usable();
+        let hover = prepared.model.frozen_usable();
         {
             let rust = self.as_mut().rust_mut();
             let state = rust.get_mut();
-            state.windows = windows;
-            state.picker = Some(model);
-            state.frozen = Some(directory);
+            state.windows = prepared.windows;
+            state.picker = Some(prepared.model);
+            state.frozen = Some(prepared.directory);
         }
         self.as_mut().set_window_labels(labels);
         self.as_mut().set_window_details(details);
         self.as_mut().set_window_frames(frame_list);
         self.as_mut().set_window_rows(row_list);
-        self.as_mut().set_window_accent(QString::from(accent));
+        self.as_mut()
+            .set_window_accent(QString::from(prepared.accent));
         self.as_mut().set_window_hover_open(hover);
         self.as_mut().set_window_picker_open(!hover);
         self.as_mut()
