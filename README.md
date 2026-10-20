@@ -213,8 +213,37 @@ writes the PNG through the atomic store and prepends its history row. The QML
 a forwarded socket command and a direct `tidyshot area` all reach the same
 grabs, save and history. Saved captures live under `captures/` beside
 `history.json` in the data directory, and the corner preview opens the saved
-file. A window capture offers `hyprctl -j clients` rectangles through
-`qml/WindowPicker.qml`.
+file.
+
+## Window capture
+
+A window capture is not a rectangle grab. `native/window-helper` speaks
+Hyprland's `hyprland_toplevel_export_v1` protocol and copies the window's own
+surface, so overlap, the wallpaper and other windows never leak in and the
+alpha channel survives. `src/window.rs` resolves the window identity
+(address plus stable id), runs the helper and parses the PAM RGBA stream;
+`src/window_picker.rs` freezes every output, sorts the visible windows by
+`focusHistoryID`, hit-tests the pointer and cycles with Tab. One fullscreen
+`qml/WindowHover.qml` per output shows the frozen frame, dims it, redraws the
+hovered window undimmed and outlines it in the Omarchy accent; Shift keeps the
+window's alpha and Escape cancels. When the frames cannot be grabbed, the
+keyboard fallback lists the same windows in `qml/WindowPicker.qml`.
+
+The isolated window is saved as the history capture. Unless the capture was
+with Shift, `src/window_edit.rs` also composes the editable frame: Hyprland's
+`decoration:rounding` and `rounding_power` (superellipse) scaled by the capture
+ratio, the `window_padding` setting, the drop shadow, and the desktop
+wallpaper from `~/.local/state/omarchy/current/background` (or
+`~/.config/omarchy/current/background`) when `window_wallpaper` is on.
+`src/wallpaper.rs` reads and decodes that file through ffmpeg without touching
+it. The project is written beside the capture under `image-edits/`, so the
+preview shows the composed picture while Open Annotate reopens the editable
+frame instead of a flattened PNG.
+
+`window-helper` is built by `build.rs` and `bin/native` when `wayland-scanner`
+and the `wayland-client` headers are present. Without them the build only
+warns, and a window capture reports that the helper must be built instead of
+silently falling back to a desktop crop.
 
 A scrolling capture runs `capture_session::run_capture`'s `Scroll` outcome
 through `scroll_runtime::drive`: slurp selects the region, `qml/ScrollControls.qml`
@@ -254,9 +283,9 @@ monitor. It reuses `qml/Overlay.qml` for its body, so the preview shows the
 saved image or the recording's first frame with Copy, Save, Annotate/Edit,
 Pin, drag-out and close. Enter copies and Escape closes while the preview is
 the active window, so the capture menu keeps its own keyboard handling; the
-action results and any I/O failure appear on the window. The annotate editor
-and the pin window are not ported yet, so those two actions say so instead of
-claiming a window opened.
+action results and any I/O failure appear on the window. A window capture
+reopens its editable frame when annotating; the pin window is not ported yet,
+so that action says so instead of claiming a window opened.
 
 `src/preview.rs` owns the window: it resolves the focused monitor with
 `hyprctl -j monitors`, computes the anchor through `src/overlay.rs`, reads the
