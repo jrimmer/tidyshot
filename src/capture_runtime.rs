@@ -552,7 +552,17 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         image: &crate::pngzip::Image,
         window: &WindowInfo,
     ) -> Result<Option<PathBuf>, RuntimeError> {
-        let settings = crate::settings::stored_settings();
+        self.style_window_frame_with(capture, image, window, &crate::settings::stored_settings())
+    }
+
+    /// Compose a window frame with an explicit settings map, for tests.
+    fn style_window_frame_with(
+        &self,
+        capture: &Path,
+        image: &crate::pngzip::Image,
+        window: &WindowInfo,
+        settings: &std::collections::BTreeMap<String, Value>,
+    ) -> Result<Option<PathBuf>, RuntimeError> {
         let shadow = settings
             .get("window_shadow")
             .and_then(Value::as_bool)
@@ -578,7 +588,9 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             let wallpaper = crate::wallpaper::WallpaperSettings::from_settings(&settings);
             match crate::wallpaper::capture_wallpaper(self.runner, &wallpaper, &self.root) {
                 Ok(image) => background = style.with_wallpaper(background, image),
-                Err(error) => eprintln!("tidyshot: the wallpaper background is unavailable: {error}"),
+                Err(error) => {
+                    eprintln!("tidyshot: the wallpaper background is unavailable: {error}")
+                }
             }
         }
         let project = crate::window_edit::project_for(image.clone(), Some(background));
@@ -810,11 +822,7 @@ impl Drop for CaptureLease {
 }
 
 /// The worker half of a capture: resolve the active window, then run.
-fn capture_on_worker(
-    mut request: CaptureRequest,
-    active: bool,
-    cancel: Arc<AtomicBool>,
-) -> Completion {
+fn capture_on_worker(request: CaptureRequest, active: bool, cancel: Arc<AtomicBool>) -> Completion {
     let runner = crate::commands::SystemRunner;
     let runtime = CaptureRuntime::new(
         &runner,
@@ -822,12 +830,27 @@ fn capture_on_worker(
         crate::recording::native_dir(),
         crate::settings::data_dir(),
     );
-    if active && request.rect.is_none() {
+    // An active-window capture copies the focused window's own surface too;
+    // the rectangle is only recorded in history.
+    let focused = if active && request.rect.is_none() {
         match runtime.active_window() {
-            Ok(Some(window)) => request.rect = Some(window.rect),
+            Ok(Some(window)) => Some(window),
             Ok(None) => return Completion::Failed("No focused window to capture".to_owned()),
             Err(error) => return Completion::Failed(error.to_string()),
         }
+    } else {
+        None
+    };
+    if let Some(window) = focused
+        && let Some(identity) = window.identity()
+    {
+        if cancel.load(Ordering::SeqCst) {
+            return Completion::Failed(RuntimeError::Cancelled.to_string());
+        }
+        return match runtime.capture_window(&window, &identity, runtime.options.cursor, false) {
+            Ok(result) => Completion::Captured(result),
+            Err(error) => Completion::Failed(error.to_string()),
+        };
     }
     if cancel.load(Ordering::SeqCst) {
         return Completion::Failed(RuntimeError::Cancelled.to_string());
@@ -1745,8 +1768,9 @@ impl qobject::Capture {
                     "Saved {} × {}",
                     result.width, result.height
                 )));
-                crate::preview::publish_capture(
+                crate::preview::publish_capture_display(
                     result.path.clone(),
+                    result.display.clone(),
                     result.width,
                     result.height,
                     result.screen,
@@ -1767,8 +1791,9 @@ impl qobject::Capture {
                     "Saved {} × {} before the capture stopped: {reason}",
                     result.width, result.height
                 )));
-                crate::preview::publish_capture(
+                crate::preview::publish_capture_display(
                     result.path.clone(),
+                    result.display.clone(),
                     result.width,
                     result.height,
                     result.screen,
@@ -1869,6 +1894,8 @@ mod tests {
                         self.active.lock().unwrap().clone()
                     }
                     [flag, query] if flag == "-j" && query == "plugin list" => "[]".to_owned(),
+                    [flag, query] if flag == "-j" && query == "getprop" => "{}".to_owned(),
+                    [flag, query] if flag == "-j" && query == "getoption" => "{}".to_owned(),
                     [action, ..] if action == "repl" => "false".to_owned(),
                     _ => "ok".to_owned(),
                 };
@@ -2088,6 +2115,66 @@ mod tests {
             seen.iter().all(|spec| spec.program != "grim"),
             "an isolated window must not fall back to a rectangle grab"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_window_capture_writes_an_editable_composed_frame() {
+        let root = scratch("window-style");
+        let runner = Fake::new(monitors(), clients(), active());
+        runner.push_text("slurp", "0x1abcdef01\n");
+        let helper = native_dir().join(crate::window::HELPER);
+        runner.push(
+            &helper.to_string_lossy(),
+            window_pam(800, 600, [5, 6, 7, 255]),
+        );
+        let runtime = runtime(&runner, &root);
+        let result = runtime.run(request("window"), None).unwrap();
+        // The raw window stays the history capture...
+        let raw = crate::pngzip::decode_png(&std::fs::read(&result.path).unwrap()).unwrap();
+        assert_eq!((raw.width, raw.height), (800, 600));
+        // ...while the preview is the composed, editable frame.
+        let display = result.display.clone().expect("a composed preview");
+        let composed = crate::pngzip::decode_png(&std::fs::read(&display).unwrap()).unwrap();
+        assert!(composed.width > raw.width && composed.height > raw.height);
+        let project = crate::window_edit::load(&root, &result.path)
+            .unwrap()
+            .expect("the frame is editable");
+        assert_eq!(project.base, raw);
+        let background = project.background.expect("a background");
+        assert!(background.shadow);
+        assert_eq!(background.padding, crate::window::DEFAULT_PADDING);
+        assert_eq!(
+            crate::window_edit::display_path(&root, &result.path),
+            display
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_transparent_window_choice_skips_the_composition() {
+        let root = scratch("window-transparent");
+        let runner = Fake::new(monitors(), clients(), active());
+        let helper = native_dir().join(crate::window::HELPER);
+        runner.push(&helper.to_string_lossy(), window_pam(20, 20, [1, 2, 3, 0]));
+        let runtime = runtime(&runner, &root);
+        let window = windows_from(&crate::json::parse(clients()).unwrap())
+            .into_iter()
+            .find(|window| window.title == "Editor")
+            .unwrap();
+        let identity = window.identity().unwrap();
+        let result = runtime
+            .capture_window(&window, &identity, false, true)
+            .unwrap();
+        assert!(result.display.is_none());
+        assert!(
+            crate::window_edit::load(&root, &result.path)
+                .unwrap()
+                .is_none(),
+            "transparency keeps the isolated window only"
+        );
+        let raw = crate::pngzip::decode_png(&std::fs::read(&result.path).unwrap()).unwrap();
+        assert_eq!(raw.pixel(0, 0)[3], 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 

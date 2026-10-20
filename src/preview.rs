@@ -114,6 +114,8 @@ pub fn window_position(
 #[derive(Debug, Clone)]
 pub struct PreviewWindow {
     path: PathBuf,
+    /// The saved capture behind a composed preview, when they differ.
+    capture: Option<PathBuf>,
     width: u32,
     height: u32,
     video: bool,
@@ -137,6 +139,7 @@ impl PreviewWindow {
         let video = is_video(&path);
         Self {
             path,
+            capture: None,
             width,
             height,
             video,
@@ -147,9 +150,21 @@ impl PreviewWindow {
         }
     }
 
+    /// Remember the saved capture a composed preview stands for.
+    pub fn set_capture_path(&mut self, capture: PathBuf) {
+        self.capture = Some(capture);
+    }
+
+    /// The file the preview shows.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The saved capture the preview's actions act on.
+    #[must_use]
+    pub fn capture_path(&self) -> &Path {
+        self.capture.as_deref().unwrap_or(&self.path)
     }
 
     #[must_use]
@@ -337,7 +352,10 @@ pub const fn default_corner() -> Corner {
 /// A capture that should be shown, and who it belongs to.
 #[derive(Debug, Clone)]
 struct Published {
+    /// The saved capture the preview rings.
     path: PathBuf,
+    /// The picture to show, when a composed preview differs from the capture.
+    display: Option<PathBuf>,
     width: u32,
     height: u32,
     screen: Option<ScreenRect>,
@@ -351,8 +369,20 @@ static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::Preview>> =
 
 /// Show a preview for a capture the runtime just wrote.
 pub fn publish_capture(path: PathBuf, width: u32, height: u32, screen: Option<ScreenRect>) {
+    publish_capture_display(path, None, width, height, screen);
+}
+
+/// Show a preview whose picture is a composed file, not the raw capture.
+pub fn publish_capture_display(
+    path: PathBuf,
+    display: Option<PathBuf>,
+    width: u32,
+    height: u32,
+    screen: Option<ScreenRect>,
+) {
     let published = Published {
         path,
+        display,
         width,
         height,
         screen,
@@ -428,6 +458,7 @@ fn run_action(mut preview: Pin<&mut qobject::Preview>, action: PendingAction) {
 pub fn set_startup_preview(result: crate::capture_runtime::CaptureResult) {
     *STARTUP.lock().expect("preview queue poisoned") = Some(Published {
         path: result.path,
+        display: result.display,
         width: result.width,
         height: result.height,
         screen: result.screen,
@@ -571,13 +602,14 @@ impl PreviewRust {
     fn apply(&mut self, published: Published) {
         let settings = crate::settings::preview_settings();
         let monitor = published.screen.map(MonitorScreen::new);
-        let window = PreviewWindow::new(
-            &published.path,
-            published.width,
-            published.height,
-            settings,
-            monitor,
-        );
+        // The preview rings the saved capture but shows the composed picture,
+        // so copy and save still act on the file history recorded.
+        let shown = published.display.as_deref().unwrap_or(&published.path);
+        let window =
+            PreviewWindow::new(shown, published.width, published.height, settings, monitor);
+        let capture_path = published.path.clone();
+        let mut window = window;
+        window.set_capture_path(capture_path);
         self.path = QString::from(window.path().display().to_string());
         self.content_url =
             QUrl::from_local_file(&QString::from(window.path().display().to_string()));
@@ -677,7 +709,13 @@ impl qobject::Preview {
 
     /// Copy the capture to the clipboard.
     pub fn copy(mut self: Pin<&mut Self>) {
-        let path = PathBuf::from(self.path().to_string());
+        let path = self.window.as_ref().map_or_else(
+            || PathBuf::from(self.path().to_string()),
+            |window| {
+                // A composed preview copies the picture the user sees.
+                window.path().to_path_buf()
+            },
+        );
         let result = copy_capture(&crate::commands::SystemRunner, &path);
         self.as_mut()
             .rust_mut()
@@ -688,7 +726,10 @@ impl qobject::Preview {
 
     /// Save the capture again through the atomic store.
     pub fn save(mut self: Pin<&mut Self>) {
-        let path = PathBuf::from(self.path().to_string());
+        let path = self.window.as_ref().map_or_else(
+            || PathBuf::from(self.path().to_string()),
+            |window| window.capture_path().to_path_buf(),
+        );
         let result = save_capture(&path);
         self.as_mut()
             .rust_mut()
@@ -699,11 +740,25 @@ impl qobject::Preview {
 
     /// Open the capture in the annotate editor.
     pub fn annotate(mut self: Pin<&mut Self>) {
-        let path = PathBuf::from(self.path().to_string());
-        let result = annotate_capture(&path);
-        if result.is_ok() {
-            crate::editor_window::publish_open(path);
-        }
+        let path = self.window.as_ref().map_or_else(
+            || PathBuf::from(self.path().to_string()),
+            |window| window.capture_path().to_path_buf(),
+        );
+        // A window capture reopens its editable frame; a plain capture opens
+        // a fresh document over its pixels.
+        let root = crate::settings::data_dir();
+        let open_path = match crate::window_edit::load(&root, &path) {
+            Ok(Some(_)) => Ok(crate::window_edit::edit_paths(&root, &path).0),
+            Ok(None) => annotate_capture(&path).map(|()| path),
+            Err(error) => Err(PreviewError::Image(error.to_string())),
+        };
+        let result = match open_path {
+            Ok(open_path) => {
+                crate::editor_window::publish_open(open_path);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        };
         self.as_mut()
             .rust_mut()
             .get_mut()
@@ -715,7 +770,10 @@ impl qobject::Preview {
     ///
     /// No pin window exists yet, so the message names the missing window.
     pub fn pin(mut self: Pin<&mut Self>) {
-        let path = PathBuf::from(self.path().to_string());
+        let path = self.window.as_ref().map_or_else(
+            || PathBuf::from(self.path().to_string()),
+            |window| window.path().to_path_buf(),
+        );
         let result = pin_capture(&path).map(|_| ());
         self.as_mut()
             .rust_mut()

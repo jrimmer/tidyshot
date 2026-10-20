@@ -358,7 +358,9 @@ mod tests {
             follow_changes: true,
         };
         let runner = Fake::default();
-        let loaded = capture_wallpaper(&runner, &settings, &root).unwrap().unwrap();
+        let loaded = capture_wallpaper(&runner, &settings, &root)
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.pixel(0, 0), [7, 7, 7, 7]);
         assert!(
             runner.seen.lock().unwrap().is_empty(),
