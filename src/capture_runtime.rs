@@ -252,6 +252,20 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         if request.mode == crate::capture_session::CaptureMode::Previous && request.rect.is_none() {
             request.rect = remembered.or_else(|| history::last_area(&self.root));
         }
+        // A window command with an explicit rectangle still isolates the
+        // window that rectangle names, so a scripted or URL capture keeps the
+        // same fidelity as the picker. A rectangle that names no window falls
+        // through to the ordinary grab.
+        if request.mode == crate::capture_session::CaptureMode::Window
+            && let Some(rect) = request.rect
+            && let Some(window) = self
+                .windows()?
+                .into_iter()
+                .find(|window| window.rect == rect && !window.is_own_preview())
+            && let Some(identity) = window.identity()
+        {
+            return self.capture_window(&window, &identity, self.options.cursor, false);
+        }
         let monitors_value = hypr(self.runner, "monitors")?;
         let Some(monitors) = monitors_value.as_array() else {
             return Err(RuntimeError::NoDisplays);
@@ -1385,6 +1399,9 @@ impl qobject::Capture {
     /// Cancel a choice that is still open.
     pub fn cancel(mut self: Pin<&mut Self>) {
         self.cancel.store(true, Ordering::SeqCst);
+        if *self.window_hover_open() || *self.window_picker_open() {
+            self.as_mut().close_window_picker();
+        }
         self.as_mut().set_busy(false);
         self.as_mut()
             .set_message(QString::from("Capture cancelled"));
@@ -2147,6 +2164,32 @@ mod tests {
         assert_eq!(
             crate::window_edit::display_path(&root, &result.path),
             display
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_window_request_with_a_rectangle_still_isolates_the_named_window() {
+        let root = scratch("window-rect");
+        let runner = Fake::new(monitors(), clients(), active());
+        let helper = native_dir().join(crate::window::HELPER);
+        runner.push(
+            &helper.to_string_lossy(),
+            window_pam(80, 60, [9, 8, 7, 255]),
+        );
+        let mut request = request("window");
+        request.rect = Some(Rect::new(700, 100, 800, 600));
+        let result = runtime(&runner, &root).run(request, None).unwrap();
+        assert_eq!((result.width, result.height), (80, 60));
+        assert_eq!(result.rect, Some(Rect::new(700, 100, 800, 600)));
+        let seen = runner.seen();
+        assert!(
+            seen.iter()
+                .any(|spec| spec.program.ends_with(crate::window::HELPER))
+        );
+        assert!(
+            seen.iter()
+                .all(|spec| spec.program != "grim" && spec.program != "slurp")
         );
         let _ = std::fs::remove_dir_all(&root);
     }
