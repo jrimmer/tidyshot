@@ -15,6 +15,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the rendered result, a discard prompt on close and `.omnishot` project
   open/save. It opens from the preview, `tidyshot open`, annotate links and an
   after-capture annotate action, and follows the Omarchy text scale.
+- Window capture now copies the window's own surface through Hyprland's
+  toplevel-export protocol (`native/window-helper`), preserving alpha and
+  excluding overlap and the wallpaper instead of grabbing a desktop rectangle.
+- A fullscreen frozen-frame picker with accent highlighting, Shift to keep the
+  window's alpha, Escape and Tab cycling by focus order, with the keyboard
+  window list kept as the fallback.
+- The isolated window is framed with Hyprland's rounding, superellipse power
+  and padding, a drop shadow, and the Omarchy desktop wallpaper as an editable,
+  reopenable project.
 
 ## [0.1.1] - 2026-10-17
 
