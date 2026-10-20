@@ -1270,6 +1270,8 @@ pub struct CaptureRust {
     frozen: Option<PathBuf>,
     scroll: Option<crate::scroll_runtime::ScrollControl>,
     pending_action: Option<String>,
+    /// Ctrl was held when the window was chosen; copy after the capture.
+    pending_copy: bool,
 }
 
 impl Default for CaptureRust {
@@ -1301,6 +1303,7 @@ impl Default for CaptureRust {
             frozen: None,
             scroll: None,
             pending_action: None,
+            pending_copy: false,
         }
     }
 }
@@ -1650,7 +1653,11 @@ impl qobject::Capture {
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
-        self.as_mut().rust_mut().get_mut().cancel = cancel;
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.cancel = cancel;
+            state.pending_copy = force_copy;
+        }
         let qt_thread = self.qt_thread();
         self.as_mut().set_busy(true);
         self.as_mut()
@@ -1800,7 +1807,12 @@ impl qobject::Capture {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         self.as_mut().rust_mut().get_mut().cancel = cancel;
-        self.as_mut().rust_mut().get_mut().pending_action = action;
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.pending_action = action;
+            // A plain capture never carries a chooser modifier.
+            state.pending_copy = false;
+        }
         let qt_thread = self.qt_thread();
         self.as_mut().set_busy(true);
         self.as_mut().set_message(QString::from("Capturing…"));
@@ -1842,7 +1854,8 @@ impl qobject::Capture {
                     result.height,
                     result.screen,
                 );
-                self.as_mut().after_capture_action(&result.path);
+                self.as_mut()
+                    .after_capture_action(&result.path, result.display.as_deref());
                 self.as_mut().captured_signal(
                     &QString::from(path),
                     result.width as i32,
@@ -1865,7 +1878,8 @@ impl qobject::Capture {
                     result.height,
                     result.screen,
                 );
-                self.as_mut().after_capture_action(&result.path);
+                self.as_mut()
+                    .after_capture_action(&result.path, result.display.as_deref());
                 self.as_mut().captured_signal(
                     &QString::from(path),
                     result.width as i32,
@@ -1880,11 +1894,32 @@ impl qobject::Capture {
     ///
     /// An explicit `annotate` from a shortcut or URL opens the editor on the
     /// saved file; the preview is still published so the capture stays
-    /// reachable when the editor closes.
-    fn after_capture_action(mut self: Pin<&mut Self>, path: &std::path::Path) {
-        let action = self.as_mut().rust_mut().get_mut().pending_action.take();
+    /// reachable when the editor closes. Ctrl at selection time copies the
+    /// picture the preview shows, which for a window capture is the composed
+    /// frame, matching the source's `force_copy`.
+    // Ported from omnishot/app.py (finished_capture force_copy)
+    fn after_capture_action(
+        mut self: Pin<&mut Self>,
+        path: &std::path::Path,
+        display: Option<&std::path::Path>,
+    ) {
+        let (action, copy) = {
+            let state = self.as_mut().rust_mut().get_mut();
+            (
+                state.pending_action.take(),
+                std::mem::take(&mut state.pending_copy),
+            )
+        };
         if action.as_deref() == Some("annotate") {
             crate::editor_window::publish_open(path.to_path_buf());
+        }
+        let settings = crate::settings::stored_settings();
+        if let Some(shown) = forced_copy_source(&settings, copy, path, display)
+            && let Err(error) = crate::preview::copy_capture(&crate::commands::SystemRunner, shown)
+        {
+            self.as_mut().set_message(QString::from(format!(
+                "The capture was saved but could not be copied: {error}"
+            )));
         }
     }
 
@@ -1896,6 +1931,27 @@ impl qobject::Capture {
         self.as_mut().set_busy(false);
         self.as_mut().failed_signal(&QString::from(message));
     }
+}
+
+/// The file a Ctrl-forced copy takes, or none when nothing should be copied.
+///
+/// The picture the preview shows is what the user picked, so a composed window
+/// frame is copied rather than the raw saved capture. The source's
+/// `capture_ctrl_copy` setting can disable the modifier altogether.
+fn forced_copy_source<'a>(
+    settings: &std::collections::BTreeMap<String, Value>,
+    force_copy: bool,
+    capture: &'a Path,
+    display: Option<&'a Path>,
+) -> Option<&'a Path> {
+    if !force_copy
+        || !settings
+            .get("capture_ctrl_copy")
+            .is_none_or(Value::is_truthy)
+    {
+        return None;
+    }
+    Some(display.unwrap_or(capture))
 }
 
 #[cfg(test)]
@@ -2472,6 +2528,34 @@ mod tests {
         let window = runtime.active_window().unwrap().unwrap();
         assert_eq!(window.rect, Rect::new(10, 20, 600, 400));
         assert_eq!(window.label(), "code — Editor");
+    }
+
+    #[test]
+    fn a_ctrl_choice_copies_the_picture_the_preview_shows() {
+        let settings = std::collections::BTreeMap::new();
+        let capture = Path::new("/tmp/capture.png");
+        let display = Path::new("/tmp/composed.png");
+        assert_eq!(
+            forced_copy_source(&settings, true, capture, Some(display)),
+            Some(display)
+        );
+        assert_eq!(
+            forced_copy_source(&settings, true, capture, None),
+            Some(capture)
+        );
+        assert_eq!(
+            forced_copy_source(&settings, false, capture, Some(display)),
+            None
+        );
+        let disabled = std::collections::BTreeMap::from([(
+            "capture_ctrl_copy".to_owned(),
+            crate::json::Value::Bool(false),
+        )]);
+        assert_eq!(
+            forced_copy_source(&disabled, true, capture, Some(display)),
+            None,
+            "the source's setting can disable Ctrl-copy"
+        );
     }
 
     #[test]
