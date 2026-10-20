@@ -10,8 +10,11 @@ Cargo.lock.bak
 
 # Build outputs the plugin runtime keeps across updates. `omarchy plugin
 # validate` rejects them inside the checkout, so they are ignored here and
-# `scripts/setup.sh` mirrors the checkout without deleting them.
-/native/
+# `scripts/setup.sh` mirrors the checkout without deleting them. The helper
+# sources and protocol XML stay tracked: they are inputs, not build outputs.
+/native/*
+!/native/*.c
+!/native/*.xml
 /.venv/
 /backups/
 

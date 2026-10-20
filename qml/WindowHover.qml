@@ -49,8 +49,10 @@ Window {
         return result
     }
 
-    function localX(row) { return row.x - (frame ? frame.x : 0) }
-    function localY(row) { return row.y - (frame ? frame.y : 0) }
+    // The row rectangles are already local to this output's frame, so a
+    // second monitor's desktop origin is never subtracted twice.
+    function localX(row) { return row.x }
+    function localY(row) { return row.y }
 
     /// The row at a point in this window, honouring the focused-first order.
     function rowAt(px, py) {

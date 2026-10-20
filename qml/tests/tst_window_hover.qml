@@ -75,4 +75,13 @@ TestCase {
         hover.selectRow(0)
         compare(hover.currentTitle, "Editor")
     }
+
+    function test_a_second_output_hit_tests_its_own_local_rows() {
+        // Rust projects each row relative to its output, so a frame that does
+        // not start at the desktop origin must not shift the hit test again.
+        var second = Qt.createQmlObject('import ".."; WindowHover { visible: false; takeFocus: false; frame: ({ "index": 1, "name": "DP-2", "x": 1920, "y": 0, "w": 800, "h": 600, "url": "" }); rows: [ { "title": "Right", "app": "code", "x": 40, "y": 60, "w": 200, "h": 150, "monitor": 1 } ] }', host, "secondOutput")
+        compare(second.rowAt(50, 70), 0)
+        compare(second.rowAt(500, 500), -1)
+        second.destroy()
+    }
 }
