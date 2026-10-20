@@ -100,7 +100,7 @@ runtime caller; **Absent** = no implementation.
 | Video timeline | Source thumbnails, zoom, scroll, edit gestures | **Test only** | `timeline`, `timeline_thumbnails`, `video_splits`, `zoom_focus` are covered by tests and `tests/video_studio.rs`; no timeline UI. |
 | Video editor (5.0) | Trim/cut, smart zoom, cursor smoothing/style/size, camera/key editing | **Test only** | `studio::smart_zooms`, `video_motion`, `video_styles`, `video_camera` and `video_splits` have tests only. `video_motion` is the only cross-module caller, itself unreachable. |
 | Video editor (5.0) | Background, aspect, motion blur, hardware export | **Test only** | `studio::export_studio` is called only by `tests/video_studio.rs` (real ffmpeg export test); software x264 default and VAAPI opt-in are implemented there. No editor invokes it. |
-| Integration | Omarchy shell plugin, launcher, configurable shortcuts, local command API | **Partial** | The plugin (`manifest.json`, `plugin/BarWidget.qml`), setup/update/uninstall scripts, desktop entry, Hyprland bindings/window rules and the single-instance CLI/URL API all exist and are tested. But the widget's state channel depends on the missing `tidyshot-status.json`, most menu rows are inert, and only capture commands do anything after routing. `doctor`/`compat` work headless. |
+| Integration | Omarchy shell plugin, launcher, configurable shortcuts, local command API | **Partial** | The plugin (`manifest.json`, `plugin/BarWidget.qml`), setup/update/uninstall scripts, desktop entry, Hyprland bindings/window rules and the single-instance CLI/URL API all exist and are tested. The recording runtime writes `$XDG_RUNTIME_DIR/tidyshot-status.json` while a take runs, so the widget's recording timer and Stop/Pause rows are live during a take; most other menu rows are still inert, and only capture and recording commands do anything after routing. `doctor`/`compat` work headless. |
 | Preferences | Persistent settings/shortcuts, active Omarchy theme | **Absent** | `settings.rs` only reads `settings.json` (OCR keys, `hardware_video_decoding`); nothing writes it, no settings window, no shortcut editor. `settings` is routed and dropped. Theme accent is read only for the app icon (`ui_scale::accent_from` → `icon::refresh_installed`); `ui_scale` reflow is test only. |
 
 ## Upstream branches
@@ -109,7 +109,7 @@ runtime caller; **Absent** = no implementation.
 |---|---|---|
 | `pr/14` | Clean mirror degrades instead of blocking when Hyprland cannot hook | **Working**: `mirror.rs` caches an unavailable plugin, `capture_session` uses `start_best_effort`, and the aarch64 "Could not hook" case degrades in `MirrorRegistry::acquire`. `clean_capture.rs` itself is test only. |
 | `pr/15` | Software video preview decoding by default, hardware opt-in off Intel, explicit env wins | **Working**: `video_decoder::configure_preview_decoder` runs from `src/main.rs` before Qt, driven by `settings::stored_settings`. Covered by `tests/video_studio.rs`. |
-| `pr/16` | Install as an Omarchy plugin, widget setup/update/uninstall, bar state command | **Partial**: manifest, widget, `scripts/setup.sh`, release verification and tests exist; the widget's `state` channel has no producer because the app writes no runtime status file. |
+| `pr/16` | Install as an Omarchy plugin, widget setup/update/uninstall, bar state command | **Partial**: manifest, widget, `scripts/setup.sh`, release verification and tests exist; the widget's `state` channel reads `$XDG_RUNTIME_DIR/tidyshot-status.json`, which the recording runtime writes for the duration of a take and removes when it ends. |
 | `pr/17` | `omnishot doctor` and header discovery through compiler include paths | **Working**: `doctor`/`compat` are headless subcommands with `tests/doctor.rs`, including session skipping and include-path header lookup. |
 
 ## Top-10 prioritized gaps
@@ -148,10 +148,11 @@ means a production caller and a UI or CLI entry exist.
    restore, filmstrip, search, type filters, multi-select, delete, Trash,
    retention and import are absent; `history.rs` has no presentation layer.
    Video history (`video_history`) is likewise test only.
-7. **Settings are read-only and the bar widget has no state feed.** There is no
-   settings writer, no settings pages, no shortcut editor, and no producer for
-   `$XDG_RUNTIME_DIR/tidyshot-status.json`, so the widget's recording timer,
-   Stop and Pause rows cannot ever become active. Preferences currently affect
+7. **Settings are read-only and the bar widget's feed is recording-only.** There
+   is no settings writer, no settings pages and no shortcut editor. The widget's
+   `$XDG_RUNTIME_DIR/tidyshot-status.json` producer exists but only while a
+   recording runs, so its recording timer, Stop and Pause rows work during a
+   take while the rest of the bar state stays idle. Preferences currently affect
    only OCR defaults and video decode policy.
 8. **Window capture is a rectangle, not an isolated window.** The picker uses
    `hyprctl clients` and grim grabs the client rect. Transparency, wallpaper,
