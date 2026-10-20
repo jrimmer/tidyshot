@@ -298,6 +298,28 @@ fn recover_one<R: crate::commands::CommandRunner>(
         .and_then(|r| r.get("options"))
         .cloned()
         .unwrap_or(Value::Null);
+    // A GIF take converts its MP4 and then commits the sidecar. A crash between
+    // those steps leaves a playable GIF with no metadata; recover it from the
+    // converted file rather than reporting the take as lost.
+    if options.get("format").and_then(Value::as_str) == Some("gif") {
+        let gif = path.with_extension("gif");
+        if gif.is_file() && recovery::valid_video(runner, &gif) {
+            let mut metadata = workspace.metadata(&gif);
+            if let Value::Object(entries) = &mut metadata {
+                entries.insert("kind".to_owned(), Value::String("gif".to_owned()));
+                entries.insert("created".to_owned(), Value::Number(now_seconds()));
+                entries.insert("options".to_owned(), options.clone());
+            }
+            let _ = workspace.atomic_json(&gif, &metadata);
+            outcome.recovered.push((
+                gif.display().to_string(),
+                "TidyShot closed unexpectedly. The recorded GIF has been recovered.".to_owned(),
+            ));
+            let _ = fs::remove_file(&marker);
+            let _ = fs::remove_file(lock_path);
+            return Ok(());
+        }
+    }
     let message = "TidyShot closed unexpectedly. The recorded video has been recovered.";
     match recovery::recover(workspace, runner, path, &options, message, true) {
         Ok(Some(saved)) => {
@@ -520,6 +542,34 @@ mod tests {
         assert_eq!(outcome.recovered[0].0, good.display().to_string());
         assert!(outcome.failed.len() == 1);
         assert!(!good_marker.exists());
+    }
+
+    #[test]
+    fn a_converted_gif_without_its_sidecar_is_recovered() {
+        let workspace = scratch("gif-crash");
+        let path = workspace.captures().join("take.mp4");
+        // The conversion committed the GIF and the app died before the sidecar.
+        let gif = path.with_extension("gif");
+        fs::write(&gif, b"GIF89a").unwrap();
+        let marker = swap_suffix(&path, MARKER_SUFFIX);
+        fs::write(
+            &marker,
+            b"{\"phase\":\"recording\",\"options\":{\"format\":\"gif\"}}",
+        )
+        .unwrap();
+
+        let runner = StubRunner {
+            valid: true,
+            seen: Mutex::new(Vec::new()),
+        };
+        let outcome =
+            recover_interrupted(&workspace, &runner, std::slice::from_ref(&marker)).unwrap();
+        assert_eq!(outcome.recovered.len(), 1);
+        assert_eq!(outcome.recovered[0].0, gif.display().to_string());
+        assert!(!marker.exists());
+        let sidecar = workspace.metadata(&gif);
+        assert_eq!(sidecar.get("kind").and_then(Value::as_str), Some("gif"));
+        assert!(sidecar.get("created").is_some());
     }
 
     #[test]
