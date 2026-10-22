@@ -325,7 +325,11 @@ static VIEW: std::sync::Mutex<Option<HistoryView>> = std::sync::Mutex::new(None)
 static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::HistoryApi>> =
     std::sync::OnceLock::new();
 
-fn with_view<T>(f: impl FnOnce(&mut HistoryView) -> T) -> T {
+/// Run `f` against the shared history view, creating it on first use.
+///
+/// This is the same view the QML window drives, so a test or another command
+/// can inspect and act on the visible history without a Qt object.
+pub fn view<T>(f: impl FnOnce(&mut HistoryView) -> T) -> T {
     let mut view = VIEW.lock().expect("history view poisoned");
     let view = view.get_or_insert_with(|| HistoryView::new(crate::settings::data_dir()));
     f(view)
@@ -333,7 +337,7 @@ fn with_view<T>(f: impl FnOnce(&mut HistoryView) -> T) -> T {
 
 /// Open the history window, creating its view if the GUI has not yet.
 pub fn request_open() {
-    let snapshot = with_view(|view| {
+    let snapshot = view(|view| {
         view.show();
         Snapshot::of(view)
     });
@@ -380,22 +384,22 @@ static PENDING: std::sync::Mutex<Option<Snapshot>> = std::sync::Mutex::new(None)
 
 /// Open the selected capture, or the newest one, in the annotate editor.
 pub fn annotate_selected() -> Option<PathBuf> {
-    let path = with_view(|view| view.open_target())?;
+    let path = view(|view| view.open_target())?;
     crate::editor_window::publish_open(path.clone());
     Some(path)
 }
 
 /// Show the selected capture, or the newest one, in the corner preview.
 pub fn restore_selected() -> Option<PathBuf> {
-    let path = with_view(|view| view.open_target())?;
+    let path = view(|view| view.open_target())?;
     crate::preview::publish_file(path.clone());
     Some(path)
 }
 
 /// Pin the selected capture, or the newest one.
 pub fn pin_selected() -> Result<String, String> {
-    let path = with_view(|view| view.open_target())
-        .ok_or_else(|| "There is no capture to pin".to_owned())?;
+    let path =
+        view(|view| view.open_target()).ok_or_else(|| "There is no capture to pin".to_owned())?;
     crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
 }
 
@@ -532,7 +536,7 @@ impl qobject::HistoryApi {
         // A window that was opened by a command before QML loaded reloads its
         // listing here so the filmstrip is never empty on first show.
         let snapshot = PENDING.lock().expect("history queue poisoned").take();
-        let snapshot = snapshot.unwrap_or_else(|| with_view(|view| Snapshot::of(view)));
+        let snapshot = snapshot.unwrap_or_else(|| view(|view| Snapshot::of(view)));
         self.as_mut().apply(snapshot);
     }
 
@@ -627,8 +631,8 @@ impl qobject::HistoryApi {
 
     /// Run `f` against the shared view, then push the new state to QML.
     fn change<T>(mut self: Pin<&mut Self>, f: impl FnOnce(&mut HistoryView) -> T) -> T {
-        let result = with_view(f);
-        let snapshot = with_view(|view| Snapshot::of(view));
+        let result = view(f);
+        let snapshot = view(|view| Snapshot::of(view));
         self.as_mut().apply(snapshot);
         result
     }

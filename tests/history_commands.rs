@@ -181,3 +181,112 @@ fn the_history_route_opens_the_window() {
     let message = perform_route(Route::History).unwrap();
     assert!(!message.is_empty());
 }
+
+#[test]
+fn every_routed_command_reaches_a_handler() {
+    // A handler either performs the action or reports why it cannot; none of
+    // these returns "no handler" or an empty success.
+    let dir = scratch("commands");
+    let path = capture(&dir, "shot.png");
+    let commands = [
+        Command::Menu,
+        Command::Edit(path.clone()),
+        Command::EditChooser,
+        Command::Pin(path.clone()),
+        Command::PinChooser,
+        Command::Overlay(path.clone()),
+        Command::Ocr {
+            path: path.clone(),
+            linebreaks: None,
+        },
+        Command::History,
+        Command::Restore,
+        Command::Last,
+        Command::LastScreenshot,
+        Command::SaveAll,
+        Command::CloseAll,
+        Command::TogglePins,
+        Command::ClosePins,
+        Command::UnlockPins,
+        Command::Settings {
+            tab: "general".to_owned(),
+        },
+        Command::Record {
+            geometry: None,
+            coordinates: None,
+        },
+        Command::Stop,
+        Command::Pause,
+        Command::Restart,
+        Command::ScrollDone,
+        Command::Quit,
+    ];
+    for command in commands {
+        match perform_command(command.clone()) {
+            Ok(message) => assert!(
+                !message.is_empty() || matches!(command, Command::Menu),
+                "{command:?} succeeded with no message"
+            ),
+            Err(message) => assert!(!message.is_empty(), "{command:?} failed silently"),
+        }
+    }
+    // A capture and an unknown word are refused with a message, never dropped.
+    for command in [
+        Command::Capture {
+            command: "area".to_owned(),
+            geometry: None,
+            coordinates: None,
+            action: None,
+            delay: None,
+            linebreaks: None,
+            start: None,
+            autoscroll: None,
+        },
+        Command::Unknown("frobnicate".to_owned()),
+    ] {
+        let message = perform_command(command.clone()).unwrap_err();
+        assert!(!message.is_empty(), "{command:?} failed silently");
+    }
+}
+
+#[test]
+fn opening_the_history_window_shows_the_saved_captures() {
+    let root = scratch("open-window");
+    let path = capture(&root, "visible.png");
+    history::write(&root, &[HistoryRow::screenshot(&path, 4, 3, None)]).unwrap();
+    // The shared view the GUI's HistoryApi drives can be pointed at any store;
+    // opening it loads the rows the filmstrip renders.
+    let mut view = HistoryView::new(&root);
+    view.show();
+    assert!(view.open());
+    let rows = view.filmstrip();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "visible.png");
+    assert!(rows[0].to_value().get("source").is_some());
+    assert_eq!(view.open_target(), Some(path));
+}
+
+#[test]
+fn search_filters_the_listing_before_delete() {
+    let root = scratch("search-delete");
+    let keep = capture(&root, "keep.png");
+    let drop = capture(&root, "drop-me.png");
+    history::write(
+        &root,
+        &[
+            HistoryRow::screenshot(&keep, 4, 3, None),
+            HistoryRow::screenshot(&drop, 4, 3, None),
+        ],
+    )
+    .unwrap();
+    let mut view = HistoryView::new(&root);
+    view.show();
+    view.set_query("drop");
+    assert_eq!(view.filmstrip().len(), 1);
+    view.select_cursor(false);
+    assert_eq!(view.delete_selected(), 1);
+    assert!(!drop.exists(), "the searched capture was trashed");
+    assert!(keep.exists(), "the filtered-out capture was kept");
+    view.set_query("");
+    assert_eq!(view.filmstrip().len(), 1);
+}
