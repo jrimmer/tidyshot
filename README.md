@@ -447,8 +447,12 @@ preview overlay with synthetic events offscreen, and
 `qml/tests/tst_preview_window.qml` drives the frameless preview window, its
 key bindings and its action forwarding, and
 `qml/tests/tst_editor_toolbar.qml` drives the editor toolbar,
-`qml/tests/tst_settings_window.qml` drives the settings pages, and the overlay
-and preview suites cover the export menu, Open, Save All and Close All.
+`qml/tests/tst_settings_window.qml` drives the settings pages,
+`qml/tests/tst_history_window.qml` drives the history filmstrip, selection,
+search and delete signals, `qml/tests/tst_pin_window.qml` drives a pinned
+capture, and the overlay and preview suites cover the export menu, Open, Save
+All and Close All. `tests/history_commands.rs` asserts every routed command and
+menu row reaches a handler and that history delete moves a capture to the trash.
 
 ## License
 
