@@ -1525,7 +1525,7 @@ impl qobject::Capture {
             "pause" => crate::recording_runtime::request_pause(),
             "restart" => crate::recording_runtime::request_restart(),
             "settings" => crate::settings_page::publish_open("general"),
-            "save-all" => crate::preview::publish_save(),
+            "save-all" => crate::preview::publish_save_all(),
             "close-all" => crate::preview::publish_dismiss(),
             "restore" => {
                 if let Some(path) = crate::history::newest_path(&crate::settings::data_dir()) {
@@ -1794,7 +1794,7 @@ impl qobject::Capture {
                 }
             }
             Command::CloseAll => crate::preview::publish_dismiss(),
-            Command::SaveAll => crate::preview::publish_save(),
+            Command::SaveAll => crate::preview::publish_save_all(),
             Command::Record { geometry, .. } => {
                 crate::recording_runtime::request_start(geometry);
             }

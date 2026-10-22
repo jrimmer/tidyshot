@@ -524,6 +524,16 @@ pub fn publish_save() {
     queue_action(PendingAction::Save);
 }
 
+/// Save every retained preview, the menu's Save All row.
+pub fn publish_save_all() {
+    if let Some(thread) = BOUND.get() {
+        let _ = thread.queue(|mut preview| preview.as_mut().save_all_previews());
+    } else {
+        // No window has bound yet, so there is nothing retained to save; the
+        // next capture is saved by its own preview.
+    }
+}
+
 /// Close the visible preview.
 pub fn publish_dismiss() {
     queue_action(PendingAction::Dismiss);
@@ -981,13 +991,16 @@ impl qobject::Preview {
     }
 
     /// The `text/uri-list` body a drag-out carries.
+    ///
+    /// The same [`crate::drag::DragSpec`] the drag tests build is what the
+    /// production drag path hands to QML, so the tested structure is used.
     pub fn drag_uri(self: Pin<&mut Self>) -> QString {
-        let path = self.as_ref().window.as_ref().map_or_else(
-            || PathBuf::from(self.path().to_string()),
-            |window| window.path().to_path_buf(),
+        let (path, close_after_drag) = self.as_ref().window.as_ref().map_or_else(
+            || (PathBuf::from(self.path().to_string()), true),
+            |window| (window.path().to_path_buf(), window.close_after_drag()),
         );
-        let (_, body) = crate::drag::drag_payload(&path);
-        QString::from(body)
+        let spec = crate::drag::drag_spec(path, close_after_drag);
+        QString::from(spec.body)
     }
 
     /// Export the capture as `format` beside itself.
@@ -1102,6 +1115,37 @@ mod tests {
             actions,
             [PendingAction::Dismiss, PendingAction::Save],
             "an action that arrives before the window is bound is replayed"
+        );
+    }
+
+    #[test]
+    fn save_all_keeps_every_retained_capture_distinct() {
+        let mut rust = PreviewRust {
+            retained: vec![PathBuf::from("/tmp/one.png")],
+            ..PreviewRust::default()
+        };
+        let show = |rust: &mut PreviewRust, path: &str| {
+            rust.apply(Published {
+                path: PathBuf::from(path),
+                display: None,
+                width: 4,
+                height: 3,
+                screen: None,
+                standalone: false,
+            });
+        };
+        show(&mut rust, "/tmp/one.png");
+        show(&mut rust, "/tmp/two.png");
+        let paths = rust.retained_paths();
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/tmp/two.png"), PathBuf::from("/tmp/one.png"),]
+        );
+        rust.retained.clear();
+        assert_eq!(
+            rust.retained_paths(),
+            vec![PathBuf::from("/tmp/two.png")],
+            "the visible preview is always saved"
         );
     }
 

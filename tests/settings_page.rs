@@ -342,3 +342,29 @@ fn the_annotation_page_defaults_reach_the_editor() {
     assert_eq!(interaction.arrow_style(), "line");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_settings_menu_row_and_command_open_the_window() {
+    // The Settings row is implemented and dispatches the same command word
+    // `tidyshot settings` routes to, so both reach the settings window.
+    let row = tidyshot::menu::find("settings").expect("settings row");
+    assert!(row.implemented());
+    assert_eq!(
+        tidyshot::menu::invoke(row),
+        tidyshot::menu::Invocation::App("settings")
+    );
+    let args = tidyshot::cli::parse_args(["settings"]).unwrap();
+    assert_eq!(
+        tidyshot::app::route(&args).unwrap(),
+        tidyshot::app::Command::Settings {
+            tab: "general".to_owned()
+        }
+    );
+    // Save All is a real action rather than a disabled row.
+    let save_all = tidyshot::menu::find("save-all").expect("save-all row");
+    assert!(save_all.implemented());
+    assert_eq!(
+        tidyshot::app::route(&tidyshot::cli::parse_args(["save-all"]).unwrap()).unwrap(),
+        tidyshot::app::Command::SaveAll
+    );
+}
