@@ -792,6 +792,10 @@ impl qobject::Preview {
     pub fn dismiss(mut self: Pin<&mut Self>) {
         if let Some(window) = self.as_mut().rust_mut().get_mut().window.as_mut() {
             window.dismiss();
+            // The window is hidden, so its dynamic rule has done its work;
+            // dropping it here keeps the compositor free of a stale position
+            // after the app exits as well.
+            let _ = crate::preview_placement::remove(&crate::commands::SystemRunner);
         }
         // Reset the delay as well: the QML timer stops being eligible once
         // the window is hidden, so a later save must not fire for it.
