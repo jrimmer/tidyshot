@@ -379,6 +379,7 @@ ApplicationWindow {
             var rows = []
             for (var r = 0; r < HistoryApi.rows.length; ++r)
                 rows.push(JSON.parse(HistoryApi.rows[r]))
+            historyContent.visible = HistoryApi.open
             historyContent.rows = rows
             historyContent.filter = HistoryApi.filter
             historyContent.query = HistoryApi.query
