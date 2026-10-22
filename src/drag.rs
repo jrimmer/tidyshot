@@ -6,6 +6,59 @@
 //! preload helper brackets every drag so a drop is definitive. When the
 //! helper is absent the Qt result is the only signal, exactly as upstream.
 
+/// The file URL a drag carries.
+///
+/// A Wayland drag offers the same `text/uri-list` body as a clipboard file
+/// copy, so a receiving application accepts a drop it also accepts as a paste.
+#[must_use]
+pub fn drag_urls(paths: &[std::path::PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| crate::overlay::local_file_url(path))
+        .collect()
+}
+
+/// The MIME payload a drag exports for one file.
+#[must_use]
+pub fn drag_payload(path: &std::path::Path) -> (String, String) {
+    (
+        "text/uri-list".to_owned(),
+        format!("{}\r\n", crate::overlay::local_file_url(path)),
+    )
+}
+
+/// One drag-out specification, ready for QML's `Drag` attached properties.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DragSpec {
+    /// The local file the drag hands to the receiver.
+    pub path: std::path::PathBuf,
+    /// The `file://` URL QML shows as the drag image source.
+    pub url: String,
+    /// The `text/uri-list` body.
+    pub body: String,
+    /// Hold Alt to keep the preview open after an accepted drop.
+    pub keep_modifier: &'static str,
+    /// Close the preview after an accepted drop when settings allow it.
+    pub close_after_drag: bool,
+}
+
+/// Build the drag specification for a file.
+#[must_use]
+pub fn drag_spec(
+    path: impl Into<std::path::PathBuf>,
+    close_after_drag: bool,
+) -> DragSpec {
+    let path = path.into();
+    let url = crate::overlay::local_file_url(&path);
+    DragSpec {
+        body: format!("{url}\r\n"),
+        url,
+        path,
+        keep_modifier: "Alt",
+        close_after_drag,
+    }
+}
+
 /// A drag bracket reported by the preload helper.
 #[derive(Debug, Default)]
 pub struct DragToken {
@@ -101,6 +154,27 @@ mod tests {
     fn without_the_helper_the_qt_action_decides() {
         assert!(drag_accepted(false, false));
         assert!(!drag_accepted(false, true));
+    }
+
+    #[test]
+    fn a_drag_spec_carries_the_file_url_and_the_close_rule() {
+        let spec = drag_spec("/tmp/my shot.png", true);
+        assert_eq!(spec.path, std::path::PathBuf::from("/tmp/my shot.png"));
+        assert_eq!(spec.url, "file:///tmp/my%20shot.png");
+        assert_eq!(spec.body, "file:///tmp/my%20shot.png\r\n");
+        assert_eq!(spec.keep_modifier, "Alt");
+        assert!(spec.close_after_drag);
+        assert!(!drag_spec("/tmp/a.png", false).close_after_drag);
+        let (mime, body) = drag_payload(std::path::Path::new("/tmp/a b.png"));
+        assert_eq!(mime, "text/uri-list");
+        assert_eq!(body, "file:///tmp/a%20b.png\r\n");
+        assert_eq!(
+            drag_urls(&[
+                std::path::PathBuf::from("/tmp/a.png"),
+                std::path::PathBuf::from("/tmp/b.webp"),
+            ]),
+            vec!["file:///tmp/a.png", "file:///tmp/b.webp"]
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub mod editor_image;
 pub mod editor_ui;
 pub mod editor_window;
 pub mod effects;
+pub mod export;
 pub mod filenames;
 pub mod geometry;
 pub mod gif;

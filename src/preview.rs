@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::commands::{CommandError, CommandRunner, clipboard_spec};
+use crate::commands::{CommandError, CommandRunner};
 use crate::json::Value;
 use crate::overlay::{Corner, PreviewSettings, ScreenRect, corner_position, is_video};
 
@@ -307,15 +307,87 @@ fn fallback_screen() -> ScreenRect {
 }
 
 /// Copy a capture or recording to the clipboard.
+///
+/// An image is copied as its own encoded format (a WebP export stays WebP);
+/// a recording is copied as a file list, which is what a receiver can paste.
+// Ported from omnishot/backend.py (copy_image)
 pub fn copy_capture<R: CommandRunner>(runner: &R, path: &Path) -> Result<(), PreviewError> {
     if is_video(path) {
-        let data = format!("file://{}\n", path.display()).into_bytes();
-        runner.run(&clipboard_spec("text/uri-list", data))?;
+        runner.run(&crate::clipboard::files_spec(&[path.to_path_buf()]))?;
     } else {
+        let format = crate::export::ExportFormat::from_path(path);
         let bytes = std::fs::read(path)?;
-        runner.run(&clipboard_spec("image/png", bytes))?;
+        runner.run(&crate::clipboard::image_spec(format, bytes))?;
     }
     Ok(())
+}
+
+/// Copy one or more files to the clipboard as a file list.
+pub fn copy_files<R: CommandRunner>(runner: &R, paths: &[PathBuf]) -> Result<(), PreviewError> {
+    runner.run(&crate::clipboard::files_spec(paths))?;
+    Ok(())
+}
+
+/// Copy plain text to the clipboard.
+pub fn copy_text<R: CommandRunner>(runner: &R, text: &str) -> Result<(), PreviewError> {
+    runner.run(&crate::clipboard::text_spec(text))?;
+    Ok(())
+}
+
+/// Export a capture in another format beside itself.
+///
+/// The saved capture is decoded once, encoded with the configured quality and
+/// committed atomically. The returned path is the new file, which never
+/// replaces an existing export.
+pub fn export_capture<R: CommandRunner>(
+    runner: &R,
+    path: &Path,
+    format: crate::export::ExportFormat,
+) -> Result<PathBuf, PreviewError> {
+    let image = load_image(runner, path)?;
+    let settings = crate::settings::stored_settings();
+    let options = crate::export::ExportOptions::from_settings(&settings, format);
+    let destination = crate::export::export_path(path, format);
+    crate::export::write(runner, &image, &destination, options)
+        .map_err(|error| PreviewError::Image(error.to_string()))?;
+    Ok(destination)
+}
+
+/// Decode any supported image file, including the lossy export formats.
+pub fn load_image<R: CommandRunner>(runner: &R, path: &Path) -> Result<crate::pngzip::Image, PreviewError> {
+    let bytes = std::fs::read(path)?;
+    let format = crate::export::ExportFormat::from_path(path);
+    crate::export::decode(runner, &bytes, format)
+        .map_err(|error| PreviewError::Image(error.to_string()))
+}
+
+/// Open a capture in the desktop's default application.
+pub fn open_capture<R: CommandRunner>(runner: &R, path: &Path) -> Result<(), PreviewError> {
+    crate::export::open_external(runner, path)
+        .map_err(|error| PreviewError::Image(error.to_string()))
+}
+
+/// The drag specification for a preview.
+#[must_use]
+pub fn drag_spec(preview: &PreviewWindow) -> crate::drag::DragSpec {
+    crate::drag::drag_spec(
+        preview.path().to_path_buf(),
+        preview.close_after_drag(),
+    )
+}
+
+/// Save every visible preview back through the atomic store.
+///
+/// The app keeps one preview window at a time, so this saves that one and
+/// reports how many files it committed; a failed save is surfaced, never
+/// swallowed.
+pub fn save_all(paths: &[PathBuf]) -> Result<usize, PreviewError> {
+    let mut saved = 0;
+    for path in paths {
+        save_capture(path)?;
+        saved += 1;
+    }
+    Ok(saved)
 }
 
 /// Save a preview back through the atomic store.
@@ -542,6 +614,21 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "collapseTo"]
         fn collapse(self: Pin<&mut Self>, collapsed: bool);
+
+        /// Export the capture as `format` beside itself and show it.
+        #[qinvokable]
+        #[cxx_name = "exportAs"]
+        fn export_as(self: Pin<&mut Self>, format: &QString);
+
+        /// Open the capture in the desktop's default application.
+        #[qinvokable]
+        #[cxx_name = "openExternal"]
+        fn open_external(self: Pin<&mut Self>);
+
+        /// The `text/uri-list` body a drag-out carries.
+        #[qinvokable]
+        #[cxx_name = "dragUri"]
+        fn drag_uri(self: Pin<&mut Self>) -> QString;
     }
 
     impl cxx_qt::Threading for Preview {}
@@ -649,6 +736,10 @@ impl PreviewRust {
         self.standalone = published.standalone;
         self.open = !window.dismissed();
         self.window = Some(window);
+    }
+
+    fn set_message(&mut self, message: &str) {
+        self.message = QString::from(message);
     }
 
     fn action_error(&mut self, result: Result<(), PreviewError>, done: &str) {
@@ -816,6 +907,53 @@ impl qobject::Preview {
         self.as_mut().set_auto_close_ms(0);
         self.as_mut().set_open(false);
         self.as_mut().set_message(QString::from(""));
+    }
+
+    /// The `text/uri-list` body a drag-out carries.
+    pub fn drag_uri(self: Pin<&mut Self>) -> QString {
+        let path = self.as_ref().window.as_ref().map_or_else(
+            || PathBuf::from(self.path().to_string()),
+            |window| window.path().to_path_buf(),
+        );
+        let (_, body) = crate::drag::drag_payload(&path);
+        QString::from(body)
+    }
+
+    /// Export the capture as `format` beside itself.
+    pub fn export_as(mut self: Pin<&mut Self>, format: &QString) {
+        let Some(format) = crate::export::ExportFormat::parse(&format.to_string()) else {
+            self.as_mut().rust_mut().get_mut().set_message("Unknown export format");
+            self.as_mut().sync();
+            return;
+        };
+        let path = self.window.as_ref().map_or_else(
+            || PathBuf::from(self.path().to_string()),
+            |window| window.path().to_path_buf(),
+        );
+        let result = export_capture(&crate::commands::SystemRunner, &path, format).map(|exported| {
+            self.as_mut()
+                .rust_mut()
+                .get_mut()
+                .set_message(&format!("Exported {}", exported.display()));
+        });
+        if let Err(error) = result {
+            self.as_mut().rust_mut().get_mut().set_message(&error.to_string());
+        }
+        self.as_mut().sync();
+    }
+
+    /// Open the capture in the desktop's default application.
+    pub fn open_external(mut self: Pin<&mut Self>) {
+        let path = self.window.as_ref().map_or_else(
+            || PathBuf::from(self.path().to_string()),
+            |window| window.path().to_path_buf(),
+        );
+        let result = open_capture(&crate::commands::SystemRunner, &path);
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .action_error(result, "Opened in the default application");
+        self.as_mut().sync();
     }
 
     /// Collapse or restore the preview body.

@@ -171,6 +171,52 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The clipboard representation for an image of `format`.
+///
+/// A copied JPEG stays a JPEG so the receiver gets the same bytes the user
+/// exported, and a format with no clipboard MIME falls back to PNG.
+#[must_use]
+pub fn image_mime(format: crate::export::ExportFormat) -> &'static str {
+    match format {
+        crate::export::ExportFormat::Jpeg => "image/jpeg",
+        crate::export::ExportFormat::Webp => "image/webp",
+        crate::export::ExportFormat::Heic => "image/heic",
+        crate::export::ExportFormat::Png => "image/png",
+    }
+}
+
+/// Build the `wl-copy` invocation for an image payload.
+// Ported from omnishot/backend.py (copy_image)
+#[must_use]
+pub fn image_spec(format: crate::export::ExportFormat, bytes: Vec<u8>) -> crate::commands::CommandSpec {
+    crate::commands::clipboard_spec(image_mime(format), bytes)
+}
+
+/// Build the `wl-copy` invocation for a file list.
+///
+/// A Wayland file drag and a file copy share the `text/uri-list` body, so a
+/// receiver pastes the same file either way.
+#[must_use]
+pub fn files_spec(paths: &[std::path::PathBuf]) -> crate::commands::CommandSpec {
+    crate::commands::clipboard_spec("text/uri-list", file_list(paths))
+}
+
+/// Build the `wl-copy` invocation for recognized or plain text.
+#[must_use]
+pub fn text_spec(text: &str) -> crate::commands::CommandSpec {
+    crate::commands::clipboard_spec("text/plain;charset=utf-8", text.as_bytes().to_vec())
+}
+
+/// The `text/uri-list` body for a set of local files.
+#[must_use]
+pub fn file_list(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    let mut body = String::new();
+    for path in paths {
+        body.push_str(&format!("file://{}\r\n", path.display()));
+    }
+    body.into_bytes()
+}
+
 /// The clipboard representations `read_content` prefers, in order.
 #[must_use]
 pub fn preference_order(annotations: bool) -> Vec<&'static str> {
@@ -284,6 +330,33 @@ mod tests {
         assert_eq!(preference_order(true)[0], ANNOTATION_MIME);
         assert_eq!(preference_order(false)[0], "text/uri-list");
         assert_eq!(preference_order(true).last(), Some(&"image/tiff"));
+    }
+
+    #[test]
+    fn a_clipboard_spec_is_built_from_the_payload_format() {
+        // Ported from omnishot/tests/test_clipboard.py (copy image per format)
+        for (format, mime) in [
+            (crate::export::ExportFormat::Png, "image/png"),
+            (crate::export::ExportFormat::Jpeg, "image/jpeg"),
+            (crate::export::ExportFormat::Webp, "image/webp"),
+            (crate::export::ExportFormat::Heic, "image/heic"),
+        ] {
+            let spec = image_spec(format, vec![1, 2, 3]);
+            assert_eq!(spec.program, "wl-copy");
+            assert_eq!(spec.args, ["--type", mime]);
+            assert_eq!(spec.stdin.as_deref(), Some([1, 2, 3].as_slice()));
+            // The owner inherits our pipes, so stderr must not be a pipe.
+            assert!(spec.stderr_to_file);
+        }
+        let files = files_spec(&[PathBuf::from("/tmp/a.png")]);
+        assert_eq!(files.args, ["--type", "text/uri-list"]);
+        assert_eq!(
+            files.stdin.as_deref(),
+            Some(b"file:///tmp/a.png\r\n".as_slice())
+        );
+        let text = text_spec("hello");
+        assert_eq!(text.args, ["--type", "text/plain;charset=utf-8"]);
+        assert_eq!(text.stdin.as_deref(), Some(b"hello".as_slice()));
     }
 
     #[test]

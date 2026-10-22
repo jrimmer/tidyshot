@@ -35,6 +35,10 @@ Rectangle {
     property int overlaySize: 300
     /// Show the Move to Trash control for an automatically saved capture.
     property bool trashVisible: false
+    /// The export formats offered next to Save.
+    property var exportFormats: ["png", "jpeg", "webp", "heic"]
+    /// The `text/uri-list` body a drag-out carries, from the Rust side.
+    property string dragUri: ""
 
     /// Open the annotate editor (or the video editor).
     signal activate()
@@ -43,6 +47,10 @@ Rectangle {
     signal pinRequested()
     signal saveAllRequested()
     signal closeAllRequested()
+    /// A format id from the export menu.
+    signal exportRequested(string format)
+    /// Open the file in the desktop's default application.
+    signal openExternalRequested()
     signal trashRequested()
     /// The preview closed by any path; carries the file path.
     signal dismissed()
@@ -129,7 +137,10 @@ Rectangle {
             Drag.active: dragArea.drag.active
             Drag.hotSpot.x: 10
             Drag.hotSpot.y: 10
-            Drag.mimeData: { "text/uri-list": preview.contentUrl }
+            // A drag offers the same file list a paste does; the Rust side
+            // builds the URL so an unusual filename is percent-encoded once.
+            Drag.mimeData: { "text/uri-list": preview.dragUri !== ""
+                ? preview.dragUri : preview.contentUrl }
             // A Wayland receiver can accept a drop while Qt reports a
             // cancelled drag, so the drop action alone is not definitive.
             // Every action other than Ignore counts as accepted here.
@@ -192,6 +203,41 @@ Rectangle {
                 visible: !preview.video
                 text: "Pin"
                 onClicked: preview.pinRequested()
+            }
+            Button {
+                objectName: "exportButton"
+                text: "Export"
+                onClicked: exportMenu.open()
+            }
+            Button {
+                objectName: "openButton"
+                text: "Open"
+                onClicked: preview.openExternalRequested()
+            }
+        }
+
+        Menu {
+            id: exportMenu
+            objectName: "exportMenu"
+            MenuItem {
+                objectName: "exportPng"
+                text: "PNG"
+                onTriggered: preview.exportRequested("png")
+            }
+            MenuItem {
+                objectName: "exportJpeg"
+                text: "JPEG"
+                onTriggered: preview.exportRequested("jpeg")
+            }
+            MenuItem {
+                objectName: "exportWebp"
+                text: "WebP"
+                onTriggered: preview.exportRequested("webp")
+            }
+            MenuItem {
+                objectName: "exportHeic"
+                text: "HEIC"
+                onTriggered: preview.exportRequested("heic")
             }
         }
     }
