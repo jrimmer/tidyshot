@@ -342,6 +342,8 @@ ApplicationWindow {
         id: settingsWindow
         transientParent: null
         visible: SettingsApi.open
+        // The model is a property binding, so QML only re-parses the document
+        // when the singleton's notification fires, not on a polling tick.
         modelJson: SettingsApi.modelJson
         onValueChosen: function (key, jsonValue) {
             SettingsApi.setValue(key, jsonValue)
@@ -354,19 +356,15 @@ ApplicationWindow {
         onClosed: SettingsApi.close()
     }
 
-    // The settings singleton is fed from a short timer for the same reason as
-    // the other windows in this build: cxx-qt property notifications do not
-    // reach QML bindings here, so the window reads the model directly.
+    // cxx-qt property notifications do not reach every QML binding in this
+    // build, so the window's visibility is still polled; the model itself is
+    // bound above rather than copied on each tick.
     Timer {
         id: settingsSync
         interval: 60
         repeat: true
         running: true
-        onTriggered: {
-            settingsWindow.visible = SettingsApi.open
-            if (settingsWindow.modelJson !== SettingsApi.modelJson)
-                settingsWindow.modelJson = SettingsApi.modelJson
-        }
+        onTriggered: settingsWindow.visible = SettingsApi.open
     }
 
     TextResultDialog {
