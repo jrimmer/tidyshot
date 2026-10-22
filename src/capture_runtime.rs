@@ -181,6 +181,27 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         native: impl Into<PathBuf>,
         root: impl Into<PathBuf>,
     ) -> Self {
+        Self::with_settings(
+            runner,
+            mirror,
+            native,
+            root,
+            &crate::settings::stored_settings(),
+        )
+    }
+
+    /// Create a runtime whose delay and filename pattern come from `settings`.
+    ///
+    /// The settings file is read once per capture, so a preference written in
+    /// the settings window applies to the next capture without a restart.
+    #[must_use]
+    pub fn with_settings(
+        runner: &'a R,
+        mirror: &'a MirrorRegistry,
+        native: impl Into<PathBuf>,
+        root: impl Into<PathBuf>,
+        settings: &std::collections::BTreeMap<String, Value>,
+    ) -> Self {
         Self {
             runner,
             mirror,
@@ -190,8 +211,8 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
                 cursor: false,
                 freeze: true,
             },
-            filename_format: crate::filenames::DEFAULT_FORMAT.to_owned(),
-            default_delay: 3,
+            filename_format: crate::settings_page::filename_format(settings),
+            default_delay: crate::settings_page::capture_delay(settings),
         }
     }
 
@@ -1503,6 +1524,14 @@ impl qobject::Capture {
             "stop" => crate::recording_runtime::request_stop(),
             "pause" => crate::recording_runtime::request_pause(),
             "restart" => crate::recording_runtime::request_restart(),
+            "settings" => crate::settings_page::publish_open("general"),
+            "save-all" => crate::preview::publish_save(),
+            "close-all" => crate::preview::publish_dismiss(),
+            "restore" => {
+                if let Some(path) = crate::history::newest_path(&crate::settings::data_dir()) {
+                    crate::preview::publish_file(path);
+                }
+            }
             "ocr" => return false,
             _ => return false,
         }
@@ -1745,7 +1774,12 @@ impl qobject::Capture {
                     return;
                 }
                 self.as_mut().start_command(
-                    CaptureRequest::resolve(&command, geometry.as_deref(), delay, 3),
+                    CaptureRequest::resolve(
+                        &command,
+                        geometry.as_deref(),
+                        delay,
+                        crate::settings_page::capture_delay(&crate::settings::stored_settings()),
+                    ),
                     command == "window",
                     action,
                 );
@@ -1753,6 +1787,7 @@ impl qobject::Capture {
             Command::Edit(path) => crate::editor_window::publish_open(path),
             Command::EditChooser => crate::editor_window::publish_chooser(),
             Command::Overlay(path) => crate::preview::publish_file(path),
+            Command::Settings { tab } => crate::settings_page::publish_open(tab),
             Command::Restore => {
                 if let Some(path) = crate::history::newest_path(&crate::settings::data_dir()) {
                     crate::preview::publish_file(path);
@@ -1789,7 +1824,7 @@ impl qobject::Capture {
                 command,
                 rect.map(crate::geometry::geometry_text).as_deref(),
                 None,
-                3,
+                crate::settings_page::capture_delay(&crate::settings::stored_settings()),
             ),
             active,
             None,
@@ -2542,6 +2577,42 @@ mod tests {
         let window = runtime.active_window().unwrap().unwrap();
         assert_eq!(window.rect, Rect::new(10, 20, 600, 400));
         assert_eq!(window.label(), "code — Editor");
+    }
+
+    #[test]
+    fn the_runtime_reads_the_live_capture_defaults() {
+        let runner = Fake::new(monitors(), clients(), active());
+        let root = std::env::temp_dir();
+        let settings = std::collections::BTreeMap::from([
+            ("capture_delay".to_owned(), crate::json::Value::Number(7.0)),
+            (
+                "filename_format".to_owned(),
+                crate::json::Value::String("live %S".to_owned()),
+            ),
+        ]);
+        let runtime = CaptureRuntime::with_settings(
+            &runner,
+            MirrorRegistry::global(),
+            native_dir(),
+            root.clone(),
+            &settings,
+        );
+        assert_eq!(runtime.default_delay, 7);
+        assert_eq!(runtime.filename_format, "live %S");
+        // An empty pattern falls back to the built-in default instead of
+        // producing an empty filename.
+        let empty = std::collections::BTreeMap::from([(
+            "filename_format".to_owned(),
+            crate::json::Value::String("  ".to_owned()),
+        )]);
+        let runtime = CaptureRuntime::with_settings(
+            &runner,
+            MirrorRegistry::global(),
+            native_dir(),
+            root,
+            &empty,
+        );
+        assert_eq!(runtime.filename_format, crate::filenames::DEFAULT_FORMAT);
     }
 
     #[test]

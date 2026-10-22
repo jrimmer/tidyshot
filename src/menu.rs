@@ -77,7 +77,14 @@ impl ActionRow {
     pub const fn implemented(self) -> bool {
         matches!(
             self.action,
-            MenuAction::Capture(_) | MenuAction::Record | MenuAction::Stop | MenuAction::Pause
+            MenuAction::Capture(_)
+                | MenuAction::Record
+                | MenuAction::Stop
+                | MenuAction::Pause
+                | MenuAction::Settings
+                | MenuAction::SaveAll
+                | MenuAction::CloseAll
+                | MenuAction::Restore
         )
     }
 }
@@ -237,6 +244,8 @@ pub enum Invocation {
     Capture(CaptureRequest),
     /// Hand the command word to the recording runtime.
     Recording(&'static str),
+    /// Hand the command word to the window-owning runtime.
+    App(&'static str),
     /// The action's module has not landed yet.
     NotImplemented(&'static str),
 }
@@ -261,6 +270,9 @@ pub fn invoke(row: &ActionRow) -> Invocation {
         MenuAction::Record => Invocation::Recording("record"),
         MenuAction::Stop => Invocation::Recording("stop"),
         MenuAction::Pause => Invocation::Recording("pause"),
+        MenuAction::Settings | MenuAction::SaveAll | MenuAction::CloseAll | MenuAction::Restore => {
+            Invocation::App(row.id)
+        }
         _ => Invocation::NotImplemented(row.id),
     }
 }
@@ -850,9 +862,18 @@ mod tests {
     }
 
     #[test]
-    fn non_capture_rows_report_not_implemented() {
-        let row = find("settings").expect("settings row");
-        assert_eq!(invoke(row), Invocation::NotImplemented("settings"));
+    fn window_rows_route_to_the_owning_runtime() {
+        for id in ["settings", "save-all", "close-all", "restore"] {
+            let row = find(id).unwrap_or_else(|| panic!("{id} row"));
+            assert_eq!(invoke(row), Invocation::App(id));
+            assert!(row.implemented(), "{id} must be reachable");
+        }
+    }
+
+    #[test]
+    fn rows_without_a_runtime_report_not_implemented() {
+        let row = find("history").expect("history row");
+        assert_eq!(invoke(row), Invocation::NotImplemented("history"));
         assert!(!row.implemented());
     }
 

@@ -60,6 +60,7 @@ ApplicationWindow {
         Capture.bind()
         Preview.bind()
         Recording.bind()
+        SettingsApi.bind()
     }
 
     // The Rust action table emits the activated capture row; the runtime then
@@ -323,6 +324,39 @@ ApplicationWindow {
     Editor {
         id: editorWindow
         transientParent: null
+    }
+
+    // Settings: its own window, opened by the menu row, `tidyshot settings`
+    // or a settings URL. Every change writes the file atomically and the next
+    // capture, preview or recording reads it back, so it applies live.
+    SettingsWindow {
+        id: settingsWindow
+        visible: settingsOpen
+        modelJson: settingsJson
+        onValueChosen: function (key, jsonValue) {
+            SettingsApi.setValue(key, jsonValue)
+        }
+        onShortcutChosen: function (id, key) {
+            SettingsApi.setShortcut(id, key)
+        }
+        onResetShortcutsRequested: SettingsApi.resetShortcuts()
+        onReloadRequested: SettingsApi.reload()
+        onClosed: SettingsApi.close()
+    }
+
+    property bool settingsOpen: false
+    property string settingsJson: ""
+
+    Timer {
+        id: settingsSync
+        interval: 60
+        repeat: true
+        running: true
+        onTriggered: {
+            window.settingsOpen = SettingsApi.open
+            if (window.settingsJson !== SettingsApi.modelJson)
+                window.settingsJson = SettingsApi.modelJson
+        }
     }
 
     TextResultDialog {

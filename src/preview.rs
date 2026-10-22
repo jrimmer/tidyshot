@@ -161,6 +161,12 @@ impl PreviewWindow {
         &self.path
     }
 
+    /// The configured window width, before QML applies it.
+    #[must_use]
+    pub fn width_px(&self) -> f64 {
+        self.window_width()
+    }
+
     /// The saved capture the preview's actions act on.
     #[must_use]
     pub fn capture_path(&self) -> &Path {
@@ -245,6 +251,14 @@ impl PreviewWindow {
         }
     }
 
+    /// The configured preview width, clamped to the usable range.
+    #[must_use]
+    pub fn window_width(&self) -> f64 {
+        self.settings
+            .width
+            .clamp(crate::overlay::MIN_WIDTH, crate::overlay::MAX_WIDTH)
+    }
+
     /// The window position on the focused monitor.
     ///
     /// With no resolvable monitor the window sits at the bottom-right of the
@@ -257,7 +271,7 @@ impl PreviewWindow {
             .map_or_else(fallback_screen, |monitor| monitor.bounds);
         window_position(
             MonitorScreen::new(screen),
-            WINDOW_WIDTH,
+            self.window_width(),
             self.window_height(),
             &self.settings,
         )
@@ -627,7 +641,7 @@ impl PreviewRust {
         };
         self.x = x.round() as i32;
         self.y = y.round() as i32;
-        self.window_width = WINDOW_WIDTH as i32;
+        self.window_width = window.window_width() as i32;
         self.window_height = window.window_height() as i32;
         self.auto_close_ms = window.auto_close_ms();
         self.auto_close_action = QString::from(window.auto_close_action());

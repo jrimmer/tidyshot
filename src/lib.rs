@@ -49,6 +49,7 @@ pub mod render;
 pub mod scroll;
 pub mod scroll_runtime;
 pub mod settings;
+pub mod settings_page;
 pub mod spotlight;
 pub mod stitch;
 pub mod storage;

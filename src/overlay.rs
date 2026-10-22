@@ -289,6 +289,10 @@ impl AutoAction {
     }
 }
 
+/// The narrowest and widest a preview may be configured.
+pub const MIN_WIDTH: f64 = 220.0;
+pub const MAX_WIDTH: f64 = 900.0;
+
 /// The settings a preview needs. The rest of the app stores these in the
 /// settings JSON; this is the subset the overlay reads.
 #[derive(Debug, Clone)]
@@ -298,6 +302,7 @@ pub struct PreviewSettings {
     pub close_after_drag: bool,
     pub corner: Corner,
     pub margin: f64,
+    pub width: f64,
 }
 
 impl Default for PreviewSettings {
@@ -308,6 +313,7 @@ impl Default for PreviewSettings {
             close_after_drag: true,
             corner: Corner::BottomRight,
             margin: 18.0,
+            width: 355.0,
         }
     }
 }
@@ -354,6 +360,12 @@ pub const CORNER_KEYS: &[&str] = &[
     "quick_access.position",
 ];
 pub const MARGIN_KEYS: &[&str] = &["preview_margin", "quick_access_margin"];
+pub const SIZE_KEYS: &[&str] = &[
+    "preview_size",
+    "quick_access_size",
+    "preview.width",
+    "quick_access.width",
+];
 
 fn first_setting_key<'a>(
     settings: &'a std::collections::BTreeMap<String, crate::json::Value>,
@@ -410,6 +422,9 @@ pub fn preview_settings(
     }
     if let Some(value) = first_setting(settings, MARGIN_KEYS).and_then(crate::json::Value::as_f64) {
         preview.margin = value.max(0.0);
+    }
+    if let Some(value) = first_setting(settings, SIZE_KEYS).and_then(crate::json::Value::as_f64) {
+        preview.width = value.clamp(MIN_WIDTH, MAX_WIDTH);
     }
     preview
 }
