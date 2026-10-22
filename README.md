@@ -204,6 +204,26 @@ unavailable, TidyShot falls back to its tray icon and standalone capture menu.
 Super+Print retains Omarchy's color picker. Change shortcuts in Settings.
 `tidyshot menu` lists the full CLI surface.
 
+## Settings
+
+The Settings row in the menu, `tidyshot settings` and an
+`omnishot://open-settings?tab=…` link all open `qml/SettingsWindow.qml`, a
+top-level window over the ten pages the settings schema declares in
+`src/settings_page.rs`. Every change is merged into the existing JSON and
+committed through the atomic store, and the next capture, preview, recording
+or editor reads it back, so it takes effect without a restart (the hardware
+video decoding choice is the one restart-only setting, with its tooltip). The
+Annotate page's color, stroke, text size, arrow style and highlighter opacity
+seed a fresh editor document; the Quick Access page drives the preview's
+corner, width, margin, auto-close delay/action and close-after-drag; and the
+Recording, Text and Advanced pages feed the recording defaults, OCR and the
+video decoder policy.
+
+The Shortcuts page edits the managed `bindings.lua` block. A rewrite copies the
+file beside itself first, changes only the managed block and keeps every
+unrelated binding and line after it; a user binding that also launches
+`tidyshot` is never read as the managed key or captured as the launcher.
+
 ## Capture and annotate
 
 `src/capture_runtime.rs` is the one capture path: it reads the live monitors,
@@ -398,7 +418,9 @@ against a throwaway HOME with stubbed desktop commands, and
 `tests/install_user.rs` covers the user-level installer in an isolated home.
 `tests/editor_port.rs` drives the annotate editor document, project file,
 clipboard and renderer; `tests/editor_window.rs` drives the editor window's
-open, undo, save, copy and key paths. `tests/video_studio.rs` drives the video decoder
+open, undo, save, copy, lossy-format export and key paths.
+`tests/settings_page.rs` drives the settings writer, the live-effect readers
+and the managed shortcut block against throwaway files. `tests/video_studio.rs` drives the video decoder
 policy, timeline persistence, motion blur and export planning.
 `tests/app_surface.rs` asserts every documented CLI subcommand and URL
 parameter still routes, and covers the single-instance socket, UI scale,
@@ -406,7 +428,9 @@ preview and clipboard rules. `qml/tests/tst_overlay.qml` drives the corner
 preview overlay with synthetic events offscreen, and
 `qml/tests/tst_preview_window.qml` drives the frameless preview window, its
 key bindings and its action forwarding, and
-`qml/tests/tst_editor_toolbar.qml` drives the editor toolbar.
+`qml/tests/tst_editor_toolbar.qml` drives the editor toolbar,
+`qml/tests/tst_settings_window.qml` drives the settings pages, and the overlay
+and preview suites cover the export menu, Open, Save All and Close All.
 
 ## License
 

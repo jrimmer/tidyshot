@@ -223,3 +223,38 @@ fn ctrl_c_copies_the_rendered_canvas_not_the_original() {
     assert_eq!(seen[0].stdin.as_deref(), Some(expected.as_slice()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn command_available(program: &str) -> bool {
+    std::process::Command::new(program)
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[test]
+fn saving_in_a_lossy_format_writes_a_real_image_with_the_canvas_size() {
+    if !command_available("ffmpeg") || !command_available("ffprobe") {
+        return;
+    }
+    let dir = scratch("export-format");
+    let source = dir.join("source.png");
+    std::fs::write(&source, image(64, 40, [200, 100, 50, 255]).to_png()).unwrap();
+    let mut state = EditorState::default();
+    state.open(&source).unwrap();
+    for extension in ["jpg", "webp"] {
+        let target = dir.join(format!("annotated.{extension}"));
+        state.save(Some(&target)).unwrap();
+        let bytes = std::fs::read(&target).unwrap();
+        let format = tidyshot::export::ExportFormat::from_path(&target);
+        let decoded = tidyshot::export::decode(&tidyshot::commands::SystemRunner, &bytes, format)
+            .unwrap_or_else(|error| panic!("{extension}: {error}"));
+        assert_eq!((decoded.width, decoded.height), (64, 40), "{extension}");
+    }
+    // A HEIC path is accepted too, whether or not the local ffmpeg can mux it.
+    assert_eq!(
+        tidyshot::export::ExportFormat::from_path(&dir.join("a.heic")),
+        tidyshot::export::ExportFormat::Heic
+    );
+}
