@@ -115,23 +115,6 @@ fn capture_before_gui(
     )
 }
 
-/// Whether a capture command asks for the editor after it saves.
-///
-/// This reads the parsed action rather than routing again, so the coordinate
-/// links are not resolved against the compositor twice.
-fn wants_annotate(args: &[String]) -> bool {
-    tidyshot::cli::parse_args(args.iter().map(String::as_str))
-        .ok()
-        .and_then(|parsed| {
-            parsed
-                .action
-                .clone()
-                .or_else(|| parsed.url.as_ref().and_then(|url| url.action.clone()))
-        })
-        .as_deref()
-        == Some("annotate")
-}
-
 /// Whether a routed command is a capture the CLI runs itself.
 ///
 /// Interactive OCR stays with the GUI because its review dialog presents the
@@ -168,10 +151,33 @@ fn main() {
     match capture_before_gui(&args) {
         Some(Ok(result)) => {
             println!("{}", result.path.display());
+            // The configured after-capture actions run here exactly as the GUI
+            // runs them, so a command-line capture honours the same settings.
+            let settings = tidyshot::settings::stored_settings();
+            let action = tidyshot::cli::parse_args(args.iter().map(String::as_str))
+                .ok()
+                .and_then(|parsed| {
+                    parsed
+                        .action
+                        .clone()
+                        .or_else(|| parsed.url.as_ref().and_then(|url| url.action.clone()))
+                });
+            if let Err(error) = tidyshot::capture_runtime::apply_after_capture(
+                &settings,
+                action.as_deref(),
+                false,
+                &result.path,
+                result.display.as_deref(),
+            ) {
+                eprintln!("tidyshot: {error}");
+            }
             // An after-capture annotate action from a shortcut or URL opens
             // only the editor on the saved file; a preview behind it would
             // dismiss the process before the annotations are finished.
-            if wants_annotate(&args) {
+            if tidyshot::capture_runtime::after_capture_opens_editor(
+                &settings,
+                action.as_deref(),
+            ) {
                 tidyshot::editor_window::publish_open(result.path.clone());
             } else {
                 tidyshot::preview::set_startup_preview(result);

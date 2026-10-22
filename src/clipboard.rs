@@ -211,11 +211,16 @@ pub fn text_spec(text: &str) -> crate::commands::CommandSpec {
 }
 
 /// The `text/uri-list` body for a set of local files.
+///
+/// The URLs are percent-encoded by [`crate::overlay::local_file_url`], the
+/// same builder a drag uses, so a file name with a space or a non-ASCII byte
+/// is offered as one valid URI by both a paste and a drop.
 #[must_use]
 pub fn file_list(paths: &[std::path::PathBuf]) -> Vec<u8> {
     let mut body = String::new();
     for path in paths {
-        body.push_str(&format!("file://{}\r\n", path.display()));
+        body.push_str(&crate::overlay::local_file_url(path));
+        body.push_str("\r\n");
     }
     body.into_bytes()
 }

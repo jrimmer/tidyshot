@@ -1939,14 +1939,17 @@ impl qobject::Capture {
         }
     }
 
-    /// Run the requested after-capture action.
+    /// Run the requested after-capture actions.
     ///
-    /// An explicit `annotate` from a shortcut or URL opens the editor on the
-    /// saved file; the preview is still published so the capture stays
-    /// reachable when the editor closes. Ctrl at selection time copies the
-    /// picture the preview shows, which for a window capture is the composed
-    /// frame, matching the source's `force_copy`.
-    // Ported from omnishot/app.py (finished_capture force_copy)
+    /// The action set is the one the source computes: an area shortcut runs
+    /// its named action plus the configured after-capture set when
+    /// `capture_shortcut_actions` allows it, a plain `--action` selects only
+    /// itself, and no action selects the configured set. The settings file is
+    /// read again here, so a change in the settings window applies to the next
+    /// capture without a restart. Ctrl at selection time copies the picture the
+    /// preview shows, which for a window capture is the composed frame,
+    /// matching the source's `force_copy`.
+    // Ported from omnishot/app.py (finished_capture, force_copy)
     fn after_capture_action(
         mut self: Pin<&mut Self>,
         path: &std::path::Path,
@@ -1959,16 +1962,20 @@ impl qobject::Capture {
                 std::mem::take(&mut state.pending_copy),
             )
         };
-        if action.as_deref() == Some("annotate") {
-            crate::editor_window::publish_open(path.to_path_buf());
-        }
         let settings = crate::settings::stored_settings();
-        if let Some(shown) = forced_copy_source(&settings, copy, path, display)
-            && let Err(error) = crate::preview::copy_capture(&crate::commands::SystemRunner, shown)
-        {
-            self.as_mut().set_message(QString::from(format!(
-                "The capture was saved but could not be copied: {error}"
-            )));
+        let result = run_after_capture(
+            &crate::commands::SystemRunner,
+            &settings,
+            action.as_deref(),
+            copy,
+            path,
+            display,
+        );
+        match result {
+            Ok(()) => {}
+            Err(error) => {
+                self.as_mut().set_message(QString::from(error));
+            }
         }
     }
 
@@ -1980,6 +1987,69 @@ impl qobject::Capture {
         self.as_mut().set_busy(false);
         self.as_mut().failed_signal(&QString::from(message));
     }
+}
+
+/// Run the configured after-capture actions for a saved capture.
+///
+/// This is what the GUI and the command-line capture both call, so a setting
+/// change applies to either entry point identically.
+pub fn apply_after_capture(
+    settings: &std::collections::BTreeMap<String, Value>,
+    action: Option<&str>,
+    copy: bool,
+    path: &Path,
+    display: Option<&Path>,
+) -> Result<(), String> {
+    run_after_capture(
+        &crate::commands::SystemRunner,
+        settings,
+        action,
+        copy,
+        path,
+        display,
+    )
+}
+
+/// Whether an after-capture action set opens the editor.
+#[must_use]
+pub fn after_capture_opens_editor(
+    settings: &std::collections::BTreeMap<String, Value>,
+    action: Option<&str>,
+) -> bool {
+    crate::app::screenshot_actions_from(settings, action).contains("annotate")
+}
+
+/// The after-capture actions the source's `finished_capture` performs.
+///
+/// The settings file is read fresh for every capture, so a change in the
+/// settings window applies to the next capture without a restart. `copy`
+/// forces a copy of the picture the preview shows even when the configured set
+/// does not ask for one, matching the source's `force_copy`.
+// Ported from omnishot/app.py (finished_capture)
+fn run_after_capture<R: CommandRunner>(
+    runner: &R,
+    settings: &std::collections::BTreeMap<String, Value>,
+    action: Option<&str>,
+    copy: bool,
+    path: &Path,
+    display: Option<&Path>,
+) -> Result<(), String> {
+    let actions = crate::app::screenshot_actions_from(settings, action);
+    if actions.contains("annotate") {
+        crate::editor_window::publish_open(path.to_path_buf());
+    }
+    let forced = forced_copy_source(settings, copy, path, display);
+    if forced.is_some() || actions.contains("copy") {
+        let shown = forced.unwrap_or_else(|| display.unwrap_or(path));
+        crate::preview::copy_capture(runner, shown)
+            .map_err(|error| format!("The capture was saved but could not be copied: {error}"))?;
+    }
+    if actions.contains("pin") {
+        crate::preview::pin_capture(path).map_err(|error| {
+            format!("The capture was saved but could not be pinned: {error}")
+        })?;
+    }
+    Ok(())
 }
 
 /// The file a Ctrl-forced copy takes, or none when nothing should be copied.
@@ -2641,6 +2711,130 @@ mod tests {
             None,
             "the source's setting can disable Ctrl-copy"
         );
+    }
+
+    /// A runner that records the commands a post-capture action sends.
+    #[derive(Default)]
+    struct ClipboardFake {
+        seen: Mutex<Vec<CommandSpec>>,
+    }
+
+    impl CommandRunner for ClipboardFake {
+        fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+            self.seen.lock().unwrap().push(spec.clone());
+            Ok(CommandOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    fn after_capture(
+        runner: &ClipboardFake,
+        settings: &[(&str, Value)],
+        action: Option<&str>,
+        copy: bool,
+    ) -> Result<(), String> {
+        let capture = scratch("after-capture");
+        let path = capture.join("my shot.png");
+        std::fs::write(&path, png(4, 3, [1, 2, 3, 255])).unwrap();
+        let stored: std::collections::BTreeMap<String, Value> = settings
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect();
+        let result = run_after_capture(runner, &stored, action, copy, &path, None);
+        let _ = std::fs::remove_dir_all(&capture);
+        result
+    }
+
+    #[test]
+    fn the_configured_after_capture_action_runs_for_every_capture() {
+        let runner = ClipboardFake::default();
+        // The default follows the last written settings file: a copy is
+        // requested by `after_capture` alone, with no shortcut action.
+        after_capture(
+            &runner,
+            &[("after_capture", Value::String("copy".to_owned()))],
+            None,
+            false,
+        )
+        .unwrap();
+        let seen = runner.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].program, "wl-copy");
+        assert_eq!(seen[0].args, ["--type", "image/png"]);
+        assert!(
+            seen[0]
+                .stdin
+                .as_deref()
+                .is_some_and(|body| body.starts_with(&[0x89, b'P', b'N', b'G'])),
+            "the encoded capture is what reaches the clipboard"
+        );
+    }
+
+    #[test]
+    fn an_explicit_action_and_the_configured_set_combine_only_for_a_shortcut() {
+        let runner = ClipboardFake::default();
+        after_capture(
+            &runner,
+            &[
+                ("after_capture", Value::String("copy".to_owned())),
+                ("capture_shortcut_actions", Value::Bool(false)),
+            ],
+            Some("area-pin"),
+            false,
+        )
+        .unwrap();
+        assert!(
+            runner.seen.lock().unwrap().is_empty(),
+            "an exclusive shortcut runs only its named action"
+        );
+
+        let runner = ClipboardFake::default();
+        after_capture(
+            &runner,
+            &[
+                ("after_capture", Value::String("copy".to_owned())),
+                ("capture_shortcut_actions", Value::Bool(true)),
+            ],
+            Some("area-save"),
+            false,
+        )
+        .unwrap();
+        let seen = runner.seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the shortcut adds the configured copy to its own save"
+        );
+    }
+
+    #[test]
+    fn a_ctrl_choice_copies_even_when_no_action_is_configured() {
+        let runner = ClipboardFake::default();
+        after_capture(&runner, &[], None, true).unwrap();
+        assert_eq!(runner.seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_configured_annotate_opens_the_editor_on_the_saved_capture() {
+        let settings = std::collections::BTreeMap::from([(
+            "after_capture".to_owned(),
+            Value::String("annotate".to_owned()),
+        )]);
+        assert!(after_capture_opens_editor(&settings, None));
+        let copy_only = std::collections::BTreeMap::from([(
+            "after_capture".to_owned(),
+            Value::String("copy".to_owned()),
+        )]);
+        assert!(!after_capture_opens_editor(&copy_only, None));
+        // A shortcut without the combined set does not open the editor.
+        let exclusive = std::collections::BTreeMap::from([(
+            "capture_shortcut_actions".to_owned(),
+            Value::Bool(false),
+        )]);
+        assert!(!after_capture_opens_editor(&exclusive, Some("area-save")));
     }
 
     #[test]

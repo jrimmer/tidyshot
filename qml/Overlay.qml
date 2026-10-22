@@ -35,8 +35,6 @@ Rectangle {
     property int overlaySize: 300
     /// Show the Move to Trash control for an automatically saved capture.
     property bool trashVisible: false
-    /// The export formats offered next to Save.
-    property var exportFormats: ["png", "jpeg", "webp", "heic"]
     /// The `text/uri-list` body a drag-out carries, from the Rust side.
     property string dragUri: ""
 
@@ -251,6 +249,11 @@ Rectangle {
                 objectName: "exportHeic"
                 text: "HEIC"
                 onTriggered: preview.exportRequested("heic")
+            }
+            MenuItem {
+                objectName: "exportDefault"
+                text: "Default format"
+                onTriggered: preview.exportRequested("")
             }
         }
     }

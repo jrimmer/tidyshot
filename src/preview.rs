@@ -22,6 +22,8 @@ pub const COLLAPSED_HEIGHT: f64 = 52.0;
 pub const FALLBACK_SCREEN_WIDTH: f64 = 1920.0;
 /// The screen height assumed when no monitor can be resolved.
 pub const FALLBACK_SCREEN_HEIGHT: f64 = 1080.0;
+/// How many past captures Save All tracks before the oldest is forgotten.
+pub const RETAINED_LIMIT: usize = 64;
 
 /// Why a preview action failed.
 #[derive(Debug)]
@@ -159,12 +161,6 @@ impl PreviewWindow {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    /// The configured window width, before QML applies it.
-    #[must_use]
-    pub fn width_px(&self) -> f64 {
-        self.window_width()
     }
 
     /// The saved capture the preview's actions act on.
@@ -319,18 +315,6 @@ pub fn copy_capture<R: CommandRunner>(runner: &R, path: &Path) -> Result<(), Pre
         let bytes = std::fs::read(path)?;
         runner.run(&crate::clipboard::image_spec(format, bytes))?;
     }
-    Ok(())
-}
-
-/// Copy one or more files to the clipboard as a file list.
-pub fn copy_files<R: CommandRunner>(runner: &R, paths: &[PathBuf]) -> Result<(), PreviewError> {
-    runner.run(&crate::clipboard::files_spec(paths))?;
-    Ok(())
-}
-
-/// Copy plain text to the clipboard.
-pub fn copy_text<R: CommandRunner>(runner: &R, text: &str) -> Result<(), PreviewError> {
-    runner.run(&crate::clipboard::text_spec(text))?;
     Ok(())
 }
 
@@ -690,8 +674,11 @@ pub struct PreviewRust {
     auto_close_action: QString,
     close_after_drag: bool,
     window: Option<PreviewWindow>,
+    /// True while an encode runs on the worker, so a second export waits.
+    exporting: bool,
     /// Every capture shown since the last Close All, so Save All commits all
-    /// of them rather than only the visible one.
+    /// of them rather than only the visible one. Bounded to the newest
+    /// [`RETAINED_LIMIT`] entries so a long session cannot grow it forever.
     retained: Vec<PathBuf>,
 }
 
@@ -726,6 +713,7 @@ impl Default for PreviewRust {
             auto_close_action: QString::from("close"),
             close_after_drag: true,
             window: None,
+            exporting: false,
             retained: Vec::new(),
         };
         if let Some(published) = startup {
@@ -772,6 +760,9 @@ impl PreviewRust {
         self.standalone = published.standalone;
         self.open = !window.dismissed();
         if !self.retained.contains(&published.path) {
+            if self.retained.len() == RETAINED_LIMIT {
+                self.retained.remove(0);
+            }
             self.retained.push(published.path);
         }
         self.window = Some(window);
@@ -1008,29 +999,46 @@ impl qobject::Preview {
     /// The encode runs on a worker thread: an ffmpeg call can take minutes, and
     /// blocking the Qt event loop would freeze the whole window while it runs.
     pub fn export_as(mut self: Pin<&mut Self>, format: &QString) {
-        let Some(format) = crate::export::ExportFormat::parse(&format.to_string()) else {
-            self.as_mut()
-                .rust_mut()
-                .get_mut()
-                .set_message("Unknown export format");
-            self.as_mut().sync();
-            return;
+        let requested = format.to_string();
+        let format = if requested.trim().is_empty() {
+            // No explicit choice: the menu's default entry exports in the
+            // format the settings page configures, read back live.
+            crate::export::ExportFormat::from_settings(&crate::settings::stored_settings())
+        } else {
+            let Some(format) = crate::export::ExportFormat::parse(&requested) else {
+                self.as_mut()
+                    .rust_mut()
+                    .get_mut()
+                    .set_message("Unknown export format");
+                self.as_mut().sync();
+                return;
+            };
+            format
         };
+        {
+            let rust = self.as_mut().rust_mut().get_mut();
+            if rust.exporting {
+                // A second request while the encoder runs would pick the same
+                // not-yet-existing candidate path and write it twice.
+                rust.set_message("An export is already running");
+                self.as_mut().sync();
+                return;
+            }
+            rust.exporting = true;
+            rust.set_message(&format!("Exporting {}…", format.label()));
+        }
+        self.as_mut().sync();
         let path = self.window.as_ref().map_or_else(
             || PathBuf::from(self.path().to_string()),
             |window| window.path().to_path_buf(),
         );
-        self.as_mut()
-            .rust_mut()
-            .get_mut()
-            .set_message(&format!("Exporting {}…", format.label()));
-        self.as_mut().sync();
         let thread = self.qt_thread();
         std::thread::spawn(move || {
             let result = export_capture_with_note(&crate::commands::SystemRunner, &path, format);
             let _ = thread.queue(move |mut preview| {
                 {
                     let rust = preview.as_mut().rust_mut().get_mut();
+                    rust.exporting = false;
                     match result {
                         Ok((exported, note)) => {
                             let mut message = format!("Exported {}", exported.display());
@@ -1199,6 +1207,35 @@ mod tests {
         );
         assert_eq!(preview.auto_close_ms(), 2500);
         assert_eq!(preview.auto_close_action(), "save");
+    }
+
+    #[test]
+    fn the_configured_preview_width_reaches_the_window() {
+        // A width written by the settings page is read back before the window
+        // is built, so the next capture and the anchored position use it.
+        let settings = crate::overlay::preview_settings(&std::collections::BTreeMap::from([(
+            "preview_size".to_owned(),
+            Value::Number(520.0),
+        )]));
+        let monitor = MonitorScreen::new(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0));
+        let preview =
+            PreviewWindow::new("/tmp/capture.png", 10, 10, settings, Some(monitor));
+        assert_eq!(preview.window_width(), 520.0);
+        assert_eq!(preview.position().0, 1920.0 - 520.0 - 18.0);
+        // The Rust window width is what the QML property reports.
+        let mut rust = PreviewRust {
+            window_width: preview.window_width() as i32,
+            ..PreviewRust::default()
+        };
+        rust.apply(Published {
+            path: PathBuf::from("/tmp/capture.png"),
+            display: None,
+            width: 10,
+            height: 10,
+            screen: Some(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0)),
+            standalone: false,
+        });
+        assert_eq!(rust.window_width, preview.window_width() as i32);
     }
 
     #[test]

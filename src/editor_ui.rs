@@ -829,6 +829,21 @@ pub fn suggested_save_path(path: Option<&std::path::Path>, project: bool) -> Str
     }
 }
 
+/// A default flattened save path in the configured export format.
+#[must_use]
+pub fn suggested_export_path(
+    path: Option<&std::path::Path>,
+    format: crate::export::ExportFormat,
+) -> String {
+    match path {
+        Some(path) => path
+            .with_extension(format.extension())
+            .display()
+            .to_string(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

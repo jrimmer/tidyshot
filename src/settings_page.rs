@@ -350,14 +350,6 @@ pub const PAGES: &[SettingsPage] = &[
                 tooltip: DECODER_TOOLTIP,
                 ..flag("hardware_video_decoding", "Hardware video decoding", false)
             },
-            number(
-                "history_retention_days",
-                "Keep history for (days)",
-                30.0,
-                1.0,
-                31.0,
-                1.0,
-            ),
         ],
     },
     SettingsPage {
@@ -952,6 +944,10 @@ pub fn model_json(
             ("tab".to_owned(), Value::String(tab.to_owned())),
             ("message".to_owned(), Value::String(message.to_owned())),
             (
+                "version".to_owned(),
+                Value::String(crate::VERSION.to_owned()),
+            ),
+            (
                 "uiScale".to_owned(),
                 Value::Number(
                     crate::ui_scale::read(None)
@@ -986,15 +982,6 @@ pub fn publish_open(tab: impl Into<String>) {
         None => {
             *PENDING.lock().expect("settings queue poisoned") = Some(tab);
         }
-    }
-}
-
-/// Close the settings window.
-pub fn publish_close() {
-    if let Some(thread) = BOUND.get() {
-        let _ = thread.queue(move |mut settings| {
-            settings.as_mut().close();
-        });
     }
 }
 

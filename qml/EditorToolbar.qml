@@ -181,6 +181,11 @@ Rectangle {
                     text: "HEIC"
                     onTriggered: toolbar.exportRequested("heic")
                 }
+                MenuItem {
+                    objectName: "exportDefault"
+                    text: "Default format"
+                    onTriggered: toolbar.exportRequested("")
+                }
             }
             Button {
                 objectName: "doneButton"

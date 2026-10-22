@@ -232,10 +232,33 @@ impl EditorState {
         Ok(destination)
     }
 
+    /// Export the rendered canvas to `path` without repointing the document.
+    ///
+    /// An export is a copy in another format; the working path and the dirty
+    /// flag stay untouched, so the next Ctrl+S still writes the opened file.
+    pub fn export(&mut self, path: &Path) -> Result<PathBuf, EditorWindowError> {
+        let Some(document) = self.document.as_ref() else {
+            return Err(EditorWindowError::new("No image is open"));
+        };
+        save_document(document, path)
+            .map_err(|error| EditorWindowError::new(error.message().to_owned()))?;
+        self.message = format!("Exported {}", display_name(path));
+        Ok(path.to_path_buf())
+    }
+
     /// The path a Save As dialog should start from.
+    ///
+    /// A flattened save follows the configured default export format, so the
+    /// format chosen in Settings is what Save As suggests; a project always
+    /// keeps the `.omnishot` extension.
     #[must_use]
     pub fn save_suggestion(&self, project: bool) -> String {
-        suggested_save_path(self.path.as_deref(), project)
+        if project {
+            return suggested_save_path(self.path.as_deref(), true);
+        }
+        let format =
+            crate::export::ExportFormat::from_settings(&crate::settings::stored_settings());
+        crate::editor_ui::suggested_export_path(self.path.as_deref(), format)
     }
 
     /// Render and write the canvas to the clipboard.
@@ -951,10 +974,18 @@ impl qobject::EditorApi {
 
     /// Export the rendered canvas in `format` beside the opened file.
     pub fn export_as(mut self: Pin<&mut Self>, format: &QString) {
-        let Some(format) = crate::export::ExportFormat::parse(&format.to_string()) else {
-            self.as_mut().rust_mut().get_mut().state.message = "Unknown export format".to_owned();
-            self.as_mut().sync();
-            return;
+        let requested = format.to_string();
+        let format = if requested.trim().is_empty() {
+            // The menu's Default row exports in the configured format.
+            crate::export::ExportFormat::from_settings(&crate::settings::stored_settings())
+        } else {
+            let Some(format) = crate::export::ExportFormat::parse(&requested) else {
+                self.as_mut().rust_mut().get_mut().state.message =
+                    "Unknown export format".to_owned();
+                self.as_mut().sync();
+                return;
+            };
+            format
         };
         let destination = {
             let state = &self.as_mut().rust_mut().get_mut().state;
@@ -990,15 +1021,9 @@ impl qobject::EditorApi {
             .rust_mut()
             .get_mut()
             .state
-            .save(Some(&destination));
-        match result {
-            Ok(path) => {
-                self.as_mut().rust_mut().get_mut().state.message =
-                    format!("Exported {}", display_name(&path));
-            }
-            Err(error) => {
-                self.as_mut().rust_mut().get_mut().state.message = error.to_string();
-            }
+            .export(&destination);
+        if let Err(error) = result {
+            self.as_mut().rust_mut().get_mut().state.message = error.to_string();
         }
         self.as_mut().sync();
     }

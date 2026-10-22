@@ -27,7 +27,7 @@ Window {
     property string activeTab: "general"
     property string message: ""
     property double uiScale: 1
-    property bool dirty: false
+    property string version: ""
 
     onModelJsonChanged: parseModel()
     Component.onCompleted: parseModel()
@@ -44,6 +44,7 @@ Window {
         settings.shortcuts = model.shortcuts || []
         settings.activeTab = model.tab || "general"
         settings.message = model.message || ""
+        settings.version = model.version || ""
         if (model.uiScale)
             settings.uiScale = model.uiScale
     }
@@ -68,15 +69,8 @@ Window {
         return null
     }
 
-    /// The current value of a key, from the latest model.
-    function valueFor(key) {
-        var field = fieldFor(key)
-        return field === null ? null : field.value
-    }
-
     /// Write a JSON-encoded scalar for a key.
     function send(key, jsonValue) {
-        settings.dirty = true
         settings.valueChosen(key, jsonValue)
     }
 
@@ -246,7 +240,9 @@ Window {
                         spacing: settings.px(4)
                         Text {
                             objectName: "aboutVersion"
-                            text: "TidyShot " + Qt.application.version
+                            text: settings.version === ""
+                                ? "TidyShot"
+                                : "TidyShot " + settings.version
                             color: "white"
                         }
                         Text {

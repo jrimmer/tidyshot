@@ -22,6 +22,12 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+/// The settings file a data root holds.
+#[must_use]
+pub fn settings_path_at(root: &std::path::Path) -> PathBuf {
+    root.join("settings.json")
+}
+
 /// The path of the JSON settings file.
 #[must_use]
 pub fn settings_path() -> PathBuf {

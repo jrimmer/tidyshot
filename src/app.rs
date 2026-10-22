@@ -272,6 +272,18 @@ pub fn screenshot_actions(settings: &Value, action: Option<&str>) -> BTreeSet<St
     }
 }
 
+/// The screenshot actions a capture runs from a settings map.
+///
+/// The runtime reads the file back for every capture, so a change in the
+/// settings window applies to the next capture without a restart.
+#[must_use]
+pub fn screenshot_actions_from(
+    settings: &std::collections::BTreeMap<String, Value>,
+    action: Option<&str>,
+) -> BTreeSet<String> {
+    screenshot_actions(&Value::Object(settings.clone()), action)
+}
+
 /// The configured after-capture (or after-recording) actions.
 // Ported from omnishot/backend.py (capture_actions)
 #[must_use]

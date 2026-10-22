@@ -1,4 +1,8 @@
 // The library target every binary and test links.
+
+/// The application version the About page and the window title report.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod annotation;
 pub mod api;
 pub mod app;
@@ -109,6 +113,10 @@ pub fn run_with(argv: &[String]) {
         }
     }
     let mut app = cxx_qt_lib::QGuiApplication::new();
+    if let Some(mut application) = app.as_mut() {
+        // The About page and any other version display read this back.
+        application.as_mut().set_application_version(&cxx_qt_lib::QString::from(VERSION));
+    }
     // The icon follows the live theme; refresh the user copy before QML loads
     // so the desktop entry matches the running shell. A failed write is
     // reported but never blocks the GUI.
