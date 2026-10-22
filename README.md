@@ -322,6 +322,14 @@ instead of exiting, so the capture can still be acted on; closing that preview
 ends the process. `qml/Main.qml` keeps the menu window hidden for a
 command-line capture and shows it only for an interactive menu session.
 
+Wayland ignores an application-set toplevel position, so `src/preview_placement.rs`
+pins the computed anchor through a Hyprland rule named after the preview title:
+`hyprctl keyword windowrule "move X Y,title:^(TidyShot Preview)"`, falling back
+to `windowrulev2` on a compositor that still uses that keyword. Each open removes
+the previous rule first (`unset,title:^(TidyShot Preview)`), so a changed corner,
+margin or focused monitor moves the next preview instead of stacking rules.
+`scripts/uninstall_user.py` removes the same rule with the same matcher.
+
 `src/overlay.rs` owns the preview behavior: auto-close and the
 save-on-timeout action, dismiss and restore, pin, and drag-out with the
 close-after-drag and Alt-to-keep rules. `src/drag.rs` tracks definitive Wayland

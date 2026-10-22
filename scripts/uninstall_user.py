@@ -104,6 +104,13 @@ if bindings.exists():rewrite(bindings,without_bindings(bindings.read_text()))
 hypr=hypr_dir()/"hyprland.lua"
 if hypr.exists():rewrite(hypr,without_require(hypr.read_text()))
 remove(hypr_dir()/"tidyshot.lua")
+# The preview pins its corner with a dynamic rule (`move X Y,title:^(TidyShot
+# Preview)`); drop it with the same matcher so no stale position survives.
+PREVIEW_RULE_TITLE="title:^(TidyShot Preview)"
+def clear_preview_rule():
+    if not shutil.which("hyprctl"):return
+    for keyword in ("windowrule","windowrulev2"):
+        if subprocess.run(["hyprctl","keyword",keyword,"unset,"+PREVIEW_RULE_TITLE],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:return
 if data is not None:
     layout=data.get("bar",{}).get("layout",{})
     for section in ("left","center","right"):
@@ -119,5 +126,6 @@ for plugin_id in plugin_ids:
 
 for command,path in (("update-desktop-database",data_home/"applications"),("update-mime-database",data_home/"mime")):
     if shutil.which(command) and path.is_dir():subprocess.run([command,str(path)],check=False)
+clear_preview_rule()
 print("Removed TidyShot's launcher, shortcuts, window rules and desktop integration.")
 if backup.exists():print(f"Previous configuration: {backup}")

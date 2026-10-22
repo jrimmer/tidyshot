@@ -615,10 +615,16 @@ impl PreviewRust {
             QUrl::from_local_file(&QString::from(window.path().display().to_string()));
         self.title = QString::from(window.title());
         self.info = QString::from(window.info());
-        self.message = QString::from(monitor_hint(published.screen));
         self.video = window.is_video();
         self.collapsed = window.collapsed();
         let (x, y) = window.position();
+        let placed = crate::preview_placement::apply(&crate::commands::SystemRunner, x, y);
+        self.message = match placed {
+            Ok(_) => QString::from(monitor_hint(published.screen)),
+            Err(error) => {
+                QString::from(format!("Could not pin the preview to its corner: {error}"))
+            }
+        };
         self.x = x.round() as i32;
         self.y = y.round() as i32;
         self.window_width = WINDOW_WIDTH as i32;
@@ -800,6 +806,9 @@ impl qobject::Preview {
             window.set_collapsed(collapsed);
             let (x, y) = window.position();
             let height = window.window_height();
+            // The rule pins the top-left corner, so a collapsed window needs
+            // the same recomputed anchor before its new height is committed.
+            let _ = crate::preview_placement::apply(&crate::commands::SystemRunner, x, y);
             self.as_mut().set_x(x.round() as i32);
             self.as_mut().set_y(y.round() as i32);
             self.as_mut().set_window_height(height as i32);
@@ -950,6 +959,50 @@ mod tests {
             Some(monitor),
         );
         assert_eq!(preview.position(), (1565.0, 780.0));
+    }
+
+    #[test]
+    fn the_corner_setting_reaches_the_rule_that_places_the_window() {
+        let monitor = MonitorScreen::new(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0));
+        let cases = [
+            (Corner::BottomRight, (1547.0, 762.0)),
+            (Corner::BottomLeft, (18.0, 762.0)),
+            (Corner::TopRight, (1547.0, 18.0)),
+            (Corner::TopLeft, (18.0, 18.0)),
+        ];
+        for (corner, expected) in cases {
+            let preview = PreviewWindow::new(
+                "/tmp/capture.png",
+                640,
+                480,
+                PreviewSettings {
+                    corner,
+                    ..settings()
+                },
+                Some(monitor),
+            );
+            let (x, y) = preview.position();
+            assert_eq!((x, y), expected, "{corner:?}");
+            assert_eq!(
+                crate::preview_placement::placement_rule(x, y),
+                format!(
+                    "move {} {},title:^(TidyShot Preview)",
+                    expected.0 as i64, expected.1 as i64
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_monitor_gets_its_own_rule() {
+        let monitor = MonitorScreen::new(ScreenRect::new(1920.0, 0.0, 2560.0, 1440.0));
+        let preview = PreviewWindow::new("/tmp/capture.png", 640, 480, settings(), Some(monitor));
+        let (x, y) = preview.position();
+        assert_eq!((x, y), (4107.0, 1122.0));
+        assert_eq!(
+            crate::preview_placement::placement_rule(x, y),
+            "move 4107 1122,title:^(TidyShot Preview)"
+        );
     }
 
     #[derive(Default)]

@@ -476,6 +476,29 @@ fn uninstall_restores_configuration_and_keeps_captures() {
 }
 
 #[test]
+fn uninstall_removes_the_preview_position_rule() {
+    let home = Home::new("preview-rule");
+    copy_scripts(&home);
+    assert!(home.install().status.success());
+    assert!(home.uninstall().status.success());
+    let cleared: Vec<Vec<String>> = home
+        .calls()
+        .into_iter()
+        .filter(|call| call.first().map(String::as_str) == Some("hyprctl"))
+        .collect();
+    assert!(
+        cleared.iter().any(|call| call
+            == &[
+                "hyprctl".to_owned(),
+                "keyword".to_owned(),
+                "windowrule".to_owned(),
+                "unset,title:^(TidyShot Preview)".to_owned(),
+            ]),
+        "uninstall clears the preview rule: {cleared:?}"
+    );
+}
+
+#[test]
 fn uninstall_leaves_plugin_checkout_and_foreign_launcher() {
     let home = Home::new("foreign");
     copy_scripts(&home);
