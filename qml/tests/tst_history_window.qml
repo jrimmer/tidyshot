@@ -127,7 +127,6 @@ TestCase {
         compare(search.text, "page")
         compare(searchSpy.count, 4)
         compare(searchSpy.signalArguments[3][0], "page")
-
     }
 
     function test_the_action_buttons_emit_their_signals() {
