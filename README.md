@@ -318,9 +318,12 @@ or multi selection. `src/history_window.rs` owns the listing, the filter and
 search, the cursor and every action: Delete and Clear History move captures
 into `trash/` beside the store (a rename on one filesystem, a temp file and
 rename across filesystems) and drop their rows, never unlinking a capture;
-Restore preview, Annotate and Pin act on the selected capture. Enter opens the
-selection, arrows or h/j/k/l move the cursor, Delete trashes it and Escape
-closes the window. The History menu row and `tidyshot history` open it.
+Restore preview, Annotate and Pin act on the selected capture. The window
+activates itself on open and its key map lives in a focus scope over the
+content, so Enter opens the selection, arrows or h/j/k/l move the cursor,
+Delete trashes it and Escape closes the window without a first click. A row
+click selects the row it hit rather than moving the cursor by a delta. The
+History menu row and `tidyshot history` open it.
 
 `history_retention_days` in `settings.json` sets how long captures are kept;
 the default is 30 days, zero keeps everything. A cleanup pass runs on startup
@@ -452,7 +455,8 @@ key bindings and its action forwarding, and
 search and delete signals, `qml/tests/tst_pin_window.qml` drives a pinned
 capture, and the overlay and preview suites cover the export menu, Open, Save
 All and Close All. `tests/history_commands.rs` asserts every routed command and
-menu row reaches a handler and that history delete moves a capture to the trash.
+menu row reaches a handler, that the clipboard file list opens the file it
+names, and that history delete moves a capture to the trash.
 
 ## License
 
