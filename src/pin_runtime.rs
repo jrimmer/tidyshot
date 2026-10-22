@@ -2,8 +2,8 @@
 // Ported from omnishot/widgets.py (Pin) and omnishot/pin_controls.py
 //!
 //! The window model, wheel gestures and control placement live in
-//! [`crate::pin`]; this module owns the set of visible pins, their publish
-//! queue and the QML bridge. One menu command shows or hides the whole set,
+//! [`crate::pin`]; this module owns the set of visible pins and the QML
+//! bridge. One menu command shows or hides the whole set,
 //! another closes it and a third unlocks every pin, matching the source.
 
 use std::collections::BTreeMap;
@@ -229,13 +229,11 @@ pub fn unlock_all() -> String {
     "Pins unlocked".to_owned()
 }
 
-/// Push the current pins to the bound QML windows, or wait for the bind.
+/// Push the current pins to the bound QML windows.
+///
+/// A publish before QML binds is not lost: `bind` applies the current set.
 fn publish() {
     let rows = rows_json();
-    for request in PENDING.lock().expect("pin queue poisoned").drain(..) {
-        let rows = rows.clone();
-        request(rows);
-    }
     if let Some(thread) = BOUND.get() {
         let _ = thread.queue(move |mut pins| {
             pins.as_mut().apply_rows(rows);
@@ -243,9 +241,6 @@ fn publish() {
     }
 }
 
-type Pending = Box<dyn FnOnce(Vec<String>) + Send>;
-
-static PENDING: std::sync::Mutex<Vec<Pending>> = std::sync::Mutex::new(Vec::new());
 static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::PinApi>> =
     std::sync::OnceLock::new();
 

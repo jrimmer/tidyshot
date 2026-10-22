@@ -128,8 +128,7 @@ TestCase {
         slider.moved()
         compare(valueSpy.count, 1)
         compare(valueSpy.signalArguments[0][0], "capture_delay")
-        compare(valueSpy.signalArguments[0][1], "12")
-    }
+        compare(valueSpy.signalArguments[0][1], "12")    }
 
     function test_a_text_field_emits_a_json_string_save() {
         var input = child("field_filename_format")

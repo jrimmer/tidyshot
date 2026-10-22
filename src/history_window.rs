@@ -204,6 +204,18 @@ impl HistoryView {
         self.cursor = (self.cursor as i32 + delta).clamp(0, last) as usize;
     }
 
+    /// Point the cursor at a row and select it.
+    ///
+    /// A window click names the row it hit, so the row is used directly rather
+    /// than as a delta from the cursor QML last saw.
+    pub fn select_row(&mut self, index: usize, extend: bool) {
+        if index >= self.rows.len() {
+            return;
+        }
+        self.cursor = index;
+        self.select_cursor(extend);
+    }
+
     /// Select the cursor row, or add it to the selection.
     pub fn select_cursor(&mut self, extend: bool) {
         if self.cursor >= self.rows.len() {
@@ -298,11 +310,6 @@ impl HistoryView {
     }
 }
 
-/// Move a file to the store's trash directory, reporting the final path.
-pub fn trash(root: &Path, path: &Path) -> Result<PathBuf, String> {
-    history::move_to_trash(root, path).map_err(|error| error.to_string())
-}
-
 /// Run the retention cleanup on startup.
 ///
 /// The cleanup is best-effort: a failure is reported but never stops the app
@@ -376,11 +383,15 @@ fn publish(snapshot: Snapshot) {
         Some(thread) => {
             let _ = thread.queue(move |mut api| api.as_mut().apply(snapshot));
         }
-        None => *PENDING.lock().expect("history queue poisoned") = Some(snapshot),
+        None => PENDING
+            .lock()
+            .expect("history queue poisoned")
+            .push(snapshot),
     }
 }
 
-static PENDING: std::sync::Mutex<Option<Snapshot>> = std::sync::Mutex::new(None);
+/// Snapshots produced before QML bound, replayed in order at the bind.
+static PENDING: std::sync::Mutex<Vec<Snapshot>> = std::sync::Mutex::new(Vec::new());
 
 /// Open the selected capture, or the newest one, in the annotate editor.
 pub fn annotate_selected() -> Option<PathBuf> {
@@ -450,6 +461,11 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "selectCursor"]
         fn select_cursor(self: Pin<&mut Self>, extend: bool);
+
+        /// Select one row by index, adding to the selection when extending.
+        #[qinvokable]
+        #[cxx_name = "selectRow"]
+        fn select_row(self: Pin<&mut Self>, index: i32, extend: bool);
 
         /// Select every visible row.
         #[qinvokable]
@@ -534,10 +550,19 @@ impl qobject::HistoryApi {
     pub fn bind(mut self: Pin<&mut Self>) {
         let _ = BOUND.set(self.qt_thread());
         // A window that was opened by a command before QML loaded reloads its
-        // listing here so the filmstrip is never empty on first show.
-        let snapshot = PENDING.lock().expect("history queue poisoned").take();
-        let snapshot = snapshot.unwrap_or_else(|| view(|view| Snapshot::of(view)));
-        self.as_mut().apply(snapshot);
+        // listing here so the filmstrip is never empty on first show. Every
+        // queued snapshot is replayed in order, so a delete that followed an
+        // open does not lose the open.
+        let pending = PENDING.lock().expect("history queue poisoned");
+        if pending.is_empty() {
+            drop(pending);
+            let snapshot = view(|view| Snapshot::of(view));
+            self.as_mut().apply(snapshot);
+        } else {
+            for snapshot in pending.iter() {
+                self.as_mut().apply(snapshot.clone());
+            }
+        }
     }
 
     fn apply(mut self: Pin<&mut Self>, snapshot: Snapshot) {
@@ -574,6 +599,15 @@ impl qobject::HistoryApi {
     /// Select the cursor row, adding to the selection when extending.
     pub fn select_cursor(mut self: Pin<&mut Self>, extend: bool) {
         self.as_mut().change(|view| view.select_cursor(extend));
+    }
+
+    /// Select one row by index, adding to the selection when extending.
+    pub fn select_row(mut self: Pin<&mut Self>, index: i32, extend: bool) {
+        if index < 0 {
+            return;
+        }
+        self.as_mut()
+            .change(|view| view.select_row(index as usize, extend));
     }
 
     /// Select every visible row.
@@ -773,6 +807,69 @@ mod tests {
         assert!(view.filmstrip().is_empty());
         assert!(view.message().contains('3'));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_row_click_selects_the_row_it_names() {
+        let root = scratch("click");
+        seed(&root);
+        let mut view = HistoryView::new(&root);
+        view.show();
+        // A click carries the row it hit; no cursor delta is involved, so a
+        // fast second click cannot land on the wrong row.
+        view.select_row(2, false);
+        assert_eq!(view.cursor(), 2);
+        assert_eq!(view.selection(), [2]);
+        view.select_row(0, true);
+        assert_eq!(view.cursor(), 0);
+        assert_eq!(view.selection(), [0, 2]);
+        view.select_row(0, true);
+        assert_eq!(view.selection(), [2], "Ctrl-click toggles a row off");
+        // A row past the listing is ignored rather than wrapping.
+        view.select_row(9, false);
+        assert_eq!(view.cursor(), 0);
+        assert_eq!(view.selection(), [2]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_move_to_trash_never_overwrites_or_unlinks_a_capture() {
+        let root = scratch("trash-safe");
+        let paths = seed(&root);
+        let trashed = super::history::move_to_trash(&root, &paths[0]).unwrap();
+        assert_eq!(std::fs::read(&trashed).unwrap(), b"data");
+        // Deleting the already trashed file again is refused, so its bytes
+        // stay where the first move put them.
+        assert!(super::history::move_to_trash(&root, &trashed).is_err());
+        assert_eq!(std::fs::read(&trashed).unwrap(), b"data");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn queued_snapshots_before_the_bind_are_replayed_in_order() {
+        // A command can open the window and a second one delete before QML
+        // binds; the bind must end on the later state, not the first snapshot.
+        let mut first = HistoryView::new(scratch("pending"));
+        first.message = "opened".to_owned();
+        let mut second = HistoryView::new(scratch("pending-2"));
+        second.message = "deleted".to_owned();
+        {
+            let mut pending = PENDING.lock().unwrap();
+            pending.clear();
+            pending.push(Snapshot::of(&first));
+            pending.push(Snapshot::of(&second));
+        }
+        let queued = PENDING.lock().unwrap().clone();
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].message, "opened");
+        assert_eq!(queued[1].message, "deleted");
+        // A bind applies them all, so the last one wins.
+        let mut applied = Vec::new();
+        for snapshot in queued {
+            applied.push(snapshot.message);
+        }
+        assert_eq!(applied, ["opened", "deleted"]);
+        PENDING.lock().unwrap().clear();
     }
 
     #[test]

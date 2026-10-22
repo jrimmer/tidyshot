@@ -487,12 +487,22 @@ fn trash_target(root: &Path, source: &Path) -> PathBuf {
 /// A rename keeps the move atomic on one filesystem. Across filesystems the
 /// bytes are copied to a temporary file in the trash, fsynced and renamed into
 /// place before the source is removed, so a failed copy leaves the capture
-/// untouched. The returned path is the file inside the trash.
+/// untouched. The returned path is the file inside the trash. A source that is
+/// already inside the trash is refused, so a repeated delete can never
+/// overwrite a capture the trash already holds.
 pub fn move_to_trash(root: &Path, source: &Path) -> std::io::Result<PathBuf> {
     if !source.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("the capture is no longer available: {}", source.display()),
+        ));
+    }
+    // A source already inside the trash was moved once and must not be moved
+    // again: that would rename it over its own target and lose the trailer.
+    if source.starts_with(trash_dir(root)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("the capture is already in the trash: {}", source.display()),
         ));
     }
     std::fs::create_dir_all(trash_dir(root))?;

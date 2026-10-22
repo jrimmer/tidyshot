@@ -74,6 +74,8 @@ pub enum Command {
     },
     /// Routed with no argument: open the chooser in the UI.
     EditChooser,
+    /// Import the clipboard's local files.
+    Clipboard,
     PinChooser,
     /// Show the capture history.
     History,
@@ -194,7 +196,7 @@ pub fn route(args: &Args) -> Result<Command, RouteError> {
             Some(path) if !path.is_empty() => Ok(Command::Edit(PathBuf::from(path))),
             _ => Ok(Command::EditChooser),
         },
-        "clipboard" => Ok(Command::EditChooser),
+        "clipboard" => Ok(Command::Clipboard),
         "pin" => match &args.path {
             Some(path) if !path.is_empty() => Ok(Command::Pin(PathBuf::from(path))),
             _ => Ok(Command::PinChooser),

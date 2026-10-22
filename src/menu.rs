@@ -69,7 +69,7 @@ pub enum Route {
     Capture(CaptureRequest),
     /// Send a recording command word.
     Recording(&'static str),
-    /// Open the annotate editor.
+    /// Open the annotate editor's file chooser.
     Open,
     /// Import from the clipboard.
     Clipboard,
@@ -79,7 +79,7 @@ pub enum Route {
     Restore,
     /// Open the preferences window.
     Settings,
-    /// Pin the newest capture or a chosen file.
+    /// Pin the newest capture; a chosen file is `pin <path>`.
     Pin,
     /// Show or hide every pin.
     TogglePins,

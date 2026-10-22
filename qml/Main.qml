@@ -353,11 +353,10 @@ ApplicationWindow {
         onSearchChanged: function (text) { HistoryApi.search(text) }
         onMoved: function (delta) { HistoryApi.moveCursor(delta) }
         onRowSelected: function (index, extend) {
-            HistoryApi.moveCursor(index - HistoryApi.cursor)
-            HistoryApi.selectCursor(extend)
+            HistoryApi.selectRow(index, extend)
         }
         onRowActivated: function (index) {
-            HistoryApi.moveCursor(index - HistoryApi.cursor)
+            HistoryApi.selectRow(index, false)
             HistoryApi.annotate()
         }
         onDeleteRequested: HistoryApi.deleteSelected()

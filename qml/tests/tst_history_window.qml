@@ -78,37 +78,40 @@ TestCase {
         compare(findChild(history.contentItem, "historyRow_3"), null)
     }
 
-    function test_a_row_click_selects_it_and_double_click_opens_it() {
+    function test_a_row_click_selects_it_and_a_double_click_opens_it() {
+        history.takeKeyFocus()
         mouseClick(findChild(history.contentItem, "historyRow_0"), 10, 10)
         compare(selectedSpy.count, 1)
         compare(selectedSpy.signalArguments[0][0], 0)
         compare(selectedSpy.signalArguments[0][1], false)
         var row = findChild(history.contentItem, "historyRow_1")
-        mouseClick(row, 10, 10)
-        row.childAt(10, 10).doubleClicked(Qt.LeftButton)
+        mouseDoubleClickSequence(row, 10, 10)
         compare(activatedSpy.count, 1)
         compare(activatedSpy.signalArguments[0][0], 1)
     }
 
     function test_enter_opens_the_cursor_row_and_delete_emits() {
+        history.takeKeyFocus()
         history.cursor = 2
-        verify(history.handleKey(Qt.Key_Return))
+        keyClick(Qt.Key_Return)
         compare(activatedSpy.count, 1)
         compare(activatedSpy.signalArguments[0][0], 2)
-        verify(history.handleKey(Qt.Key_Delete))
+        keyClick(Qt.Key_Delete)
         compare(deleteSpy.count, 1)
     }
 
     function test_arrow_and_hjkl_keys_move_the_cursor() {
-        verify(history.handleKey(Qt.Key_Right))
+        history.takeKeyFocus()
+        keyClick(Qt.Key_Right)
         compare(movedSpy.count, 1)
         compare(movedSpy.signalArguments[0][0], 1)
-        verify(history.handleKey(Qt.Key_H))
+        keyClick(Qt.Key_H)
         compare(movedSpy.count, 2)
         compare(movedSpy.signalArguments[1][0], -1)
-        verify(history.handleKey(Qt.Key_Escape))
+        keyClick(Qt.Key_Escape)
         compare(dismissedSpy.count, 1)
-        verify(!history.handleKey(Qt.Key_A))
+        keyClick(Qt.Key_A)
+        compare(movedSpy.count, 2)
     }
 
     function test_tabs_filter_and_the_search_box_reports_its_text() {
@@ -116,10 +119,15 @@ TestCase {
         compare(filterSpy.count, 1)
         compare(filterSpy.signalArguments[0][0], "image")
         var search = findChild(history.contentItem, "historySearch")
-        search.text = "page"
-        search.textEdited("page")
-        compare(searchSpy.count, 1)
-        compare(searchSpy.signalArguments[0][0], "page")
+        search.forceActiveFocus()
+        keyClick(Qt.Key_P)
+        keyClick(Qt.Key_A)
+        keyClick(Qt.Key_G)
+        keyClick(Qt.Key_E)
+        compare(search.text, "page")
+        compare(searchSpy.count, 4)
+        compare(searchSpy.signalArguments[3][0], "page")
+
     }
 
     function test_the_action_buttons_emit_their_signals() {

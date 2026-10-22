@@ -155,15 +155,37 @@ fn the_retention_cleanup_keeps_recent_captures() {
 
 #[test]
 fn a_settings_save_round_trips_the_retention_key() {
-    let path =
-        std::env::temp_dir().join(format!("tidyshot-cmd-settings-{}.json", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    tidyshot::settings::write_setting("history_retention_days", {
-        tidyshot::json::Value::Number(7.0)
-    })
+    let dir = scratch("settings");
+    let path = dir.join("settings.json");
+    tidyshot::settings::write_setting_at(
+        &path,
+        "history_retention_days",
+        tidyshot::json::Value::Number(7.0),
+    )
     .unwrap();
-    assert!(path.exists() || tidyshot::settings::settings_path().exists());
-    let _ = std::fs::remove_file(path);
+    let saved = std::fs::read_to_string(&path).unwrap();
+    let parsed = tidyshot::json::parse(&saved).unwrap();
+    assert_eq!(
+        parsed
+            .get("history_retention_days")
+            .and_then(|v| v.as_f64()),
+        Some(7.0)
+    );
+    // A second key keeps the first, so saving preferences never drops one.
+    tidyshot::settings::write_setting_at(
+        &path,
+        "ocr_linebreaks",
+        tidyshot::json::Value::Bool(false),
+    )
+    .unwrap();
+    let parsed = tidyshot::json::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        parsed
+            .get("history_retention_days")
+            .and_then(|v| v.as_f64()),
+        Some(7.0)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -174,6 +196,58 @@ fn a_clipboard_command_with_no_files_reports_that_nothing_was_found() {
     if let Err(message) = result {
         assert!(!message.is_empty());
     }
+}
+
+#[test]
+fn a_clipboard_file_list_imports_the_file_it_names() {
+    use tidyshot::commands::{CommandError, CommandOutput, CommandRunner, CommandSpec};
+
+    struct Fake {
+        uri_list: Vec<u8>,
+    }
+    impl CommandRunner for Fake {
+        fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+            if spec.args.iter().any(|arg| arg == "text/uri-list") {
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: self.uri_list.clone(),
+                    stderr: Vec::new(),
+                })
+            } else {
+                Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: b"no type".to_vec(),
+                })
+            }
+        }
+    }
+
+    let dir = scratch("clipboard-import");
+    let image = capture(&dir, "pasted.png");
+    let runner = Fake {
+        uri_list: format!("file://{}\r\n# comment\r\n", image.display()).into_bytes(),
+    };
+    let message = tidyshot::capture_runtime::import_clipboard_with(&runner).unwrap();
+    assert!(message.contains("pasted.png"), "{message}");
+}
+
+#[test]
+fn a_clipboard_without_media_is_refused_rather_than_opening_an_empty_editor() {
+    use tidyshot::commands::{CommandError, CommandOutput, CommandRunner, CommandSpec};
+
+    struct Empty;
+    impl CommandRunner for Empty {
+        fn run(&self, _spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"no type".to_vec(),
+            })
+        }
+    }
+    let message = tidyshot::capture_runtime::import_clipboard_with(&Empty).unwrap_err();
+    assert!(message.contains("no supported"), "{message}");
 }
 
 #[test]
@@ -192,6 +266,7 @@ fn every_routed_command_reaches_a_handler() {
         Command::Menu,
         Command::Edit(path.clone()),
         Command::EditChooser,
+        Command::Clipboard,
         Command::Pin(path.clone()),
         Command::PinChooser,
         Command::Overlay(path.clone()),

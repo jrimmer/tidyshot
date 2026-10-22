@@ -1070,6 +1070,9 @@ pub fn perform_route(route: crate::menu::Route) -> Result<String, String> {
             Ok("Settings".to_owned())
         }
         crate::menu::Route::Pin => {
+            // The menu has no file argument, so the pin with nothing chosen is
+            // the newest capture. A chosen file arrives as `pin <path>`, which
+            // is `Command::Pin` and never reaches this route.
             let root = crate::settings::data_dir();
             let path = crate::history::newest_existing(&root)
                 .map(|row| row.path)
@@ -1102,8 +1105,17 @@ pub fn perform_route(route: crate::menu::Route) -> Result<String, String> {
 /// The import never copies the user's file; the editor opens the original so
 /// no capture is duplicated or modified by reading the clipboard.
 pub fn import_clipboard() -> Result<String, String> {
-    let files = crate::clipboard::read_files(&crate::commands::SystemRunner)
-        .map_err(|error| error.message().to_owned())?;
+    import_clipboard_with(&crate::commands::SystemRunner)
+}
+
+/// Import the clipboard's local files through an explicit command runner.
+///
+/// The runner is a parameter so the file-list path can be exercised without a
+/// live Wayland clipboard.
+pub fn import_clipboard_with<R: crate::commands::CommandRunner>(
+    runner: &R,
+) -> Result<String, String> {
+    let files = crate::clipboard::read_files(runner).map_err(|error| error.message().to_owned())?;
     let Some(first) = files.first() else {
         return Err("There is no supported image or video file on the clipboard".to_owned());
     };
@@ -1122,6 +1134,7 @@ pub fn perform_command(command: Command) -> Result<String, String> {
             Ok(format!("Opened {}", path.display()))
         }
         Command::EditChooser => perform_route(crate::menu::Route::Open),
+        Command::Clipboard => perform_route(crate::menu::Route::Clipboard),
         Command::Pin(path) => {
             crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
         }
@@ -1690,6 +1703,9 @@ impl qobject::Capture {
                     self.as_mut()
                         .start_scroll(None, command == "scroll-horizontal", false, false);
                 } else {
+                    // `all-in-one` resolves to the `select` mode, the same
+                    // request a forwarded `select` link carries; it once took
+                    // the plain `area` path, so the row now matches the link.
                     self.as_mut().start_request(command, None, false);
                 }
             }
