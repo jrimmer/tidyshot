@@ -5,12 +5,26 @@
 //! goes through [`crate::storage`], so a crash cannot leave a half-written
 //! history file. A missing or malformed file reads as empty history: the
 //! captures themselves are still on disk and must stay reachable.
+//!
+//! Capture, scroll and recording workers append rows while the Qt thread
+//! deletes or clears and a startup worker prunes. Each file write is atomic on
+//! its own, but an unsynchronised read→modify→write would still interleave and
+//! drop the other writer's row, so every sequence holds one store lock.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::geometry::Rect;
 use crate::json::Value;
+
+/// The lock serialising every history read-modify-write sequence.
+static STORE: Mutex<()> = Mutex::new(());
+
+/// Take the history store lock, recovering from a panicking writer.
+fn store() -> MutexGuard<'static, ()> {
+    STORE.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The directory holding saved captures.
 #[must_use]
@@ -34,6 +48,9 @@ pub struct HistoryRow {
     pub height: u32,
     pub rect: Option<Rect>,
     pub capture_named: bool,
+    /// The file this row was imported from, when it was not captured here.
+    /// Imported rows are not screenshots, so `last-screenshot` skips them.
+    pub source_path: Option<PathBuf>,
 }
 
 impl HistoryRow {
@@ -53,6 +70,7 @@ impl HistoryRow {
             height,
             rect,
             capture_named: true,
+            source_path: None,
         }
     }
 
@@ -90,6 +108,12 @@ impl HistoryRow {
         object.insert("width".to_owned(), Value::Number(f64::from(self.width)));
         object.insert("height".to_owned(), Value::Number(f64::from(self.height)));
         object.insert("capture_named".to_owned(), Value::Bool(self.capture_named));
+        if let Some(source) = &self.source_path {
+            object.insert(
+                "source_path".to_owned(),
+                Value::String(source.display().to_string()),
+            );
+        }
         if let Some(rect) = self.rect {
             object.insert(
                 "rect".to_owned(),
@@ -131,7 +155,24 @@ impl HistoryRow {
                 .get("capture_named")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            source_path: value
+                .get("source_path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
         })
+    }
+
+    /// Whether this row is a screenshot the annotate-last path reopens.
+    ///
+    /// A scroll stitch is a screenshot too, but a recording, an imported file
+    /// and a row without a capture name are not.
+    // Ported from omnishot/app.py (dispatch: last-screenshot)
+    #[must_use]
+    pub fn is_screenshot(&self) -> bool {
+        (self.kind == "image" || self.kind == "scroll")
+            && self.capture_named
+            && self.source_path.is_none()
     }
 }
 
@@ -150,6 +191,11 @@ fn rect_from_value(value: &Value) -> Option<Rect> {
 /// Read every history row, newest first.
 #[must_use]
 pub fn read(root: &Path) -> Vec<HistoryRow> {
+    let _guard = store();
+    read_unlocked(root)
+}
+
+fn read_unlocked(root: &Path) -> Vec<HistoryRow> {
     read_at(&history_path(root))
 }
 
@@ -172,13 +218,19 @@ pub fn read_at(path: &Path) -> Vec<HistoryRow> {
 
 /// Prepend `row` to the history, then write it atomically.
 pub fn prepend(root: &Path, row: &HistoryRow) -> std::io::Result<()> {
-    let mut rows = read(root);
+    let _guard = store();
+    let mut rows = read_unlocked(root);
     rows.insert(0, row.clone());
-    write(root, &rows)
+    write_unlocked(root, &rows)
 }
 
 /// Write a complete history listing atomically.
 pub fn write(root: &Path, rows: &[HistoryRow]) -> std::io::Result<()> {
+    let _guard = store();
+    write_unlocked(root, rows)
+}
+
+fn write_unlocked(root: &Path, rows: &[HistoryRow]) -> std::io::Result<()> {
     let values: Vec<Value> = rows.iter().map(HistoryRow::to_value).collect();
     let text = Value::Array(values).to_string_pretty();
     std::fs::create_dir_all(root)?;
@@ -524,16 +576,18 @@ pub fn move_to_trash(root: &Path, source: &Path) -> std::io::Result<PathBuf> {
 /// The capture is moved first; only then is the row dropped from the history.
 /// A move failure leaves both the file and its row in place and is reported.
 pub fn delete(root: &Path, path: &Path) -> std::io::Result<PathBuf> {
+    let _guard = store();
     let trashed = move_to_trash(root, path)?;
-    let mut rows = read(root);
+    let mut rows = read_unlocked(root);
     rows.retain(|row| row.path != path);
-    write(root, &rows)?;
+    write_unlocked(root, &rows)?;
     Ok(trashed)
 }
 
 /// Move every capture in the history to the trash and clear the listing.
 pub fn clear(root: &Path) -> std::io::Result<usize> {
-    let rows = read(root);
+    let _guard = store();
+    let rows = read_unlocked(root);
     let mut moved = 0;
     for row in &rows {
         // A row whose file is already gone is dropped without touching disk.
@@ -542,7 +596,7 @@ pub fn clear(root: &Path) -> std::io::Result<usize> {
             moved += 1;
         }
     }
-    write(root, &[])?;
+    write_unlocked(root, &[])?;
     Ok(moved)
 }
 
@@ -554,9 +608,10 @@ pub fn prune(root: &Path, days: u32, now: f64) -> std::io::Result<usize> {
     if days == 0 {
         return Ok(0);
     }
+    let _guard = store();
     let cutoff = now - f64::from(days) * 86_400.0;
     // A row without a timestamp cannot be shown to be old, so it is kept.
-    let (old, keep): (Vec<HistoryRow>, Vec<HistoryRow>) = read(root)
+    let (old, keep): (Vec<HistoryRow>, Vec<HistoryRow>) = read_unlocked(root)
         .into_iter()
         .partition(|row| row.created > 0.0 && row.created < cutoff);
     let mut pruned = 0;
@@ -567,7 +622,7 @@ pub fn prune(root: &Path, days: u32, now: f64) -> std::io::Result<usize> {
         }
     }
     if !old.is_empty() {
-        write(root, &keep)?;
+        write_unlocked(root, &keep)?;
     }
     Ok(pruned)
 }
@@ -584,4 +639,16 @@ pub fn newest_matching(root: &Path, filter: KindFilter) -> Option<HistoryRow> {
     read(root)
         .into_iter()
         .find(|row| filter.matches(row) && row.path.is_file())
+}
+
+/// The newest screenshot the annotate-last path reopens.
+///
+/// This applies the ported rule exactly: recordings, imported files and rows
+/// without a capture name are skipped even when they are newer.
+// Ported from omnishot/app.py (dispatch: last-screenshot)
+#[must_use]
+pub fn newest_screenshot(root: &Path) -> Option<HistoryRow> {
+    read(root)
+        .into_iter()
+        .find(|row| row.is_screenshot() && row.path.is_file())
 }

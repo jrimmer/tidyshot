@@ -506,22 +506,15 @@ pub fn newest_capture(history: &[Value]) -> Option<String> {
 ///
 /// "Annotate last screenshot" reopens the newest capture whose pixels are a
 /// screenshot or a scroll stitch, that has a capture name, and that did not
-/// come from an external source path.
+/// come from an external source path. [`crate::history::HistoryRow`] owns that
+/// rule; this applies it to a JSON listing.
 // Ported from omnishot/app.py (dispatch: last-screenshot)
 #[must_use]
 pub fn newest_screenshot(history: &[Value]) -> Option<String> {
     history.iter().find_map(|row| {
-        let kind = row.get("kind").and_then(Value::as_str).unwrap_or("image");
-        let named = row
-            .get("capture_named")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let external = row.get("source_path").is_some();
-        if (kind == "image" || kind == "scroll") && named && !external {
-            row.get("path").and_then(Value::as_str).map(str::to_owned)
-        } else {
-            None
-        }
+        let row = crate::history::HistoryRow::from_value(row)?;
+        row.is_screenshot()
+            .then(|| row.path.display().to_string())
     })
 }
 
