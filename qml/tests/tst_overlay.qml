@@ -31,6 +31,10 @@ TestCase {
     SignalSpy { id: pinSpy; target: overlay; signalName: "pinRequested" }
     SignalSpy { id: trashSpy; target: overlay; signalName: "trashRequested" }
     SignalSpy { id: dismissedSpy; target: overlay; signalName: "dismissed" }
+    SignalSpy { id: exportSpy; target: overlay; signalName: "exportRequested" }
+    SignalSpy { id: openSpy; target: overlay; signalName: "openExternalRequested" }
+    SignalSpy { id: saveAllSpy; target: overlay; signalName: "saveAllRequested" }
+    SignalSpy { id: closeAllSpy; target: overlay; signalName: "closeAllRequested" }
 
     function init() {
         activateSpy.clear()
@@ -39,6 +43,11 @@ TestCase {
         pinSpy.clear()
         trashSpy.clear()
         dismissedSpy.clear()
+        exportSpy.clear()
+        openSpy.clear()
+        saveAllSpy.clear()
+        closeAllSpy.clear()
+        overlay.dragUri = ""
         overlay.title = "Capture ready"
         overlay.info = ""
         overlay.video = false
@@ -116,6 +125,50 @@ TestCase {
         compare(button("trashButton").visible, true)
         mouseClick(button("trashButton"), 10, 10)
         compare(trashSpy.count, 1)
+    }
+
+    function test_the_export_menu_emits_the_chosen_format() {
+        mouseClick(button("exportButton"), 10, 10)
+        var menu = button("exportMenu")
+        verify(menu !== null)
+        var expected = [
+            ["exportPng", "png"], ["exportJpeg", "jpeg"],
+            ["exportWebp", "webp"], ["exportHeic", "heic"]
+        ]
+        for (var index = 0; index < expected.length; ++index) {
+            menu.open()
+            waitForRendering(overlay)
+            var item = button(expected[index][0])
+            verify(item !== null, expected[index][0])
+            item.triggered()
+            compare(exportSpy.count, index + 1)
+            compare(exportSpy.signalArguments[index][0], expected[index][1])
+        }
+        menu.close()
+    }
+
+    function test_open_save_all_and_close_all_emit_their_signals() {
+        mouseClick(button("openButton"), 10, 10)
+        compare(openSpy.count, 1)
+        mouseClick(button("saveAllButton"), 10, 10)
+        compare(saveAllSpy.count, 1)
+        mouseClick(button("closeAllButton"), 10, 10)
+        compare(closeAllSpy.count, 1)
+    }
+
+    function test_a_drag_offers_the_rust_built_uri_when_present() {
+        // The Rust side percent-encodes the path once; the handle must carry
+        // that body rather than the display URL.
+        overlay.dragUri = "file:///tmp/my%20shot.png\r\n"
+        waitForRendering(overlay)
+        compare(button("dragHandle").Drag.mimeData["text/uri-list"],
+                "file:///tmp/my%20shot.png\r\n")
+        overlay.dragUri = ""
+        overlay.contentUrl = "file:///tmp/fallback.png"
+        waitForRendering(overlay)
+        compare(String(button("dragHandle").Drag.mimeData["text/uri-list"]),
+                "file:///tmp/fallback.png")
+        overlay.contentUrl = ""
     }
 
     function test_drag_out_closes_unless_alt_keeps_it() {

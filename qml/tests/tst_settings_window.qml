@@ -12,19 +12,32 @@ TestCase {
     name: "SettingsWindow"
     when: windowShown
 
-    Window {
-        width: 900
-        height: 700
-        visible: true
+    // The settings window is its own top-level Window, not an Item, so it is
+    // created without a parent and torn down after the suite.
+    Component {
+        id: settingsComponent
         SettingsWindow {
-            id: settings
-            anchors.fill: parent
+            width: 900
+            height: 700
+            visible: true
         }
+    }
+    property var settings: null
+
+    function initTestCase() {
+        settings = settingsComponent.createObject(null)
+        verify(settings !== null)
+    }
+
+    function cleanupTestCase() {
+        settings.destroy()
+        settings = null
     }
 
     SignalSpy { id: valueSpy; target: settings; signalName: "valueChosen" }
     SignalSpy { id: shortcutSpy; target: settings; signalName: "shortcutChosen" }
     SignalSpy { id: resetSpy; target: settings; signalName: "resetShortcutsRequested" }
+    SignalSpy { id: closedSpy; target: settings; signalName: "closed" }
 
     readonly property string model: JSON.stringify({
         "pages": [
@@ -78,20 +91,38 @@ TestCase {
         valueSpy.clear()
         shortcutSpy.clear()
         resetSpy.clear()
+        closedSpy.clear()
+        settings.visible = true
         settings.modelJson = ""
         settings.modelJson = testcase.model
         settings.selectTab("general")
     }
 
+    function child(name) {
+        return findChild(settings.contentItem, name)
+    }
+
+    function test_the_window_is_a_top_level_window() {
+        verify(settings instanceof Window)
+        compare(settings.flags & Qt.Window, Qt.Window)
+        compare(settings.title, "TidyShot Settings")
+    }
+
+    function test_closing_reports_to_the_singleton() {
+        mouseClick(child("closeSettingsButton"), 5, 5)
+        compare(closedSpy.count, 1)
+        compare(settings.visible, false)
+    }
+
     function test_every_page_renders_its_button() {
         for (var index = 0; index < settings.pages.length; ++index) {
             var id = settings.pages[index].id
-            verify(findChild(settings, "page_" + id) !== null, "page button for " + id)
+            verify(child("page_" + id) !== null, "page button for " + id)
         }
     }
 
     function test_a_number_field_emits_a_number_save() {
-        var slider = findChild(settings, "field_capture_delay")
+        var slider = child("field_capture_delay")
         verify(slider !== null)
         slider.value = 12
         slider.moved()
@@ -101,7 +132,7 @@ TestCase {
     }
 
     function test_a_text_field_emits_a_json_string_save() {
-        var input = findChild(settings, "field_filename_format")
+        var input = child("field_filename_format")
         verify(input !== null)
         input.text = "TidyShot %S"
         input.editingFinished()
@@ -112,8 +143,8 @@ TestCase {
 
     function test_a_bool_field_emits_a_bool_save() {
         settings.selectTab("quickaccess")
-        waitForRendering(settings)
-        var check = findChild(settings, "field_close_after_drag")
+        waitForRendering(settings.contentItem)
+        var check = child("field_close_after_drag")
         verify(check !== null)
         compare(check.checked, true)
         mouseClick(check, 5, 5)
@@ -125,8 +156,8 @@ TestCase {
 
     function test_a_choice_field_emits_the_selected_value() {
         settings.selectTab("quickaccess")
-        waitForRendering(settings)
-        var combo = findChild(settings, "field_preview_corner")
+        waitForRendering(settings.contentItem)
+        var combo = child("field_preview_corner")
         verify(combo !== null)
         combo.currentIndex = 2
         combo.activated(2)
@@ -137,8 +168,8 @@ TestCase {
 
     function test_the_shortcut_page_lists_the_managed_block() {
         settings.selectTab("shortcuts")
-        waitForRendering(settings)
-        var field = findChild(settings, "shortcut_area")
+        waitForRendering(settings.contentItem)
+        var field = child("shortcut_area")
         verify(field !== null)
         compare(field.text, "CTRL + PRINT")
         field.text = "SUPER + A"
@@ -150,14 +181,14 @@ TestCase {
 
     function test_restore_defaults_is_reachable() {
         settings.selectTab("shortcuts")
-        waitForRendering(settings)
-        mouseClick(findChild(settings, "resetShortcutsButton"), 5, 5)
+        waitForRendering(settings.contentItem)
+        mouseClick(child("resetShortcutsButton"), 5, 5)
         compare(resetSpy.count, 1)
     }
 
     function test_the_advanced_page_carries_the_restart_tooltip() {
         settings.selectTab("advanced")
-        waitForRendering(settings)
+        waitForRendering(settings.contentItem)
         var field = settings.fieldFor("hardware_video_decoding")
         verify(field !== null)
         compare(field.restart, true)
@@ -166,8 +197,8 @@ TestCase {
 
     function test_the_about_page_renders() {
         settings.selectTab("about")
-        waitForRendering(settings)
-        verify(findChild(settings, "aboutVersion") !== null)
-        compare(findChild(settings, "pageTitle").text, "About")
+        waitForRendering(settings.contentItem)
+        verify(child("aboutVersion") !== null)
+        compare(child("pageTitle").text, "About")
     }
 }

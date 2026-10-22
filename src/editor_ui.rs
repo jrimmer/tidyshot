@@ -149,12 +149,39 @@ struct Drag {
     moved: bool,
 }
 
+/// The annotation defaults the settings page writes, applied to a fresh
+/// interaction so a new document starts with the configured color, stroke,
+/// text size, arrow style and highlighter opacity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationDefaults {
+    pub color: Color,
+    pub stroke: f64,
+    pub font_size: f64,
+    pub arrow_style: String,
+    pub highlight_alpha: f64,
+}
+
+impl Default for AnnotationDefaults {
+    fn default() -> Self {
+        Self {
+            color: Color::new(0xff, 0x5b, 0x61, 255),
+            stroke: 4.0,
+            font_size: 20.0,
+            arrow_style: "standard".to_owned(),
+            highlight_alpha: 0.35,
+        }
+    }
+}
+
 /// The editor's interaction state.
 #[derive(Debug, Clone)]
 pub struct EditorInteraction {
     tool: Tool,
     color: Color,
     stroke: f64,
+    font_size: f64,
+    arrow_style: String,
+    highlight_alpha: f64,
     drag: Option<Drag>,
     crop: Option<Rect>,
     selected: Option<usize>,
@@ -171,10 +198,19 @@ impl Default for EditorInteraction {
 impl EditorInteraction {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_defaults(&AnnotationDefaults::default())
+    }
+
+    /// A fresh interaction that starts from the configured defaults.
+    #[must_use]
+    pub fn with_defaults(defaults: &AnnotationDefaults) -> Self {
         Self {
             tool: Tool::Select,
-            color: Color::new(0xff, 0x5b, 0x61, 255),
-            stroke: 4.0,
+            color: defaults.color,
+            stroke: defaults.stroke.clamp(1.0, 40.0),
+            font_size: defaults.font_size.clamp(10.0, 96.0),
+            arrow_style: defaults.arrow_style.clone(),
+            highlight_alpha: defaults.highlight_alpha.clamp(0.0, 1.0),
             drag: None,
             crop: None,
             selected: None,
@@ -213,6 +249,16 @@ impl EditorInteraction {
 
     pub fn set_stroke(&mut self, stroke: f64) {
         self.stroke = stroke.clamp(1.0, 40.0);
+    }
+
+    #[must_use]
+    pub const fn font_size(&self) -> f64 {
+        self.font_size
+    }
+
+    #[must_use]
+    pub fn arrow_style(&self) -> &str {
+        &self.arrow_style
     }
 
     #[must_use]
@@ -318,15 +364,14 @@ impl EditorInteraction {
                 }
             }
             Tool::Text => {
-                let rect = text_rect(drag.start, drag.current, self.stroke);
+                let rect = text_rect(drag.start, drag.current, self.stroke, self.font_size);
                 let mut annotation = self.base_annotation("text", rect, document);
                 annotation
                     .props
                     .insert("text".to_owned(), Value::String(String::new()));
-                annotation.props.insert(
-                    "font_size".to_owned(),
-                    Value::Number(font_size(self.stroke)),
-                );
+                annotation
+                    .props
+                    .insert("font_size".to_owned(), Value::Number(self.font_size));
                 annotation
                     .props
                     .insert("text_style".to_owned(), Value::String("plain".to_owned()));
@@ -401,7 +446,7 @@ impl EditorInteraction {
                     annotation.props.insert("by".to_owned(), Value::Number(by));
                     annotation
                         .props
-                        .insert("style".to_owned(), Value::String("standard".to_owned()));
+                        .insert("style".to_owned(), Value::String(self.arrow_style.clone()));
                 }
                 if tool == Tool::Counter {
                     annotation
@@ -536,7 +581,10 @@ impl EditorInteraction {
             + 1.0;
         props.insert("z".to_owned(), Value::Number(z));
         if kind == "highlight" {
-            props.insert("highlight_alpha".to_owned(), Value::Number(100.0));
+            props.insert(
+                "highlight_alpha".to_owned(),
+                Value::Number((self.highlight_alpha * 255.0).round()),
+            );
         }
         Annotation::new(props)
     }
@@ -575,18 +623,14 @@ pub fn rect_from_points(a: Point, b: Point) -> Rect {
     )
 }
 
-fn text_rect(a: Point, b: Point, stroke: f64) -> Rect {
+fn text_rect(a: Point, b: Point, stroke: f64, font_size: f64) -> Rect {
     let rect = rect_from_points(a, b);
     Rect::new(
         rect.x,
         rect.y,
         rect.width.max(120.0 + stroke),
-        rect.height.max(font_size(stroke) * 1.25),
+        rect.height.max(font_size * 1.25),
     )
-}
-
-fn font_size(stroke: f64) -> f64 {
-    (stroke * 5.0).clamp(18.0, 72.0)
 }
 
 fn points_bounds(points: &[Point]) -> Rect {
@@ -751,15 +795,19 @@ pub fn load_document(path: &std::path::Path) -> Result<Document, EditorError> {
 /// Write the document to `path`, atomically, in the format the path names.
 ///
 /// A `.omnishot` path keeps the editable project; any other path flattens the
-/// rendered image to PNG.
+/// rendered image in the format the extension names.
 pub fn save_document(document: &Document, path: &std::path::Path) -> Result<(), EditorError> {
     if is_project(path) {
-        document.save(path)
-    } else {
-        let bytes = document.render_export().to_png();
-        crate::storage::atomic_write_file(path, &bytes)
-            .map_err(|error| EditorError::new(error.to_string()))
+        return document.save(path);
     }
+    // A path naming a lossy format exports through the same encoder the
+    // preview uses; PNG keeps the in-process encoder.
+    let format = crate::export::ExportFormat::from_path(path);
+    let image = document.render_export();
+    let options =
+        crate::export::ExportOptions::from_settings(&crate::settings::stored_settings(), format);
+    crate::export::write(&crate::commands::SystemRunner, &image, path, options)
+        .map_err(|error| EditorError::new(error.to_string()))
 }
 
 /// The document's filename for the window title.

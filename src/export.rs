@@ -204,7 +204,9 @@ pub fn encode_spec(
     if format == ExportFormat::Png {
         return None;
     }
-    encode_specs(format, width, height, quality).into_iter().next()
+    encode_specs(format, width, height, quality)
+        .into_iter()
+        .next()
 }
 
 /// Every encoder attempt for a format, in order.
@@ -263,30 +265,12 @@ pub fn encode_specs(
             let crf = heic_crf(quality).to_string();
             vec![
                 raw().args([
-                    "-c:v",
-                    "libx265",
-                    "-preset",
-                    "medium",
-                    "-crf",
-                    &crf,
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-f",
-                    "heif",
+                    "-c:v", "libx265", "-preset", "medium", "-crf", &crf, "-pix_fmt", "yuv420p",
+                    "-f", "heif",
                 ]),
                 raw().args([
-                    "-c:v",
-                    "libx265",
-                    "-preset",
-                    "medium",
-                    "-crf",
-                    &crf,
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-tag:v",
-                    "hvc1",
-                    "-f",
-                    "mov",
+                    "-c:v", "libx265", "-preset", "medium", "-crf", &crf, "-pix_fmt", "yuv420p",
+                    "-tag:v", "hvc1", "-f", "mov",
                 ]),
             ]
         }
@@ -313,8 +297,21 @@ pub fn encode<R: CommandRunner>(
     image: &Image,
     options: ExportOptions,
 ) -> Result<Vec<u8>, ExportError> {
+    encode_with_note(runner, image, options).map(|(bytes, _)| bytes)
+}
+
+/// Encode an image and report any caveat about the result.
+///
+/// The note is empty for a faithful encoding. HEIC retried through the
+/// QuickTime muxer is the one case: the file is HEVC video, not a HEIF image,
+/// so the caller can warn before a receiver fails to open it.
+pub fn encode_with_note<R: CommandRunner>(
+    runner: &R,
+    image: &Image,
+    options: ExportOptions,
+) -> Result<(Vec<u8>, Option<String>), ExportError> {
     if options.format == ExportFormat::Png {
-        return Ok(image.to_png());
+        return Ok((image.to_png(), None));
     }
     let specs = encode_specs(
         options.format,
@@ -328,13 +325,16 @@ pub fn encode<R: CommandRunner>(
         ));
     }
     let mut last_detail = String::new();
-    for spec in specs {
+    let attempts = specs.len();
+    for (index, spec) in specs.into_iter().enumerate() {
         let attempt = if options.format == ExportFormat::Heic {
             // The muxer needs a seekable destination, so the raw frame still
             // arrives on stdin but the container lands in a sibling temp file.
             let destination = temp_path(options.format);
             let mut file_spec = spec.clone();
-            file_spec.args.push(destination.to_string_lossy().into_owned());
+            file_spec
+                .args
+                .push(destination.to_string_lossy().into_owned());
             let result = runner.run(&file_spec.clone().stdin(image.data.clone()));
             let bytes = std::fs::read(&destination).unwrap_or_default();
             let _ = std::fs::remove_file(&destination);
@@ -352,7 +352,14 @@ pub fn encode<R: CommandRunner>(
                 .map(|output| output.stdout)
         };
         match attempt {
-            Ok(bytes) if !bytes.is_empty() => return Ok(bytes),
+            Ok(bytes) if !bytes.is_empty() => {
+                let note = (options.format == ExportFormat::Heic && attempts > 1 && index > 0)
+                    .then(|| {
+                        "HEIC export fell back to HEVC in a QuickTime container; some viewers will not open it"
+                            .to_owned()
+                    });
+                return Ok((bytes, note));
+            }
             Ok(_) => continue,
             Err(CommandError::Failure { output, .. }) => {
                 last_detail = output.stderr_string();
@@ -387,12 +394,22 @@ pub fn write<R: CommandRunner>(
     path: &Path,
     options: ExportOptions,
 ) -> Result<(), ExportError> {
-    let bytes = encode(runner, image, options)?;
+    write_with_note(runner, image, path, options).map(|_| ())
+}
+
+/// Write an encoded image atomically and report any caveat about it.
+pub fn write_with_note<R: CommandRunner>(
+    runner: &R,
+    image: &Image,
+    path: &Path,
+    options: ExportOptions,
+) -> Result<Option<String>, ExportError> {
+    let (bytes, note) = encode_with_note(runner, image, options)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     crate::storage::atomic_write_file(path, &bytes)?;
-    Ok(())
+    Ok(note)
 }
 
 /// The export path for a capture in another format.
@@ -409,10 +426,7 @@ pub fn export_path(capture: &Path, format: ExportFormat) -> PathBuf {
     let mut candidate = parent.join(format!("{stem}.{}", format.extension()));
     let mut sequence = 2;
     while candidate.exists() {
-        candidate = parent.join(format!(
-            "{stem} ({sequence}).{}",
-            format.extension()
-        ));
+        candidate = parent.join(format!("{stem} ({sequence}).{}", format.extension()));
         sequence += 1;
     }
     candidate
@@ -456,15 +470,7 @@ pub fn decode<R: CommandRunner>(
         let decode = CommandSpec::new("ffmpeg")
             .args(["-v", "error", "-i"])
             .arg(temporary.to_string_lossy().into_owned())
-            .args([
-                "-frames:v",
-                "1",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgba",
-                "-",
-            ])
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
             .timeout(Duration::from_secs(30));
         let raw = runner.run(&decode)?;
         Ok((width, height, raw))
@@ -532,7 +538,10 @@ mod tests {
         }
         assert_eq!(ExportFormat::parse("JPG"), Some(ExportFormat::Jpeg));
         assert_eq!(ExportFormat::parse("heif"), Some(ExportFormat::Heic));
-        assert_eq!(ExportFormat::from_path(Path::new("a.unknown")), ExportFormat::Png);
+        assert_eq!(
+            ExportFormat::from_path(Path::new("a.unknown")),
+            ExportFormat::Png
+        );
         assert!(!ExportFormat::Jpeg.keeps_alpha());
         assert!(ExportFormat::Webp.keeps_alpha());
     }
@@ -540,10 +549,7 @@ mod tests {
     #[test]
     fn the_stored_format_and_quality_are_read_from_settings() {
         let settings = std::collections::BTreeMap::from([
-            (
-                "export_format".to_owned(),
-                Value::String("webp".to_owned()),
-            ),
+            ("export_format".to_owned(), Value::String("webp".to_owned())),
             ("webp_quality".to_owned(), Value::Number(63.0)),
         ]);
         let options = ExportOptions::default_from_settings(&settings);
@@ -554,10 +560,8 @@ mod tests {
             90,
             "a missing quality keeps the source default"
         );
-        let clamped = std::collections::BTreeMap::from([(
-            "jpeg_quality".to_owned(),
-            Value::Number(500.0),
-        )]);
+        let clamped =
+            std::collections::BTreeMap::from([("jpeg_quality".to_owned(), Value::Number(500.0))]);
         assert_eq!(
             ExportOptions::from_settings(&clamped, ExportFormat::Jpeg).quality,
             100
@@ -601,6 +605,146 @@ mod tests {
         let second = export_path(&capture, ExportFormat::Webp);
         assert_eq!(second, dir.join("shot (2).webp"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn command_available(program: &str) -> bool {
+        std::process::Command::new(program)
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn sample(width: usize, height: usize) -> Image {
+        let mut data = Vec::with_capacity(width * height * 4);
+        for y in 0..height {
+            for x in 0..width {
+                data.extend_from_slice(&[
+                    (x * 255 / width.max(1)) as u8,
+                    (y * 255 / height.max(1)) as u8,
+                    0x80,
+                    255,
+                ]);
+            }
+        }
+        Image::new(width, height, data)
+    }
+
+    #[test]
+    fn jpeg_and_webp_encode_and_decode_back_to_the_same_dimensions() {
+        // Encodes through the real ffmpeg CLI and decodes the written file
+        // back with ffprobe and ffmpeg, so a header-only check cannot pass.
+        if !command_available("ffmpeg") || !command_available("ffprobe") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tidyshot-export-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = sample(37, 21);
+        for (format, quality) in [
+            (ExportFormat::Jpeg, 90),
+            (ExportFormat::Webp, 80),
+            (ExportFormat::Png, 90),
+        ] {
+            let destination = dir.join(format!("shot.{}", format.extension()));
+            let note = write_with_note(
+                &crate::commands::SystemRunner,
+                &image,
+                &destination,
+                ExportOptions { format, quality },
+            )
+            .unwrap_or_else(|error| panic!("{format:?} export: {error}"));
+            assert!(note.is_none(), "{format:?} has no caveat");
+            let bytes = std::fs::read(&destination).unwrap();
+            assert!(bytes.len() > 32, "{format:?} wrote a real file");
+            let decoded = decode(&crate::commands::SystemRunner, &bytes, format)
+                .unwrap_or_else(|error| panic!("{format:?} decode: {error}"));
+            assert_eq!((decoded.width, decoded.height), (37, 21), "{format:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_quality_change_changes_the_encoded_size() {
+        if !command_available("ffmpeg") {
+            return;
+        }
+        let image = sample(64, 64);
+        let encode = |quality: u32| {
+            encode(
+                &crate::commands::SystemRunner,
+                &image,
+                ExportOptions {
+                    format: ExportFormat::Jpeg,
+                    quality,
+                },
+            )
+            .unwrap()
+        };
+        let low = encode(10);
+        let high = encode(95);
+        assert!(
+            high.len() > low.len(),
+            "quality 95 ({}) should be larger than quality 10 ({})",
+            high.len(),
+            low.len()
+        );
+    }
+
+    #[test]
+    fn a_heic_fallback_carries_a_caveat() {
+        // Model the two attempts with a runner that fails the HEIF muxer and
+        // succeeds the second time, so the note is asserted without needing a
+        // libx265 build.
+        struct Fake {
+            calls: std::sync::Mutex<usize>,
+        }
+        impl crate::commands::CommandRunner for Fake {
+            fn run(
+                &self,
+                spec: &crate::commands::CommandSpec,
+            ) -> Result<crate::commands::CommandOutput, crate::commands::CommandError> {
+                if !spec.args.iter().any(|arg| arg == "libx265") {
+                    return Ok(crate::commands::CommandOutput {
+                        status: 0,
+                        stdout: b"image".to_vec(),
+                        stderr: Vec::new(),
+                    });
+                }
+                let mut calls = self.calls.lock().unwrap();
+                *calls += 1;
+                if *calls == 1 {
+                    // The HEIF attempt writes nothing and reports stderr.
+                    return Ok(crate::commands::CommandOutput {
+                        status: 1,
+                        stdout: Vec::new(),
+                        stderr: b"Unknown encoder".to_vec(),
+                    });
+                }
+                let destination = spec.args.last().unwrap();
+                std::fs::write(destination, b"hevc-mov").unwrap();
+                Ok(crate::commands::CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let (bytes, note) = encode_with_note(
+            &Fake {
+                calls: std::sync::Mutex::new(0),
+            },
+            &sample(8, 8),
+            ExportOptions {
+                format: ExportFormat::Heic,
+                quality: 90,
+            },
+        )
+        .unwrap();
+        assert_eq!(bytes, b"hevc-mov");
+        let note = note.expect("the fallback is flagged");
+        assert!(note.contains("QuickTime"));
     }
 
     #[test]

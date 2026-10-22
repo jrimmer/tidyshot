@@ -17,6 +17,7 @@ TestCase {
         id: previewComponent
         PreviewWindow {
             open: true
+            width: 900
             title: "TidyShot Preview — shot.png"
             info: "640 × 480"
             contentUrl: ""
@@ -45,6 +46,10 @@ TestCase {
     SignalSpy { id: pinSpy; target: preview; signalName: "pinRequested" }
     SignalSpy { id: dismissedSpy; target: preview; signalName: "dismissed" }
     SignalSpy { id: collapseSpy; target: preview; signalName: "collapseRequested" }
+    SignalSpy { id: exportSpy; target: preview; signalName: "exportRequested" }
+    SignalSpy { id: openSpy; target: preview; signalName: "openExternalRequested" }
+    SignalSpy { id: saveAllSpy; target: preview; signalName: "saveAllRequested" }
+    SignalSpy { id: closeAllSpy; target: preview; signalName: "closeAllRequested" }
 
     function init() {
         annotateSpy.clear()
@@ -54,6 +59,12 @@ TestCase {
         pinSpy.clear()
         dismissedSpy.clear()
         collapseSpy.clear()
+        exportSpy.clear()
+        openSpy.clear()
+        saveAllSpy.clear()
+        closeAllSpy.clear()
+        preview.dragUri = ""
+        preview.contentUrl = ""
         preview.open = true
         preview.autoCloseMs = 0
         preview.autoCloseAction = "close"
@@ -83,6 +94,34 @@ TestCase {
         compare(pinSpy.count, 1)
         mouseClick(button("annotateButton"), 10, 10)
         compare(annotateSpy.count, 1)
+    }
+
+    function test_export_open_save_all_and_close_all_forward() {
+        var overlay = preview.contentItem.children[0]
+        var menu = findChild(overlay, "exportMenu")
+        verify(menu !== null)
+        menu.open()
+        waitForRendering(preview.contentItem)
+        // The menu popup is its own top-level window, so its items are found
+        // from the menu's content item rather than this window.
+        findChild(menu.contentItem, "exportWebp").triggered()
+        compare(exportSpy.count, 1)
+        compare(String(exportSpy.signalArguments[0][0]), "webp")
+        menu.close()
+        waitForRendering(preview.contentItem)
+        mouseClick(button("openButton"), 10, 10)
+        compare(openSpy.count, 1)
+        mouseClick(button("saveAllButton"), 10, 10)
+        compare(saveAllSpy.count, 1)
+        mouseClick(button("closeAllButton"), 10, 10)
+        compare(closeAllSpy.count, 1)
+    }
+
+    function test_the_drag_body_carries_the_rust_uri() {
+        preview.dragUri = "file:///tmp/my%20shot.png\r\n"
+        waitForRendering(preview.contentItem)
+        compare(button("dragHandle").Drag.mimeData["text/uri-list"],
+                "file:///tmp/my%20shot.png\r\n")
     }
 
     function test_escape_and_close_forward_the_dismissal() {

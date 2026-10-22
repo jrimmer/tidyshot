@@ -8,7 +8,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Rectangle {
+Window {
     id: settings
 
     /// The settings model: pages, fields, shortcuts, active tab, message.
@@ -100,6 +100,11 @@ Rectangle {
     width: Math.max(560, 820 * uiScale)
     height: Math.max(420, 620 * uiScale)
     color: "#1e1e1e"
+    title: "TidyShot Settings"
+    flags: Qt.Window
+    // Closing through the window manager still tells the singleton, so the
+    // menu row and `tidyshot settings` agree about whether it is open.
+    onClosing: settings.closed()
 
     function px(value) {
         return Math.max(1, Math.round(value * settings.uiScale))
@@ -264,6 +269,20 @@ Rectangle {
                 visible: text !== ""
             }
         }
+    }
+
+    Button {
+        objectName: "closeSettingsButton"
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: settings.px(8)
+        text: "×"
+        onClicked: settings.dismiss()
+    }
+
+    /// Close the window; the close handler reports it to the singleton.
+    function dismiss() {
+        settings.close()
     }
 
     Component {

@@ -248,6 +248,7 @@ Window {
             onSaveRequested: editorWindow.saveOrAsk()
             onSaveAsRequested: editorWindow.askSaveAs()
             onCopyRequested: EditorApi.copy()
+            onExportRequested: function (format) { EditorApi.exportAs(format) }
             onDoneRequested: editorWindow.close()
             onApplyCropRequested: EditorApi.applyCrop()
             onCancelCropRequested: EditorApi.cancelCrop()
@@ -434,7 +435,9 @@ Window {
         title: "Save the annotated image"
         fileMode: FileDialog.SaveFile
         defaultSuffix: "png"
-        nameFilters: ["PNG image (*.png)", "Editable project (*.omnishot)"]
+        nameFilters: ["PNG image (*.png)", "JPEG image (*.jpg *.jpeg)",
+                      "WebP image (*.webp)", "HEIC image (*.heic)",
+                      "Editable project (*.omnishot)"]
         onAccepted: {
             EditorApi.saveUrl(selectedFile)
             editorWindow.saveAsPrompt = false

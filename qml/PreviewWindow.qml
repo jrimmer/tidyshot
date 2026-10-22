@@ -29,10 +29,18 @@ Window {
     /// menu behind it, so Enter and Escape work without a first click.
     property bool takeFocus: false
 
+    /// The `text/uri-list` body a drag-out carries, built by the Rust side.
+    property string dragUri: ""
+
     signal annotateRequested()
     signal copyRequested()
     signal saveRequested()
     signal pinRequested()
+    signal saveAllRequested()
+    signal closeAllRequested()
+    /// A format id from the overlay's export menu.
+    signal exportRequested(string format)
+    signal openExternalRequested()
     signal dismissed()
     /// The body was collapsed or restored; the Rust side adjusts the anchor.
     signal collapseRequested(bool collapsed)
@@ -80,9 +88,14 @@ Window {
         autoCloseMs: previewWindow.autoCloseMs
         autoCloseAction: previewWindow.autoCloseAction
         closeAfterDrag: previewWindow.closeAfterDrag
+        dragUri: previewWindow.dragUri
         onActivate: previewWindow.annotateRequested()
         onCopyRequested: previewWindow.copyRequested()
         onSaveRequested: previewWindow.saveRequested()
+        onSaveAllRequested: previewWindow.saveAllRequested()
+        onCloseAllRequested: previewWindow.closeAllRequested()
+        onExportRequested: function (format) { previewWindow.exportRequested(format) }
+        onOpenExternalRequested: previewWindow.openExternalRequested()
         onPinRequested: previewWindow.pinRequested()
         onDismissed: previewWindow.dismissed()
     }

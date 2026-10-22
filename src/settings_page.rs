@@ -436,56 +436,52 @@ pub fn value_of(values: &BTreeMap<String, Value>, key: &str) -> Value {
 /// Merge one change into the existing map and write it atomically.
 ///
 /// Unknown keys already in the file are preserved, so a hand-edited setting
-/// or a newer key is never dropped by the writer.
+/// or a newer key is never dropped by the writer. A value that does not match
+/// its field is rejected instead of being silently replaced by the default.
 pub fn write_value(path: &Path, key: &str, value: Value) -> std::io::Result<()> {
     let field = field(key);
+    let value = validate(field, value)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
     let mut values = read_settings(path);
-    values.insert(key.to_owned(), validate(field, value));
+    values.insert(key.to_owned(), value);
     write_settings(path, &values)
 }
 
 /// Coerce a change to the type and bounds the schema declares.
 ///
-/// A value that does not match its field is kept as given so an unknown key
-/// survives a round trip; a known field is clamped, which keeps a slider from
-/// writing an out-of-range delay.
-#[must_use]
-pub fn validate(field: Option<&SettingField>, value: Value) -> Value {
+/// An unknown key is kept as given so it survives a round trip. A known field
+/// is clamped to its bounds, while a value of the wrong type or an unknown
+/// choice is rejected rather than reset, so a broken hand edit is never
+/// rewritten silently.
+pub fn validate(field: Option<&SettingField>, value: Value) -> Result<Value, String> {
     let Some(field) = field else {
-        return value;
+        return Ok(value);
     };
     match (field.kind, value) {
-        (FieldKind::Bool, Value::Bool(value)) => Value::Bool(value),
+        (FieldKind::Bool, Value::Bool(value)) => Ok(Value::Bool(value)),
         (FieldKind::Number, Value::Number(value)) => {
-            Value::Number(value.clamp(field.min, field.max))
+            Ok(Value::Number(value.clamp(field.min, field.max)))
         }
-        (FieldKind::Text, Value::String(value)) => Value::String(value),
+        (FieldKind::Text, Value::String(value)) => Ok(Value::String(value)),
         (FieldKind::Choice, Value::String(value)) if field.choices.contains(&value.as_str()) => {
-            Value::String(value)
+            Ok(Value::String(value))
         }
-        // A value of the wrong type falls back to the default instead of
-        // leaving the runtime to interpret a broken file.
-        _ => field.default.value(),
+        (_, _) => Err(format!(
+            "{} expects {}; the edit was not saved",
+            field.label,
+            match field.kind {
+                FieldKind::Bool => "true or false",
+                FieldKind::Number => "a number",
+                FieldKind::Text => "text",
+                FieldKind::Choice => "one of the listed choices",
+            }
+        )),
     }
 }
 
 /// Write the settings file the app reads.
 pub fn save_value(key: &str, value: Value) -> std::io::Result<()> {
     write_value(&crate::settings::settings_path(), key, value)
-}
-
-/// The live Quick Access settings, read from the same file the writer commits.
-#[must_use]
-pub fn preview_settings() -> crate::overlay::PreviewSettings {
-    crate::overlay::preview_settings(&read_settings(&crate::settings::settings_path()))
-}
-
-/// The live OCR settings.
-#[must_use]
-pub fn ocr_settings() -> crate::text_result::TextSettings {
-    crate::text_result::TextSettings::from_value(&Value::Object(read_settings(
-        &crate::settings::settings_path(),
-    )))
 }
 
 /// The live capture delay in seconds.
@@ -508,9 +504,12 @@ pub fn filename_format(values: &BTreeMap<String, Value>) -> String {
         .to_owned()
 }
 
-/// The live annotation defaults: color and stroke width.
+/// The live annotation defaults: color, stroke, text size, arrow style and
+/// highlighter alpha, all read from the same file the settings page writes.
 #[must_use]
-pub fn annotate_defaults(values: &BTreeMap<String, Value>) -> (crate::color::Rgba, f64) {
+pub fn annotation_defaults(
+    values: &BTreeMap<String, Value>,
+) -> crate::editor_ui::AnnotationDefaults {
     let color = values
         .get("annotation_color")
         .and_then(Value::as_str)
@@ -520,7 +519,34 @@ pub fn annotate_defaults(values: &BTreeMap<String, Value>) -> (crate::color::Rgb
         .get("annotation_stroke")
         .and_then(Value::as_f64)
         .map_or(4.0, |value| value.clamp(1.0, 24.0));
-    (color, stroke)
+    let font_size = values
+        .get("annotation_font_size")
+        .and_then(Value::as_f64)
+        .map_or(20.0, |value| value.clamp(10.0, 96.0));
+    let arrow_style = values
+        .get("arrow_style")
+        .and_then(Value::as_str)
+        .filter(|value| ["standard", "hollow", "filled", "line"].contains(value))
+        .unwrap_or("standard")
+        .to_owned();
+    let highlight_alpha = values
+        .get("highlight_alpha")
+        .and_then(Value::as_f64)
+        .map_or(0.35, |value| value.clamp(0.05, 1.0));
+    crate::editor_ui::AnnotationDefaults {
+        color,
+        stroke,
+        font_size,
+        arrow_style,
+        highlight_alpha,
+    }
+}
+
+/// The live annotation defaults: color and stroke width.
+#[must_use]
+pub fn annotate_defaults(values: &BTreeMap<String, Value>) -> (crate::color::Rgba, f64) {
+    let defaults = annotation_defaults(values);
+    (defaults.color, defaults.stroke)
 }
 
 /// The managed shortcut block's start marker.
@@ -611,21 +637,48 @@ pub fn read_shortcuts(path: &Path) -> Vec<(&'static Shortcut, String)> {
 }
 
 /// Find the key of the managed `o.bind` line for `shortcut`.
+///
+/// Only lines inside the managed block are considered, so an unrelated user
+/// binding that also launches `tidyshot` never reads as the managed key.
 fn bound_key(text: &str, shortcut: &Shortcut) -> Option<String> {
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("o.bind(") else {
+    for line in managed_lines(text) {
+        let Some(parts) = bind_arguments(line) else {
             continue;
         };
-        let Some(rest) = rest.strip_suffix(')') else {
-            continue;
-        };
-        let parts = quoted_arguments(rest);
         if parts.len() == 3 && parts[2].ends_with(&format!(" {}", shortcut.command)) {
             return Some(parts[0].clone());
         }
     }
     None
+}
+
+/// The lines of the managed block, excluding its markers.
+///
+/// A block that never got an end marker (the installer's original layout)
+/// runs to the end of the file. With no block at all, nothing is returned.
+fn managed_lines(text: &str) -> Vec<&str> {
+    let mut inside = false;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !inside {
+            inside = trimmed.starts_with(BEGIN_MARKER);
+            continue;
+        }
+        if trimmed.starts_with(END_MARKER) {
+            break;
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// The quoted arguments of an `o.bind(...)` line.
+fn bind_arguments(line: &str) -> Option<Vec<String>> {
+    let line = line.trim();
+    let rest = line.strip_prefix("o.bind(")?;
+    let rest = rest.strip_suffix(')')?;
+    Some(quoted_arguments(rest))
 }
 
 /// Split a comma-separated list of double-quoted strings.
@@ -654,18 +707,14 @@ fn quoted_arguments(text: &str) -> Vec<String> {
 /// The launcher the managed block invokes.
 ///
 /// The existing block's launcher wins so a checkout or native install keeps
-/// pointing at the same executable after a shortcut edit.
+/// pointing at the same executable after a shortcut edit. Only the managed
+/// block is consulted: a user binding to a different install is not captured.
 #[must_use]
 pub fn launcher_from(text: &str) -> String {
-    for line in text.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("o.bind(") else {
+    for line in managed_lines(text) {
+        let Some(parts) = bind_arguments(line) else {
             continue;
         };
-        let Some(rest) = rest.strip_suffix(')') else {
-            continue;
-        };
-        let parts = quoted_arguments(rest);
         if let Some(command) = parts.get(2)
             && let Some((prefix, _)) = command.rsplit_once(' ')
         {
@@ -711,13 +760,17 @@ fn escape(value: &str) -> String {
 ///
 /// A block without the end marker (the layout the installer has written so
 /// far) runs to the end of the file; rewriting it adds the end marker while
-/// leaving nothing after it to lose.
+/// leaving nothing after it to lose. A marker with trailing whitespace or an
+/// inline comment still counts, so an edited block is replaced rather than a
+/// second one being appended.
 #[must_use]
 pub fn rewrite_bindings(text: &str, shortcuts: &[(&Shortcut, String)]) -> String {
     let launcher = launcher_from(text);
     let block = managed_block(shortcuts, &launcher);
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let begin = lines.iter().position(|line| line.trim() == BEGIN_MARKER);
+    let begin = lines
+        .iter()
+        .position(|line| line.trim().starts_with(BEGIN_MARKER));
     let Some(begin) = begin else {
         let mut out = text.to_owned();
         if !out.is_empty() && !out.ends_with('\n') {
@@ -733,7 +786,7 @@ pub fn rewrite_bindings(text: &str, shortcuts: &[(&Shortcut, String)]) -> String
         .iter()
         .enumerate()
         .skip(begin + 1)
-        .find(|(_, line)| line.trim() == END_MARKER)
+        .find(|(_, line)| line.trim().starts_with(END_MARKER))
         .map(|(index, _)| index);
     let mut out = String::new();
     for line in &lines[..begin] {
@@ -1017,18 +1070,25 @@ pub struct SettingsRust {
 
 impl Default for SettingsRust {
     fn default() -> Self {
+        // Construction must not touch the user's home: the singleton can be
+        // created on any launch, and a broken HOME must never affect a
+        // headless invocation. The real bindings and settings are read in
+        // `bind`, which only runs once QML is up.
+        let shortcuts: Vec<(&'static Shortcut, String)> = SHORTCUTS
+            .iter()
+            .map(|shortcut| (shortcut, shortcut.default_key.to_owned()))
+            .collect();
         let mut rust = Self {
             open: false,
             tab: QString::from("general"),
-            model_json: QString::from(""),
+            model_json: QString::from(model_json(&BTreeMap::new(), &shortcuts, "general", "")),
             message: QString::from(""),
-            shortcuts: read_shortcuts(&bindings_path()),
+            shortcuts,
         };
         if let Some(tab) = PENDING.lock().expect("settings queue poisoned").take() {
             rust.tab = QString::from(tab);
             rust.open = true;
         }
-        rust.refresh();
         rust
     }
 }
@@ -1077,9 +1137,13 @@ impl qobject::SettingsApi {
     pub fn bind(mut self: Pin<&mut Self>) {
         let pending = PENDING.lock().expect("settings queue poisoned").take();
         let _ = BOUND.set(self.qt_thread());
-        if let Some(tab) = pending {
-            self.as_mut().rust_mut().get_mut().tab = QString::from(tab);
-            self.as_mut().rust_mut().get_mut().open = true;
+        {
+            let rust = self.as_mut().rust_mut().get_mut();
+            rust.shortcuts = read_shortcuts(&bindings_path());
+            if let Some(tab) = pending {
+                rust.tab = QString::from(tab);
+                rust.open = true;
+            }
         }
         self.as_mut().sync();
     }
@@ -1247,7 +1311,7 @@ mod tests {
                 FieldKind::Choice => Value::String(field.choices.last().unwrap().to_string()),
             };
             write_value(&path, field.key, value.clone()).unwrap();
-            expected.insert(field.key.to_owned(), validate(Some(field), value));
+            expected.insert(field.key.to_owned(), validate(Some(field), value).unwrap());
         }
         let stored = read_settings(&path);
         for (key, value) in &expected {
@@ -1292,26 +1356,37 @@ mod tests {
     }
 
     #[test]
-    fn invalid_values_fall_back_to_the_schema_default() {
+    fn a_wrongly_typed_value_is_rejected_and_the_file_keeps_its_value() {
         let delay = field("capture_delay").unwrap();
-        assert_eq!(
-            validate(Some(delay), Value::String("soon".to_owned())),
-            Value::Number(3.0)
-        );
+        assert!(validate(Some(delay), Value::String("soon".to_owned())).is_err());
         assert_eq!(
             validate(Some(delay), Value::Number(900.0)),
-            Value::Number(60.0)
+            Ok(Value::Number(60.0))
         );
         let corner = field("preview_corner").unwrap();
-        assert_eq!(
-            validate(Some(corner), Value::String("middle".to_owned())),
-            Value::String("bottom-right".to_owned())
-        );
+        assert!(validate(Some(corner), Value::String("middle".to_owned())).is_err());
         // An unknown key keeps the value so a future setting is never rewritten.
         assert_eq!(
             validate(None, Value::String("x".to_owned())),
-            Value::String("x".to_owned())
+            Ok(Value::String("x".to_owned()))
         );
+
+        // A hand-edited file with a broken value is never reset by an
+        // unrelated write.
+        let dir = scratch("reject");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"capture_delay":"soon"}"#).unwrap();
+        assert!(write_value(&path, "capture_delay", Value::String("soon".to_owned())).is_err());
+        assert_eq!(
+            read_settings(&path).get("capture_delay"),
+            Some(&Value::String("soon".to_owned()))
+        );
+        write_value(&path, "ocr_languages", Value::String("eng".to_owned())).unwrap();
+        assert_eq!(
+            read_settings(&path).get("capture_delay"),
+            Some(&Value::String("soon".to_owned()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

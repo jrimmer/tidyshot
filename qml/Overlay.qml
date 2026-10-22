@@ -181,7 +181,10 @@ Rectangle {
             color: "#9a9a9a"
         }
 
-        Row {
+        // A Flow keeps every action reachable when the preview is narrow:
+        // Export, Open, Save All and Close All wrap onto a second line.
+        Flow {
+            width: parent.width
             spacing: 6
             Button {
                 objectName: "annotateButton"
@@ -213,6 +216,16 @@ Rectangle {
                 objectName: "openButton"
                 text: "Open"
                 onClicked: preview.openExternalRequested()
+            }
+            Button {
+                objectName: "saveAllButton"
+                text: "Save All"
+                onClicked: preview.saveAllRequested()
+            }
+            Button {
+                objectName: "closeAllButton"
+                text: "Close All"
+                onClicked: preview.closeAllRequested()
             }
         }
 

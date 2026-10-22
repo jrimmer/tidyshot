@@ -113,6 +113,9 @@ ApplicationWindow {
             previewWindow.autoCloseMs = Preview.autoCloseMs
             previewWindow.autoCloseAction = Preview.autoCloseAction
             previewWindow.closeAfterDrag = Preview.closeAfterDrag
+            var dragUri = Preview.dragUri()
+            if (previewWindow.dragUri !== dragUri)
+                previewWindow.dragUri = dragUri
             previewWindow.takeFocus = Preview.standalone
             previewWindow.message = Preview.message
         }
@@ -142,6 +145,10 @@ ApplicationWindow {
         onAnnotateRequested: Preview.annotate()
         onCopyRequested: Preview.copy()
         onSaveRequested: Preview.save()
+        onSaveAllRequested: Preview.saveAll()
+        onCloseAllRequested: Preview.closeAll()
+        onExportRequested: function (format) { Preview.exportAs(format) }
+        onOpenExternalRequested: Preview.openExternal()
         onPinRequested: Preview.pin()
         onDismissed: Preview.dismiss()
         onCollapseRequested: function (collapsed) {
@@ -326,13 +333,16 @@ ApplicationWindow {
         transientParent: null
     }
 
-    // Settings: its own window, opened by the menu row, `tidyshot settings`
-    // or a settings URL. Every change writes the file atomically and the next
-    // capture, preview or recording reads it back, so it applies live.
+    // Settings: its own top-level window, opened by the menu row,
+    // `tidyshot settings` or a settings URL. Every change writes the file
+    // atomically and the next capture, preview or recording reads it back, so
+    // it applies live. It is not a child of this window: an Item cannot be a
+    // standalone dialog, and the menu window is only 480x620.
     SettingsWindow {
         id: settingsWindow
-        visible: settingsOpen
-        modelJson: settingsJson
+        transientParent: null
+        visible: SettingsApi.open
+        modelJson: SettingsApi.modelJson
         onValueChosen: function (key, jsonValue) {
             SettingsApi.setValue(key, jsonValue)
         }
@@ -344,18 +354,18 @@ ApplicationWindow {
         onClosed: SettingsApi.close()
     }
 
-    property bool settingsOpen: false
-    property string settingsJson: ""
-
+    // The settings singleton is fed from a short timer for the same reason as
+    // the other windows in this build: cxx-qt property notifications do not
+    // reach QML bindings here, so the window reads the model directly.
     Timer {
         id: settingsSync
         interval: 60
         repeat: true
         running: true
         onTriggered: {
-            window.settingsOpen = SettingsApi.open
-            if (window.settingsJson !== SettingsApi.modelJson)
-                window.settingsJson = SettingsApi.modelJson
+            settingsWindow.visible = SettingsApi.open
+            if (settingsWindow.modelJson !== SettingsApi.modelJson)
+                settingsWindow.modelJson = SettingsApi.modelJson
         }
     }
 

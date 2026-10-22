@@ -344,17 +344,32 @@ pub fn export_capture<R: CommandRunner>(
     path: &Path,
     format: crate::export::ExportFormat,
 ) -> Result<PathBuf, PreviewError> {
+    export_capture_with_note(runner, path, format).map(|(path, _)| path)
+}
+
+/// Export a capture and report any caveat about the encoding.
+///
+/// A HEIC that fell back to an HEVC-in-QuickTime stream is written, but the
+/// note tells the user most receivers will not open it.
+pub fn export_capture_with_note<R: CommandRunner>(
+    runner: &R,
+    path: &Path,
+    format: crate::export::ExportFormat,
+) -> Result<(PathBuf, Option<String>), PreviewError> {
     let image = load_image(runner, path)?;
     let settings = crate::settings::stored_settings();
     let options = crate::export::ExportOptions::from_settings(&settings, format);
     let destination = crate::export::export_path(path, format);
-    crate::export::write(runner, &image, &destination, options)
+    let note = crate::export::write_with_note(runner, &image, &destination, options)
         .map_err(|error| PreviewError::Image(error.to_string()))?;
-    Ok(destination)
+    Ok((destination, note))
 }
 
 /// Decode any supported image file, including the lossy export formats.
-pub fn load_image<R: CommandRunner>(runner: &R, path: &Path) -> Result<crate::pngzip::Image, PreviewError> {
+pub fn load_image<R: CommandRunner>(
+    runner: &R,
+    path: &Path,
+) -> Result<crate::pngzip::Image, PreviewError> {
     let bytes = std::fs::read(path)?;
     let format = crate::export::ExportFormat::from_path(path);
     crate::export::decode(runner, &bytes, format)
@@ -370,10 +385,7 @@ pub fn open_capture<R: CommandRunner>(runner: &R, path: &Path) -> Result<(), Pre
 /// The drag specification for a preview.
 #[must_use]
 pub fn drag_spec(preview: &PreviewWindow) -> crate::drag::DragSpec {
-    crate::drag::drag_spec(
-        preview.path().to_path_buf(),
-        preview.close_after_drag(),
-    )
+    crate::drag::drag_spec(preview.path().to_path_buf(), preview.close_after_drag())
 }
 
 /// Save every visible preview back through the atomic store.
@@ -598,6 +610,16 @@ pub mod qobject {
         #[qinvokable]
         fn save(self: Pin<&mut Self>);
 
+        /// Save every retained capture through the atomic store.
+        #[qinvokable]
+        #[cxx_name = "saveAll"]
+        fn save_all_previews(self: Pin<&mut Self>);
+
+        /// Close every retained capture preview.
+        #[qinvokable]
+        #[cxx_name = "closeAll"]
+        fn close_all(self: Pin<&mut Self>);
+
         /// Open the capture in the annotate editor.
         #[qinvokable]
         fn annotate(self: Pin<&mut Self>);
@@ -658,6 +680,9 @@ pub struct PreviewRust {
     auto_close_action: QString,
     close_after_drag: bool,
     window: Option<PreviewWindow>,
+    /// Every capture shown since the last Close All, so Save All commits all
+    /// of them rather than only the visible one.
+    retained: Vec<PathBuf>,
 }
 
 impl Default for PreviewRust {
@@ -691,6 +716,7 @@ impl Default for PreviewRust {
             auto_close_action: QString::from("close"),
             close_after_drag: true,
             window: None,
+            retained: Vec::new(),
         };
         if let Some(published) = startup {
             rust.apply(published);
@@ -735,7 +761,25 @@ impl PreviewRust {
         self.close_after_drag = window.close_after_drag();
         self.standalone = published.standalone;
         self.open = !window.dismissed();
+        if !self.retained.contains(&published.path) {
+            self.retained.push(published.path);
+        }
         self.window = Some(window);
+    }
+
+    /// Every capture still tracked for Save All, visible one first.
+    fn retained_paths(&self) -> Vec<PathBuf> {
+        let visible = self
+            .window
+            .as_ref()
+            .map(|window| window.capture_path().to_path_buf());
+        let mut paths: Vec<PathBuf> = visible.into_iter().collect();
+        for path in &self.retained {
+            if !paths.contains(path) {
+                paths.push(path.clone());
+            }
+        }
+        paths
     }
 
     fn set_message(&mut self, message: &str) {
@@ -849,6 +893,33 @@ impl qobject::Preview {
         self.as_mut().sync();
     }
 
+    /// Save every retained capture, not only the visible one.
+    pub fn save_all_previews(mut self: Pin<&mut Self>) {
+        let paths = self.as_ref().retained_paths();
+        let result = save_all(&paths);
+        match result {
+            Ok(saved) => {
+                self.as_mut().rust_mut().get_mut().set_message(&format!(
+                    "Saved {saved} {}",
+                    if saved == 1 { "capture" } else { "captures" }
+                ));
+            }
+            Err(error) => self
+                .as_mut()
+                .rust_mut()
+                .get_mut()
+                .set_message(&error.to_string()),
+        }
+        self.as_mut().sync();
+    }
+
+    /// Close every retained capture preview.
+    pub fn close_all(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().get_mut().retained.clear();
+        self.as_mut().dismiss();
+        self.as_mut().sync();
+    }
+
     /// Open the capture in the annotate editor.
     pub fn annotate(mut self: Pin<&mut Self>) {
         let path = self.window.as_ref().map_or_else(
@@ -920,9 +991,15 @@ impl qobject::Preview {
     }
 
     /// Export the capture as `format` beside itself.
+    ///
+    /// The encode runs on a worker thread: an ffmpeg call can take minutes, and
+    /// blocking the Qt event loop would freeze the whole window while it runs.
     pub fn export_as(mut self: Pin<&mut Self>, format: &QString) {
         let Some(format) = crate::export::ExportFormat::parse(&format.to_string()) else {
-            self.as_mut().rust_mut().get_mut().set_message("Unknown export format");
+            self.as_mut()
+                .rust_mut()
+                .get_mut()
+                .set_message("Unknown export format");
             self.as_mut().sync();
             return;
         };
@@ -930,30 +1007,52 @@ impl qobject::Preview {
             || PathBuf::from(self.path().to_string()),
             |window| window.path().to_path_buf(),
         );
-        let result = export_capture(&crate::commands::SystemRunner, &path, format).map(|exported| {
-            self.as_mut()
-                .rust_mut()
-                .get_mut()
-                .set_message(&format!("Exported {}", exported.display()));
-        });
-        if let Err(error) = result {
-            self.as_mut().rust_mut().get_mut().set_message(&error.to_string());
-        }
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .set_message(&format!("Exporting {}…", format.label()));
         self.as_mut().sync();
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = export_capture_with_note(&crate::commands::SystemRunner, &path, format);
+            let _ = thread.queue(move |mut preview| {
+                {
+                    let rust = preview.as_mut().rust_mut().get_mut();
+                    match result {
+                        Ok((exported, note)) => {
+                            let mut message = format!("Exported {}", exported.display());
+                            if let Some(note) = note {
+                                message.push_str(&format!(" — {note}"));
+                            }
+                            rust.set_message(&message);
+                        }
+                        Err(error) => rust.set_message(&error.to_string()),
+                    }
+                }
+                preview.as_mut().sync();
+            });
+        });
     }
 
     /// Open the capture in the desktop's default application.
-    pub fn open_external(mut self: Pin<&mut Self>) {
+    pub fn open_external(self: Pin<&mut Self>) {
         let path = self.window.as_ref().map_or_else(
             || PathBuf::from(self.path().to_string()),
             |window| window.path().to_path_buf(),
         );
-        let result = open_capture(&crate::commands::SystemRunner, &path);
-        self.as_mut()
-            .rust_mut()
-            .get_mut()
-            .action_error(result, "Opened in the default application");
-        self.as_mut().sync();
+        // `xdg-open` waits for the launcher, so it runs off the Qt thread.
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = open_capture(&crate::commands::SystemRunner, &path);
+            let _ = thread.queue(move |mut preview| {
+                preview
+                    .as_mut()
+                    .rust_mut()
+                    .get_mut()
+                    .action_error(result, "Opened in the default application");
+                preview.as_mut().sync();
+            });
+        });
     }
 
     /// Collapse or restore the preview body.
@@ -1240,6 +1339,92 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let missing = dir.join("missing.png");
         assert!(save_capture(&missing).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_all_commits_every_capture_and_reports_the_count() {
+        let dir =
+            std::env::temp_dir().join(format!("tidyshot-preview-save-all-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("one.png");
+        let second = dir.join("two.png");
+        for path in [&first, &second] {
+            std::fs::write(
+                path,
+                crate::pngzip::Image::new(2, 2, vec![7u8; 16]).to_png(),
+            )
+            .unwrap();
+        }
+        assert_eq!(save_all(&[first.clone(), second.clone()]).unwrap(), 2);
+        // A missing file fails the whole run instead of being skipped.
+        let missing = dir.join("gone.png");
+        assert!(save_all(&[first, missing]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_drag_spec_names_the_capture_and_the_close_rule() {
+        let monitor = MonitorScreen::new(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0));
+        let mut preview = PreviewWindow::new("/tmp/my shot.png", 10, 10, settings(), Some(monitor));
+        preview.set_capture_path(PathBuf::from("/tmp/my shot.png"));
+        let spec = drag_spec(&preview);
+        assert_eq!(spec.body, "file:///tmp/my%20shot.png\r\n");
+        assert_eq!(spec.keep_modifier, "Alt");
+        assert!(spec.close_after_drag);
+    }
+
+    #[test]
+    fn a_clipboard_copy_is_built_from_the_file_format() {
+        let dir =
+            std::env::temp_dir().join(format!("tidyshot-preview-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = crate::pngzip::Image::new(2, 2, vec![3u8; 16]).to_png();
+        #[derive(Default)]
+        struct Fake {
+            seen: Mutex<Vec<CommandSpec>>,
+        }
+        impl CommandRunner for Fake {
+            fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+                self.seen.lock().unwrap().push(spec.clone());
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+        }
+        let runner = Fake::default();
+        let webp = dir.join("shot.webp");
+        std::fs::write(&webp, &image).unwrap();
+        copy_capture(&runner, &webp).unwrap();
+        let png = dir.join("shot.png");
+        std::fs::write(&png, &image).unwrap();
+        copy_capture(&runner, &png).unwrap();
+        let video = dir.join("take.mp4");
+        std::fs::write(&video, b"mp4").unwrap();
+        copy_capture(&runner, &video).unwrap();
+        let seen = runner.seen.lock().unwrap();
+        assert_eq!(
+            seen[0].args,
+            vec!["--type".to_owned(), "image/webp".to_owned()]
+        );
+        assert_eq!(
+            seen[1].args,
+            vec!["--type".to_owned(), "image/png".to_owned()]
+        );
+        assert_eq!(
+            seen[2].args,
+            vec!["--type".to_owned(), "text/uri-list".to_owned()]
+        );
+        assert!(
+            seen[2]
+                .stdin
+                .as_deref()
+                .is_some_and(|body| body.starts_with(b"file://"))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -22,6 +22,12 @@ pub struct EditorWindowError {
     message: String,
 }
 
+/// The annotation defaults from the settings file, read fresh for every
+/// document so a saved change applies to the next open without a restart.
+fn live_defaults() -> crate::editor_ui::AnnotationDefaults {
+    crate::settings_page::annotation_defaults(&crate::settings::stored_settings())
+}
+
 impl EditorWindowError {
     #[must_use]
     pub fn message(&self) -> &str {
@@ -93,7 +99,7 @@ impl EditorState {
             .map_err(|error| EditorWindowError::new(error.message().to_owned()))?;
         self.document = Some(document);
         self.path = Some(path.to_path_buf());
-        self.interaction = EditorInteraction::new();
+        self.interaction = EditorInteraction::with_defaults(&live_defaults());
         self.dirty = false;
         self.message.clear();
         self.revision += 1;
@@ -104,7 +110,7 @@ impl EditorState {
     pub fn start_with_image(&mut self, image: crate::pngzip::Image, path: Option<PathBuf>) {
         self.document = Some(Document::new(image, None, false));
         self.path = path;
-        self.interaction = EditorInteraction::new();
+        self.interaction = EditorInteraction::with_defaults(&live_defaults());
         self.dirty = false;
         self.message.clear();
         self.revision += 1;
@@ -463,6 +469,11 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "saveUrl"]
         fn save_url(self: Pin<&mut Self>, url: &QUrl);
+
+        /// Export the rendered canvas in `format` beside the opened file.
+        #[qinvokable]
+        #[cxx_name = "exportAs"]
+        fn export_as(self: Pin<&mut Self>, format: &QString);
 
         /// Copy the rendered canvas to the clipboard.
         #[qinvokable]
@@ -936,6 +947,60 @@ impl qobject::EditorApi {
             return;
         };
         self.as_mut().save_as(&QString::from(path));
+    }
+
+    /// Export the rendered canvas in `format` beside the opened file.
+    pub fn export_as(mut self: Pin<&mut Self>, format: &QString) {
+        let Some(format) = crate::export::ExportFormat::parse(&format.to_string()) else {
+            self.as_mut().rust_mut().get_mut().state.message = "Unknown export format".to_owned();
+            self.as_mut().sync();
+            return;
+        };
+        let destination = {
+            let state = &self.as_mut().rust_mut().get_mut().state;
+            let Some(path) = state.path() else {
+                self.as_mut().rust_mut().get_mut().state.message =
+                    "Save the image before exporting it".to_owned();
+                self.as_mut().sync();
+                return;
+            };
+            let suffix = format!("export-{}", format.id());
+            let mut candidate = path.with_file_name(format!(
+                "{}-{suffix}.{}",
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("capture"),
+                format.extension()
+            ));
+            let mut sequence = 2;
+            while candidate.exists() {
+                candidate = path.with_file_name(format!(
+                    "{}-{suffix} ({sequence}).{}",
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("capture"),
+                    format.extension()
+                ));
+                sequence += 1;
+            }
+            candidate
+        };
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .get_mut()
+            .state
+            .save(Some(&destination));
+        match result {
+            Ok(path) => {
+                self.as_mut().rust_mut().get_mut().state.message =
+                    format!("Exported {}", display_name(&path));
+            }
+            Err(error) => {
+                self.as_mut().rust_mut().get_mut().state.message = error.to_string();
+            }
+        }
+        self.as_mut().sync();
     }
 
     /// Copy the rendered canvas to the clipboard.

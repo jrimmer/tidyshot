@@ -31,6 +31,7 @@ TestCase {
     SignalSpy { id: saveSpy; target: toolbar; signalName: "saveRequested" }
     SignalSpy { id: cropSpy; target: toolbar; signalName: "applyCropRequested" }
     SignalSpy { id: saveAsSpy; target: toolbar; signalName: "saveAsRequested" }
+    SignalSpy { id: exportSpy; target: toolbar; signalName: "exportRequested" }
 
     function init() {
         toolSpy.clear()
@@ -39,6 +40,7 @@ TestCase {
         saveSpy.clear()
         cropSpy.clear()
         saveAsSpy.clear()
+        exportSpy.clear()
         toolbar.currentTool = "select"
         toolbar.canUndo = false
         toolbar.cropActive = false
@@ -80,6 +82,24 @@ TestCase {
     function test_save_as_is_reachable() {
         mouseClick(findChild(toolbar, "saveAsButton"), 5, 5)
         compare(saveAsSpy.count, 1)
+    }
+
+    function test_the_export_menu_emits_the_chosen_format() {
+        mouseClick(findChild(toolbar, "exportButton"), 5, 5)
+        var menu = findChild(toolbar, "exportMenu")
+        verify(menu !== null)
+        var expected = [
+            ["exportPng", "png"], ["exportJpeg", "jpeg"],
+            ["exportWebp", "webp"], ["exportHeic", "heic"]
+        ]
+        for (var index = 0; index < expected.length; ++index) {
+            menu.open()
+            waitForRendering(toolbar)
+            findChild(menu.contentItem, expected[index][0]).triggered()
+            compare(exportSpy.count, index + 1)
+            compare(exportSpy.signalArguments[index][0], expected[index][1])
+        }
+        menu.close()
     }
 
     function test_crop_actions_only_show_while_a_crop_is_provisional() {

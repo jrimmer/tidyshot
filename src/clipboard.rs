@@ -188,7 +188,10 @@ pub fn image_mime(format: crate::export::ExportFormat) -> &'static str {
 /// Build the `wl-copy` invocation for an image payload.
 // Ported from omnishot/backend.py (copy_image)
 #[must_use]
-pub fn image_spec(format: crate::export::ExportFormat, bytes: Vec<u8>) -> crate::commands::CommandSpec {
+pub fn image_spec(
+    format: crate::export::ExportFormat,
+    bytes: Vec<u8>,
+) -> crate::commands::CommandSpec {
     crate::commands::clipboard_spec(image_mime(format), bytes)
 }
 

@@ -36,6 +36,8 @@ Rectangle {
     signal saveRequested()
     signal saveAsRequested()
     signal copyRequested()
+    /// A format id from the export menu.
+    signal exportRequested(string format)
     signal doneRequested()
     signal applyCropRequested()
     signal cancelCropRequested()
@@ -149,6 +151,36 @@ Rectangle {
                 text: "Save As…"
                 font.pixelSize: toolbar.px(12)
                 onClicked: toolbar.saveAsRequested()
+            }
+            Button {
+                objectName: "exportButton"
+                text: "Export"
+                font.pixelSize: toolbar.px(12)
+                onClicked: exportMenu.open()
+            }
+            Menu {
+                id: exportMenu
+                objectName: "exportMenu"
+                MenuItem {
+                    objectName: "exportPng"
+                    text: "PNG"
+                    onTriggered: toolbar.exportRequested("png")
+                }
+                MenuItem {
+                    objectName: "exportJpeg"
+                    text: "JPEG"
+                    onTriggered: toolbar.exportRequested("jpeg")
+                }
+                MenuItem {
+                    objectName: "exportWebp"
+                    text: "WebP"
+                    onTriggered: toolbar.exportRequested("webp")
+                }
+                MenuItem {
+                    objectName: "exportHeic"
+                    text: "HEIC"
+                    onTriggered: toolbar.exportRequested("heic")
+                }
             }
             Button {
                 objectName: "doneButton"

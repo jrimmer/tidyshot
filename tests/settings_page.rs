@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use tidyshot::json::Value;
 use tidyshot::settings_page::{
-    BEGIN_MARKER, END_MARKER, PAGES, SHORTCUTS, annotate_defaults, capture_delay, field,
-    filename_format, model_json, page, page_of, read_settings, read_shortcuts, rewrite_bindings,
-    settings_text, write_shortcuts, write_value,
+    BEGIN_MARKER, END_MARKER, PAGES, SHORTCUTS, annotate_defaults, annotation_defaults,
+    capture_delay, field, filename_format, model_json, page, page_of, read_settings,
+    read_shortcuts, rewrite_bindings, settings_text, write_shortcuts, write_value,
 };
 
 fn scratch(name: &str) -> PathBuf {
@@ -97,19 +97,28 @@ fn a_setting_round_trips_atomically_and_the_runtime_reads_it() {
 #[test]
 fn a_failed_write_keeps_the_previous_settings() {
     let dir = scratch("failed");
+    // A non-empty directory at the exact settings path cannot be replaced by
+    // the atomic rename, so the writer surfaces the failure and leaves what
+    // was there untouched.
     let path = dir.join("settings.json");
+    std::fs::create_dir_all(&path).unwrap();
+    let previous = path.join("previous.json");
     let original = settings_text(&BTreeMap::from([(
         "capture_delay".to_owned(),
         Value::Number(2.0),
     )]));
-    std::fs::write(&path, &original).unwrap();
-    // A destination that is a directory cannot be replaced, so the writer
-    // surfaces the error instead of reporting success; the existing file is
-    // untouched.
-    let blocked = dir.join("settings.json.d");
-    std::fs::create_dir_all(&blocked).unwrap();
-    assert!(write_value(&blocked, "capture_delay", Value::Number(4.0)).is_err());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    std::fs::write(&previous, &original).unwrap();
+    let blocked = write_value(&path, "capture_delay", Value::Number(4.0));
+    assert!(blocked.is_err(), "the atomic rename must fail");
+    assert_eq!(std::fs::read_to_string(&previous).unwrap(), original);
+    // No temporary file is left beside the destination.
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != "settings.json")
+        .collect();
+    assert!(leftovers.is_empty(), "left over: {leftovers:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -171,14 +180,15 @@ fn every_schema_field_rejects_a_bad_type_without_losing_other_keys() {
     let dir = scratch("types");
     let path = dir.join("settings.json");
     write_value(&path, "capture_delay", Value::Number(5.0)).unwrap();
-    write_value(&path, "capture_delay", Value::String("nope".to_owned())).unwrap();
+    // A wrong-typed edit is rejected: the previous value stays as written.
+    assert!(write_value(&path, "capture_delay", Value::String("nope".to_owned())).is_err());
     let stored = read_settings(&path);
-    assert_eq!(stored.get("capture_delay"), Some(&Value::Number(3.0)));
-    // A key the schema does not know survives the fallback write.
+    assert_eq!(stored.get("capture_delay"), Some(&Value::Number(5.0)));
+    // A key the schema does not know survives a later write.
     let mut values = read_settings(&path);
     values.insert("custom_key".to_owned(), Value::Number(1.0));
     tidyshot::settings_page::write_settings(&path, &values).unwrap();
-    write_value(&path, "capture_delay", Value::String("again".to_owned())).unwrap();
+    assert!(write_value(&path, "capture_delay", Value::String("again".to_owned())).is_err());
     assert_eq!(
         read_settings(&path).get("custom_key"),
         Some(&Value::Number(1.0))
@@ -257,5 +267,78 @@ fn a_bindings_file_with_no_managed_block_reads_the_default_keys() {
     for (shortcut, key) in read {
         assert_eq!(key, shortcut.default_key);
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_user_binding_outside_the_block_never_reads_as_the_managed_shortcut() {
+    let dir = scratch("user-binding");
+    let path = dir.join("bindings.lua");
+    // A user's own binding also launches tidyshot menu, but it is outside the
+    // managed block and must not be mistaken for the managed key or launcher.
+    std::fs::write(
+        &path,
+        "o.bind(\"SUPER + X\", \"mine\", \"/home/me/bin/tidyshot menu\")\n",
+    )
+    .unwrap();
+    let read = read_shortcuts(&path);
+    for (shortcut, key) in &read {
+        assert_eq!(
+            key.as_str(),
+            shortcut.default_key,
+            "{} read from a user binding",
+            shortcut.id
+        );
+    }
+    let rewritten = rewrite_bindings(&std::fs::read_to_string(&path).unwrap(), &defaults());
+    assert!(
+        rewritten.contains("\"/home/me/bin/tidyshot menu\""),
+        "the user's line is preserved"
+    );
+    assert!(
+        !rewritten.contains("TidyShot capture\", \"/home/me/bin/tidyshot menu"),
+        "the user launcher is not captured as the managed launcher"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_marker_with_trailing_text_is_still_replaced_not_duplicated() {
+    let text = format!(
+        "hl.bind(\"SUPER + Q\", \"close\")\n{BEGIN_MARKER}  -- managed\no.bind(\"PRINT\", \"old\", \"/bin/tidyshot menu\")\n{END_MARKER} -- end\nhl.bind(\"SUPER + W\", \"web\")\n"
+    );
+    let rewritten = rewrite_bindings(&text, &defaults());
+    assert_eq!(rewritten.matches(BEGIN_MARKER).count(), 1);
+    assert_eq!(rewritten.matches("old").count(), 0);
+    assert!(rewritten.contains("\"SUPER + W\""));
+    assert!(rewritten.contains("\"SUPER + Q\""));
+}
+
+#[test]
+fn the_annotation_page_defaults_reach_the_editor() {
+    let dir = scratch("annotate-defaults");
+    let path = dir.join("settings.json");
+    write_value(
+        &path,
+        "annotation_color",
+        Value::String("#00ff00".to_owned()),
+    )
+    .unwrap();
+    write_value(&path, "annotation_stroke", Value::Number(9.0)).unwrap();
+    write_value(&path, "annotation_font_size", Value::Number(32.0)).unwrap();
+    write_value(&path, "arrow_style", Value::String("line".to_owned())).unwrap();
+    write_value(&path, "highlight_alpha", Value::Number(0.5)).unwrap();
+    let defaults = annotation_defaults(&read_settings(&path));
+    assert_eq!(defaults.color, tidyshot::color::Rgba::new(0, 255, 0, 255));
+    assert_eq!(defaults.stroke, 9.0);
+    assert_eq!(defaults.font_size, 32.0);
+    assert_eq!(defaults.arrow_style, "line");
+    assert!((defaults.highlight_alpha - 0.5).abs() < 1e-9);
+    // The editor starts a fresh document from exactly these values.
+    let interaction = tidyshot::editor_ui::EditorInteraction::with_defaults(&defaults);
+    assert_eq!(interaction.color(), defaults.color);
+    assert_eq!(interaction.stroke(), 9.0);
+    assert_eq!(interaction.font_size(), 32.0);
+    assert_eq!(interaction.arrow_style(), "line");
     let _ = std::fs::remove_dir_all(&dir);
 }

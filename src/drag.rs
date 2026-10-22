@@ -44,10 +44,7 @@ pub struct DragSpec {
 
 /// Build the drag specification for a file.
 #[must_use]
-pub fn drag_spec(
-    path: impl Into<std::path::PathBuf>,
-    close_after_drag: bool,
-) -> DragSpec {
+pub fn drag_spec(path: impl Into<std::path::PathBuf>, close_after_drag: bool) -> DragSpec {
     let path = path.into();
     let url = crate::overlay::local_file_url(&path);
     DragSpec {
