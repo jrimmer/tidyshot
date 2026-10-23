@@ -79,7 +79,7 @@ pub enum Command {
     PinChooser,
     /// Show the capture history.
     History,
-    /// Restore the most recently closed preview.
+    /// Restore the newest screenshot in the preview.
     Restore,
     /// Open the newest capture in the editor.
     Last,

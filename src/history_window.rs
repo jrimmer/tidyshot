@@ -344,10 +344,23 @@ pub fn view<T>(f: impl FnOnce(&mut HistoryView) -> T) -> T {
 
 /// Open the history window, creating its view if the GUI has not yet.
 pub fn request_open() {
-    let snapshot = view(|view| {
+    request_open_at(&crate::settings::data_dir());
+}
+
+/// Open the history window over an explicit capture store.
+///
+/// The root is a parameter so a command can be exercised against a scratch
+/// store; production passes [`crate::settings::data_dir`].
+pub fn request_open_at(root: &Path) {
+    let snapshot = {
+        let mut view = VIEW.lock().expect("history view poisoned");
+        if view.as_ref().is_none_or(|view| view.root() != root) {
+            *view = Some(HistoryView::new(root));
+        }
+        let view = view.as_mut().expect("the view was just created");
         view.show();
         Snapshot::of(view)
-    });
+    };
     publish(snapshot);
 }
 

@@ -75,7 +75,7 @@ pub enum Route {
     Clipboard,
     /// Show the history window.
     History,
-    /// Restore the newest capture in the preview.
+    /// Restore the newest screenshot in the preview.
     Restore,
     /// Open the preferences window.
     Settings,

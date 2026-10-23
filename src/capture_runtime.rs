@@ -1040,11 +1040,44 @@ static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::Capture>> =
 /// Commands that arrived before the capture object existed.
 static PENDING: std::sync::Mutex<Vec<Command>> = std::sync::Mutex::new(Vec::new());
 
+/// Whether a route's handler blocks on a subprocess or an image decode.
+///
+/// The clipboard query waits on `wl-paste`, restore reads the capture and asks
+/// the compositor for its monitor, and pin decodes the PNG for its size. All
+/// three belong on a worker thread so the menu window never freezes.
+#[must_use]
+pub const fn route_blocks(route: crate::menu::Route) -> bool {
+    matches!(
+        route,
+        crate::menu::Route::Clipboard | crate::menu::Route::Restore | crate::menu::Route::Pin
+    )
+}
+
+/// Whether a command's handler blocks on a subprocess or an image decode.
+///
+/// This mirrors [`route_blocks`] for the commands that reach the same handlers
+/// directly, plus the chosen-file pin.
+#[must_use]
+pub const fn command_blocks(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Clipboard | Command::Restore | Command::Pin(_) | Command::PinChooser
+    )
+}
+
 /// Run the non-capture side of a menu route, reporting the result line.
 ///
 /// Every route here has a real handler; a failure is returned as the message
 /// the window shows instead of being swallowed.
 pub fn perform_route(route: crate::menu::Route) -> Result<String, String> {
+    perform_route_at(route, &crate::settings::data_dir())
+}
+
+/// Run one menu route against an explicit capture store.
+///
+/// The root is a parameter so a test never reads or writes the user's history;
+/// production passes [`crate::settings::data_dir`].
+pub fn perform_route_at(route: crate::menu::Route, root: &Path) -> Result<String, String> {
     match route {
         crate::menu::Route::Open => {
             crate::editor_window::publish_chooser();
@@ -1052,19 +1085,16 @@ pub fn perform_route(route: crate::menu::Route) -> Result<String, String> {
         }
         crate::menu::Route::Clipboard => import_clipboard(),
         crate::menu::Route::History => {
-            crate::history_window::request_open();
+            crate::history_window::request_open_at(root);
             Ok("History".to_owned())
         }
-        crate::menu::Route::Restore => {
-            let root = crate::settings::data_dir();
-            match crate::history::newest_existing(&root) {
-                Some(row) => {
-                    crate::preview::publish_file(row.path);
-                    Ok("Restored the newest capture".to_owned())
-                }
-                None => Err("There is no capture to restore".to_owned()),
+        crate::menu::Route::Restore => match crate::history::newest_screenshot(root) {
+            Some(row) => {
+                crate::preview::publish_file(row.path);
+                Ok("Restored the newest capture".to_owned())
             }
-        }
+            None => Err("There is no capture to restore".to_owned()),
+        },
         crate::menu::Route::Settings => {
             crate::settings_page::publish_open("general");
             Ok("Settings".to_owned())
@@ -1073,8 +1103,7 @@ pub fn perform_route(route: crate::menu::Route) -> Result<String, String> {
             // The menu has no file argument, so the pin with nothing chosen is
             // the newest capture. A chosen file arrives as `pin <path>`, which
             // is `Command::Pin` and never reaches this route.
-            let root = crate::settings::data_dir();
-            let path = crate::history::newest_existing(&root)
+            let path = crate::history::newest_existing(root)
                 .map(|row| row.path)
                 .ok_or_else(|| "There is no capture to pin".to_owned())?;
             crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
@@ -1128,17 +1157,25 @@ pub fn import_clipboard_with<R: crate::commands::CommandRunner>(
 /// This is the headless half of the dispatcher, shared by the CLI, the socket
 /// and the GUI, so every command behaves the same however it arrived.
 pub fn perform_command(command: Command) -> Result<String, String> {
+    perform_command_at(command, &crate::settings::data_dir())
+}
+
+/// Run one command against an explicit capture store.
+///
+/// The root is a parameter so a test never reads or writes the user's history;
+/// production passes [`crate::settings::data_dir`].
+pub fn perform_command_at(command: Command, root: &Path) -> Result<String, String> {
     match command {
         Command::Edit(path) => {
             crate::editor_window::publish_open(path.clone());
             Ok(format!("Opened {}", path.display()))
         }
-        Command::EditChooser => perform_route(crate::menu::Route::Open),
-        Command::Clipboard => perform_route(crate::menu::Route::Clipboard),
+        Command::EditChooser => perform_route_at(crate::menu::Route::Open, root),
+        Command::Clipboard => perform_route_at(crate::menu::Route::Clipboard, root),
         Command::Pin(path) => {
             crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
         }
-        Command::PinChooser => perform_route(crate::menu::Route::Pin),
+        Command::PinChooser => perform_route_at(crate::menu::Route::Pin, root),
         Command::Overlay(path) => {
             crate::preview::publish_file(path.clone());
             Ok(format!("Showing {}", path.display()))
@@ -1147,33 +1184,27 @@ pub fn perform_command(command: Command) -> Result<String, String> {
             crate::text_result::request_recognition(Some(path.clone()), linebreaks);
             Ok(format!("Recognizing text in {}", path.display()))
         }
-        Command::History => perform_route(crate::menu::Route::History),
-        Command::Restore => perform_route(crate::menu::Route::Restore),
-        Command::Last => {
-            let root = crate::settings::data_dir();
-            match crate::history::newest_existing(&root) {
-                Some(row) => {
-                    crate::editor_window::publish_open(row.path);
-                    Ok("Opened the newest capture".to_owned())
-                }
-                None => Err("There is no capture to open".to_owned()),
+        Command::History => perform_route_at(crate::menu::Route::History, root),
+        Command::Restore => perform_route_at(crate::menu::Route::Restore, root),
+        Command::Last => match crate::history::newest_existing(root) {
+            Some(row) => {
+                crate::editor_window::publish_open(row.path);
+                Ok("Opened the newest capture".to_owned())
             }
-        }
-        Command::LastScreenshot => {
-            let root = crate::settings::data_dir();
-            match crate::history::newest_matching(&root, crate::history::KindFilter::Image) {
-                Some(row) => {
-                    crate::editor_window::publish_open(row.path);
-                    Ok("Opened the newest screenshot".to_owned())
-                }
-                None => Err("There is no screenshot to open".to_owned()),
+            None => Err("There is no capture to open".to_owned()),
+        },
+        Command::LastScreenshot => match crate::history::newest_screenshot(root) {
+            Some(row) => {
+                crate::editor_window::publish_open(row.path);
+                Ok("Opened the newest screenshot".to_owned())
             }
-        }
-        Command::SaveAll => perform_route(crate::menu::Route::SaveAll),
-        Command::CloseAll => perform_route(crate::menu::Route::CloseAll),
-        Command::TogglePins => perform_route(crate::menu::Route::TogglePins),
-        Command::ClosePins => perform_route(crate::menu::Route::ClosePins),
-        Command::UnlockPins => perform_route(crate::menu::Route::UnlockPins),
+            None => Err("There is no screenshot to open".to_owned()),
+        },
+        Command::SaveAll => perform_route_at(crate::menu::Route::SaveAll, root),
+        Command::CloseAll => perform_route_at(crate::menu::Route::CloseAll, root),
+        Command::TogglePins => perform_route_at(crate::menu::Route::TogglePins, root),
+        Command::ClosePins => perform_route_at(crate::menu::Route::ClosePins, root),
+        Command::UnlockPins => perform_route_at(crate::menu::Route::UnlockPins, root),
         Command::Settings { tab } => {
             crate::settings_page::publish_open(&tab);
             Ok(format!("Settings: {tab}"))
@@ -1195,8 +1226,8 @@ pub fn perform_command(command: Command) -> Result<String, String> {
             Ok("Restarting the recording".to_owned())
         }
         Command::ScrollDone => Err("There is no scrolling capture running".to_owned()),
-        Command::Quit => perform_route(crate::menu::Route::Quit),
-        Command::Menu => Ok(String::new()),
+        Command::Quit => perform_route_at(crate::menu::Route::Quit, root),
+        Command::Menu => Ok("Tidyshot menu".to_owned()),
         Command::Capture {
             command,
             linebreaks,
@@ -1719,6 +1750,12 @@ impl qobject::Capture {
                         .fail(format!("That recording action is not available: {other}"));
                 }
             },
+            route if route_blocks(route) => {
+                // A clipboard read, a preview decode or a pin decode would
+                // stall the window when it ran here, so those routes run on a
+                // worker thread and report their line back on the Qt thread.
+                self.as_mut().run_off_thread(move || perform_route(route));
+            }
             route => {
                 if let Err(message) = perform_route(route) {
                     self.as_mut().fail(message);
@@ -1979,7 +2016,33 @@ impl qobject::Capture {
             );
             return;
         }
-        match perform_command(command) {
+        if command_blocks(&command) {
+            // These handlers shell out or decode a PNG; keeping them off the
+            // Qt thread is what lets the window stay responsive meanwhile.
+            self.as_mut()
+                .run_off_thread(move || perform_command(command));
+            return;
+        }
+        self.as_mut().apply_result(perform_command(command));
+    }
+
+    /// Run one handler on a worker thread and apply its line on the Qt thread.
+    fn run_off_thread(
+        self: Pin<&mut Self>,
+        work: impl FnOnce() -> Result<String, String> + Send + 'static,
+    ) {
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = work();
+            let _ = qt_thread.queue(move |mut capture| {
+                capture.as_mut().apply_result(result);
+            });
+        });
+    }
+
+    /// Show a handler's result line, or its failure, on the message line.
+    fn apply_result(mut self: Pin<&mut Self>, result: Result<String, String>) {
+        match result {
             Ok(message) => {
                 if !message.is_empty() {
                     self.as_mut().set_message(QString::from(message));
@@ -2996,16 +3059,20 @@ mod tests {
     #[test]
     fn an_ocr_capture_opens_the_recognition_flow() {
         use crate::app::Command;
-        let message = crate::capture_runtime::perform_command(Command::Capture {
-            command: "ocr".to_owned(),
-            geometry: None,
-            coordinates: None,
-            action: None,
-            delay: None,
-            linebreaks: Some(false),
-            start: None,
-            autoscroll: None,
-        })
+        let root = scratch("ocr-command");
+        let message = crate::capture_runtime::perform_command_at(
+            Command::Capture {
+                command: "ocr".to_owned(),
+                geometry: None,
+                coordinates: None,
+                action: None,
+                delay: None,
+                linebreaks: Some(false),
+                start: None,
+                autoscroll: None,
+            },
+            &root,
+        )
         .unwrap();
         assert!(message.contains("text"));
         let row = crate::menu::find("ocr").unwrap();
@@ -3045,6 +3112,7 @@ mod tests {
     #[test]
     fn every_menu_row_reaches_a_real_handler() {
         use crate::menu::{ACTIONS, Route};
+        let root = scratch("menu-handlers");
         for row in ACTIONS {
             match row.route() {
                 Route::Capture(_) | Route::Recording(_) => {}
@@ -3055,7 +3123,7 @@ mod tests {
                     // With no history the restore and pin rows report a
                     // visible message instead of doing nothing; the rest
                     // succeed even with nothing to act on.
-                    match crate::capture_runtime::perform_route(route) {
+                    match crate::capture_runtime::perform_route_at(route, &root) {
                         Ok(message) => assert!(
                             !message.is_empty() || matches!(route, Route::Quit),
                             "{} produced no message",
@@ -3066,13 +3134,15 @@ mod tests {
                 }
             }
         }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_routed_command_with_no_implementation_is_a_visible_message() {
         // A history lookup that finds nothing must say so, never succeed with
         // an empty action.
-        let message = crate::capture_runtime::perform_command(crate::app::Command::Last)
+        let root = scratch("last-command");
+        let message = crate::capture_runtime::perform_command_at(crate::app::Command::Last, &root)
             .unwrap_or_else(|message| message);
         assert!(!message.is_empty());
     }
@@ -3080,8 +3150,9 @@ mod tests {
     #[test]
     fn pin_toggle_close_and_unlock_are_reachable_from_commands() {
         use crate::app::Command;
+        let root = scratch("pin-commands");
         for command in [Command::TogglePins, Command::ClosePins, Command::UnlockPins] {
-            let message = crate::capture_runtime::perform_command(command).unwrap();
+            let message = crate::capture_runtime::perform_command_at(command, &root).unwrap();
             assert!(!message.is_empty());
         }
     }
@@ -3089,12 +3160,16 @@ mod tests {
     #[test]
     fn settings_and_history_commands_open_their_windows() {
         use crate::app::Command;
-        let message = crate::capture_runtime::perform_command(Command::Settings {
-            tab: "general".to_owned(),
-        })
+        let root = scratch("window-commands");
+        let message = crate::capture_runtime::perform_command_at(
+            Command::Settings {
+                tab: "general".to_owned(),
+            },
+            &root,
+        )
         .unwrap();
         assert!(message.contains("general"));
-        let message = crate::capture_runtime::perform_command(Command::History).unwrap();
+        let message = crate::capture_runtime::perform_command_at(Command::History, &root).unwrap();
         assert!(!message.is_empty());
     }
 

@@ -108,8 +108,6 @@ pub fn run_with(argv: &[String]) {
         // an empty window behind it, and closing the editor ends the process.
         Ok(app::Command::Edit(path)) => editor_window::publish_open(path),
         Ok(app::Command::EditChooser) => editor_window::publish_chooser(),
-        // The clipboard import shells out to wl-paste on a worker thread.
-        Ok(app::Command::Clipboard) => capture_runtime::dispatch(app::Command::Clipboard),
         Ok(command) => capture_runtime::dispatch(command),
         Err(error) => {
             eprintln!("tidyshot: {error}");
