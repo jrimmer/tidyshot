@@ -55,6 +55,7 @@ pub mod recording_runtime;
 pub mod render;
 pub mod scroll;
 pub mod scroll_runtime;
+pub mod selection_ui;
 pub mod settings;
 pub mod settings_page;
 pub mod spotlight;
