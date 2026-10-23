@@ -513,8 +513,7 @@ pub fn newest_capture(history: &[Value]) -> Option<String> {
 pub fn newest_screenshot(history: &[Value]) -> Option<String> {
     history.iter().find_map(|row| {
         let row = crate::history::HistoryRow::from_value(row)?;
-        row.is_screenshot()
-            .then(|| row.path.display().to_string())
+        row.is_screenshot().then(|| row.path.display().to_string())
     })
 }
 
