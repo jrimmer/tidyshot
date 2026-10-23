@@ -601,12 +601,16 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         Ok(windows_from(&value))
     }
 
-    /// The active window's absolute rectangle, when there is one.
+    /// The active window's absolute rectangle, when it is not TidyShot's own.
+    ///
+    /// A focused preview or pin is always on top, so capturing the focused
+    /// window while one of them holds focus would copy TidyShot itself; the
+    /// capture reports that there is nothing to copy instead.
     pub fn active_window(&self) -> Result<Option<WindowInfo>, RuntimeError> {
         let value = hypr(self.runner, "activewindow")?;
         Ok(crate::window::windows_from(&Value::Array(vec![value]))
             .into_iter()
-            .next())
+            .find(|window| !window.is_own_preview()))
     }
 
     /// Capture one window's own surface and save it.
@@ -3840,6 +3844,22 @@ mod tests {
             forced_copy_source(&disabled, true, capture, Some(display)),
             None,
             "the source's setting can disable Ctrl-copy"
+        );
+    }
+
+    #[test]
+    fn a_focused_pin_is_never_the_active_capture_target() {
+        // A pin is always on top, so if it holds focus the focused-window
+        // capture must not copy TidyShot itself.
+        let pinned = format!(
+            r#"{{"title":"{}","class":"com.example.Other","at":[0,0],"size":[320,200],"monitor":0,"workspace":{{"name":"1"}},"mapped":true}}"#,
+            crate::pin_window::pin_title("shot.png", false)
+        );
+        let runner = Fake::new(monitors(), clients(), &pinned);
+        let runtime = runtime(&runner, &std::env::temp_dir());
+        assert!(
+            runtime.active_window().unwrap().is_none(),
+            "a focused pin must not be captured"
         );
     }
 
