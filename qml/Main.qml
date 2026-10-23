@@ -301,6 +301,85 @@ ApplicationWindow {
         }
     }
 
+    // The area selector: one fullscreen overlay on the focused output. Rust
+    // prepares the frozen frame and accepts the rectangle it returns, so the
+    // absolute desktop coordinates never live in QML.
+    property var selectionFrame: null
+    property bool selectionOpen: false
+    property bool selectionLive: false
+
+    Timer {
+        id: selectionSync
+        interval: 60
+        repeat: true
+        running: true
+        onTriggered: {
+            try {
+                window.selectionFrame = Capture.selectionFrame !== ""
+                    ? JSON.parse(Capture.selectionFrame) : null
+            } catch (error) {
+                window.selectionFrame = null
+            }
+            window.selectionOpen = Capture.selectionOpen
+            window.selectionLive = Capture.selectionLive
+            selectionOverlay.visible = Capture.selectionOpen
+            selectionOverlay.mode = Capture.selectionMode
+            selectionOverlay.accent = Capture.selectionAccent
+            selectionOverlay.hint = Capture.selectionHint
+            selectionOverlay.live = Capture.selectionLive
+            selectionOverlay.zoom = Capture.magnifierZoom
+            selectionOverlay.frame = window.selectionFrame
+            var rows = []
+            for (var r = 0; r < Capture.selectionRows.length; ++r)
+                rows.push(JSON.parse(Capture.selectionRows[r]))
+            selectionOverlay.rows = rows
+        }
+    }
+
+    // A live selector refreshes its frame through grim at about 10 Hz, so the
+    // desktop is current while the pointer moves.
+    Timer {
+        id: selectionRefresh
+        interval: 100
+        repeat: true
+        running: window.selectionOpen && window.selectionLive
+        onTriggered: Capture.refreshSelectionFrame()
+    }
+
+    SelectionOverlay {
+        id: selectionOverlay
+        transientParent: null
+        takeFocus: true
+        onAccepted: function (x, y, width, height) {
+            Capture.selectionAccept(x, y, width, height)
+        }
+        onWindowChosen: function (index, transparent, forceCopy) {
+            Capture.captureWindowHover(index, transparent, forceCopy)
+        }
+        onCancelled: Capture.selectionCancel()
+    }
+
+    // The countdown label: always on top, small and never stealing the frame.
+    Window {
+        id: countdownWindow
+        transientParent: null
+        visible: Capture.countdownOpen
+        title: "TidyShot Countdown"
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+        color: "transparent"
+        width: countdownControls.width
+        height: countdownControls.height
+        x: Math.round((Screen.width - width) / 2)
+        y: 48
+
+        CountdownOverlay {
+            id: countdownControls
+            label: Capture.countdownLabel
+            seconds: Capture.countdownSeconds
+            onCancelRequested: Capture.countdownCancel()
+        }
+    }
+
     // Window picker for a window capture; the client rectangles stay in Rust.
     WindowPicker {
         id: windowPicker

@@ -22,6 +22,8 @@ fn main() {
             "qml/HistoryWindow.qml",
             "qml/SettingsWindow.qml",
             "qml/PinWindow.qml",
+            "qml/SelectionOverlay.qml",
+            "qml/CountdownOverlay.qml",
         ]),
     )
     .qt_module("Quick")
