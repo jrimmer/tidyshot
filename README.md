@@ -349,8 +349,18 @@ saved image or the recording's first frame with Copy, Save, Annotate/Edit,
 Pin, drag-out and close. Enter copies and Escape closes while the preview is
 the active window, so the capture menu keeps its own keyboard handling; the
 action results and any I/O failure appear on the window. A window capture
-reopens its editable frame when annotating; the pin window is not ported yet,
-so that action says so instead of claiming a window opened.
+reopens its editable frame when annotating.
+
+Pin opens a frameless, always-on-top `qml/PinWindow.qml` at the capture's
+starting size. `src/pin_window.rs` owns the open pins: the registry, the
+`pins.json` listing in the data directory (path, position, size, opacity,
+lock and click-through state), restore on startup, and the show/hide, close
+and unlock commands behind the matching menu rows. A pin drags anywhere,
+resizes from any edge, closes on a middle click, and shows its hover controls
+(opacity, lock/unlock, close, click-through) until Escape hides them. A
+compositor title of `TidyShot Pin — …` or `TidyShot Locked Pin — …` excludes
+a pin from the window picker and isolated window capture, so a pin can never
+be captured into itself.
 
 `src/preview.rs` owns the window: it resolves the focused monitor with
 `hyprctl -j monitors`, computes the anchor through `src/overlay.rs`, reads the

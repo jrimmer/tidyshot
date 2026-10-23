@@ -427,13 +427,6 @@ fn with_pins<T>(f: impl FnOnce(&mut PinRegistry) -> T) -> T {
     f(guard.as_mut().expect("pin registry initialised"))
 }
 
-fn root() -> PathBuf {
-    ROOT.lock()
-        .expect("pin root poisoned")
-        .clone()
-        .unwrap_or_else(crate::settings::data_dir)
-}
-
 fn set_root(path: PathBuf) {
     *ROOT.lock().expect("pin root poisoned") = Some(path);
 }
@@ -456,9 +449,16 @@ pub fn restore_on_start(root: &Path) -> Result<usize, PinError> {
 }
 
 /// Save the live registry to its data root.
+///
+/// A registry with no configured root has not been restored by the app, so it
+/// has nowhere user-owned to write; that keeps unit tests and library callers
+/// from touching the real data directory.
 pub fn save() -> Result<(), PinError> {
+    let Some(root) = ROOT.lock().expect("pin root poisoned").clone() else {
+        return Ok(());
+    };
     let registry = with_pins(|pins| pins.clone());
-    registry.save_at(&root())
+    registry.save_at(&root)
 }
 
 /// Pin a file, reporting why it could not be pinned.

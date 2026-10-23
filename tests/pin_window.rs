@@ -205,7 +205,7 @@ fn the_live_coordinator_pins_persists_and_restores() {
     );
 
     assert_eq!(pin_window::toggle(), "Pins hidden");
-    assert!(PinRegistry::restore_at(&dir).unwrap().hidden() == false);
+    assert!(!PinRegistry::restore_at(&dir).unwrap().hidden());
     // A hidden set stays in the listing but does not restore hidden.
     assert_eq!(pin_window::toggle(), "Pins shown");
 
