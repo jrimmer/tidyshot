@@ -338,10 +338,11 @@ ApplicationWindow {
     // The capture history window. It is its own top-level window so the
     // filmstrip can be wider than the menu, and its state comes from the
     // Rust history view through the HistoryApi singleton.
+    // `visible` has one writer, the sync timer below, so the window cannot be
+    // shown by one path and hidden by the other.
     HistoryWindow {
         id: historyContent
         transientParent: null
-        visible: HistoryApi.open
         filter: HistoryApi.filter
         query: HistoryApi.query
         message: HistoryApi.message
@@ -398,7 +399,6 @@ ApplicationWindow {
     SettingsWindow {
         id: settingsWindow
         transientParent: null
-        visible: SettingsApi.open
         // The model is a property binding, so QML only re-parses the document
         // when the singleton's notification fires, not on a polling tick.
         modelJson: SettingsApi.modelJson
@@ -415,7 +415,9 @@ ApplicationWindow {
 
     // cxx-qt property notifications do not reach every QML binding in this
     // build, so the window's visibility is still polled; the model itself is
-    // bound above rather than copied on each tick.
+    // bound above rather than copied on each tick. `visible` has one writer,
+    // this timer, so the window cannot be shown by one path and hidden by the
+    // other.
     Timer {
         id: settingsSync
         interval: 60

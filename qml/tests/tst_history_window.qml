@@ -114,6 +114,18 @@ TestCase {
         compare(movedSpy.count, 2)
     }
 
+    function test_the_search_box_keeps_its_letters_out_of_the_filmstrip() {
+        history.takeKeyFocus()
+        var search = findChild(history.contentItem, "historySearch")
+        search.forceActiveFocus()
+        keyClick(Qt.Key_L)
+        keyClick(Qt.Key_J)
+        compare(movedSpy.count, 0, "typing a name must not move the cursor")
+        history.takeKeyFocus()
+        keyClick(Qt.Key_L)
+        compare(movedSpy.count, 1, "the filmstrip keys work again after focus")
+    }
+
     function test_tabs_filter_and_the_search_box_reports_its_text() {
         mouseClick(findChild(history.contentItem, "historyTab_image"), 5, 5)
         compare(filterSpy.count, 1)

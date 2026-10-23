@@ -368,21 +368,13 @@ mod tests {
                 }
             }
         }
-        let dir = std::env::temp_dir().join(format!("tidyshot-clip-read-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let image = dir.join("clipboard-shot.png");
-        std::fs::write(&image, b"png").unwrap();
-        let path = image.display().to_string();
-        std::fs::write(&image, b"png").unwrap();
-        let _ = path;
-        // The fake returns a fixed absolute path, so the test asserts the
-        // command shape and that a missing target is reported.
+        // The fake names a fixed absolute path that does not exist, so the
+        // test asserts the command shape and that a missing target is
+        // reported instead of opening an empty editor.
         let runner = Fake::default();
         let error = read_files(&runner).unwrap_err();
         assert!(error.message().contains("no longer available"));
         assert_eq!(runner.seen.lock().unwrap()[0].program, "wl-paste");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

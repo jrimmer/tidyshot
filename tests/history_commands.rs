@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use tidyshot::app::Command;
-use tidyshot::capture_runtime::{perform_command, perform_route};
+use tidyshot::capture_runtime::{perform_command_at, perform_route_at};
 use tidyshot::history::{self, HistoryRow, KindFilter};
 use tidyshot::history_window::{HistoryView, TABS};
 use tidyshot::menu::{ACTIONS, Route};
@@ -47,9 +47,13 @@ fn every_menu_route_has_a_command_word_or_a_runtime() {
 
 #[test]
 fn a_settings_command_opens_the_window_on_its_tab() {
-    let message = perform_command(Command::Settings {
-        tab: "recording".to_owned(),
-    })
+    let root = scratch("settings-tab");
+    let message = perform_command_at(
+        Command::Settings {
+            tab: "recording".to_owned(),
+        },
+        &root,
+    )
     .unwrap();
     assert!(message.contains("recording"));
 }
@@ -58,19 +62,20 @@ fn a_settings_command_opens_the_window_on_its_tab() {
 fn history_and_pin_commands_report_a_visible_result() {
     // With no captures the restore and pin commands refuse visibly; toggling
     // and closing pins always report their state.
+    let root = scratch("commands-empty");
     for command in [
         Command::Restore,
         Command::Last,
         Command::LastScreenshot,
         Command::PinChooser,
     ] {
-        let message = perform_command(command.clone())
+        let message = perform_command_at(command.clone(), &root)
             .err()
             .unwrap_or_else(|| panic!("{command:?} should report that there is nothing"));
         assert!(!message.is_empty());
     }
     for command in [Command::TogglePins, Command::ClosePins, Command::UnlockPins] {
-        assert!(!perform_command(command).unwrap().is_empty());
+        assert!(!perform_command_at(command, &root).unwrap().is_empty());
     }
 }
 
@@ -78,10 +83,13 @@ fn history_and_pin_commands_report_a_visible_result() {
 fn an_ocr_command_reaches_the_recognition_queue() {
     let dir = scratch("ocr");
     let path = capture(&dir, "text.png");
-    let message = perform_command(Command::Ocr {
-        path: path.clone(),
-        linebreaks: Some(true),
-    })
+    let message = perform_command_at(
+        Command::Ocr {
+            path: path.clone(),
+            linebreaks: Some(true),
+        },
+        &dir,
+    )
     .unwrap();
     assert!(message.contains("text.png"));
 }
@@ -252,8 +260,12 @@ fn a_clipboard_without_media_is_refused_rather_than_opening_an_empty_editor() {
 
 #[test]
 fn the_history_route_opens_the_window() {
-    let message = perform_route(Route::History).unwrap();
+    let root = scratch("history-route");
+    let message = perform_route_at(Route::History, &root).unwrap();
     assert!(!message.is_empty());
+    // Opening through the route points the shared view at the same store.
+    let opened = tidyshot::history_window::view(|view| view.root().to_path_buf());
+    assert_eq!(opened, root);
 }
 
 #[test]
@@ -297,7 +309,7 @@ fn every_routed_command_reaches_a_handler() {
         Command::Quit,
     ];
     for command in commands {
-        match perform_command(command.clone()) {
+        match perform_command_at(command.clone(), &dir) {
             Ok(message) => assert!(
                 !message.is_empty() || matches!(command, Command::Menu),
                 "{command:?} succeeded with no message"
@@ -319,9 +331,12 @@ fn every_routed_command_reaches_a_handler() {
         },
         Command::Unknown("frobnicate".to_owned()),
     ] {
-        let message = perform_command(command.clone()).unwrap_err();
+        let message = perform_command_at(command.clone(), &dir).unwrap_err();
         assert!(!message.is_empty(), "{command:?} failed silently");
     }
+    // The pin command above pinned a scratch file; clear the shared set so a
+    // later test starts from no pins.
+    perform_command_at(Command::ClosePins, &dir).unwrap();
 }
 
 #[test]

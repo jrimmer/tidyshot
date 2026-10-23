@@ -102,6 +102,10 @@ Window {
         anchors.fill: parent
         focus: historyWindow.visible
         Keys.onPressed: function (event) {
+            // The search box keeps its own keys, including h/j/k/l, so typing
+            // a name never moves the filmstrip cursor.
+            if (searchField.activeFocus)
+                return
             if (historyWindow.handleKey(event.key))
                 event.accepted = true
         }
