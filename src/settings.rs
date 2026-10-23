@@ -52,6 +52,16 @@ pub fn stored_settings() -> std::collections::BTreeMap<String, crate::json::Valu
     stored_settings_at(&settings_path())
 }
 
+/// Read the saved settings from the store under an explicit root.
+///
+/// The root is a parameter so a test never reads the user's settings file.
+#[must_use]
+pub fn stored_settings_in(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<String, crate::json::Value> {
+    stored_settings_at(&root.join("settings.json"))
+}
+
 /// The Quick Access preview preferences from the saved settings.
 #[must_use]
 pub fn preview_settings() -> crate::overlay::PreviewSettings {
