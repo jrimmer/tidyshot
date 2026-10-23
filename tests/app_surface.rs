@@ -363,7 +363,7 @@ fn pin_rows_dispatch_to_the_pin_window_registry() {
         assert!(
             matches!(
                 tidyshot::menu::invoke(row),
-                tidyshot::menu::Invocation::App(command) if command == id
+                tidyshot::menu::Invocation::Command(command) if command == id
             ),
             "{id} must reach its runtime"
         );
