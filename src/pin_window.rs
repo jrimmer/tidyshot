@@ -438,14 +438,23 @@ fn set_root(path: PathBuf) {
 /// empty set; an unreadable one is reported and the app starts with no pins
 /// rather than dying.
 pub fn restore_on_start(root: &Path) -> Result<usize, PinError> {
-    let registry = PinRegistry::restore_at(root)?;
-    let count = registry.len();
+    let restored = PinRegistry::restore_at(root)?;
     set_root(root.to_path_buf());
-    {
+    let merged = {
         let mut guard = PINS.lock().expect("pin registry poisoned");
-        *guard = Some(registry);
-    }
-    Ok(count)
+        let live = guard.take().unwrap_or_default();
+        let mut merged = restored;
+        // A pin created before the listing was read, such as an after-capture
+        // pin from a command-line capture, must survive the restore.
+        for pin in live.entries {
+            if !merged.entries.iter().any(|entry| entry.path == pin.path) {
+                merged.entries.push(pin);
+            }
+        }
+        *guard = Some(merged.clone());
+        merged
+    };
+    Ok(merged.len())
 }
 
 /// Save the live registry to its data root.
