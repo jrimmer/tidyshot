@@ -415,20 +415,6 @@ pub fn annotate_selected() -> Option<PathBuf> {
     Some(path)
 }
 
-/// Show the selected capture, or the newest one, in the corner preview.
-pub fn restore_selected() -> Option<PathBuf> {
-    let path = view(|view| view.open_target())?;
-    crate::preview::publish_file(path.clone());
-    Some(path)
-}
-
-/// Pin the selected capture, or the newest one.
-pub fn pin_selected() -> Result<String, String> {
-    let path =
-        view(|view| view.open_target()).ok_or_else(|| "There is no capture to pin".to_owned())?;
-    crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
-}
-
 #[cxx_qt::bridge]
 pub mod qobject {
     unsafe extern "C++" {
@@ -644,18 +630,44 @@ impl qobject::HistoryApi {
     }
 
     /// Show the selected capture in the corner preview.
+    ///
+    /// The preview decodes the capture and asks the compositor for its monitor,
+    /// so the work runs on a worker thread and only the message returns to the
+    /// Qt thread.
     pub fn restore(mut self: Pin<&mut Self>) {
-        let result = match restore_selected() {
-            Some(path) => format!("Restored {}", path.display()),
-            None => "There is no capture to restore".to_owned(),
+        let Some(path) = view(|view| view.open_target()) else {
+            self.as_mut()
+                .change(|view| view.message = "There is no capture to restore".to_owned());
+            return;
         };
-        self.as_mut().change(|view| view.message = result);
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            crate::preview::publish_file(path.clone());
+            let message = format!("Restored {}", path.display());
+            let _ = qt_thread.queue(move |mut api| {
+                api.as_mut().change(|view| view.message = message);
+            });
+        });
     }
 
     /// Pin the selected capture.
+    ///
+    /// A pin decodes the PNG for its starting size, which belongs on a worker
+    /// thread like the preview decode.
     pub fn pin(mut self: Pin<&mut Self>) {
-        let result = pin_selected().unwrap_or_else(|error| error);
-        self.as_mut().change(|view| view.message = result);
+        let Some(path) = view(|view| view.open_target()) else {
+            self.as_mut()
+                .change(|view| view.message = "There is no capture to pin".to_owned());
+            return;
+        };
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let message =
+                crate::pin_runtime::pin_file(&path).unwrap_or_else(|error| error.to_string());
+            let _ = qt_thread.queue(move |mut api| {
+                api.as_mut().change(|view| view.message = message);
+            });
+        });
     }
 
     /// Move the selected captures to the trash.
