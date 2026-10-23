@@ -1531,11 +1531,10 @@ fn prepare_selection(
         bounds,
         image_width: image.width,
         image_height: image.height,
-        url: if live {
-            String::new()
-        } else {
-            crate::overlay::local_file_url(&path)
-        },
+        // A live overlay starts from this frozen frame and replaces it on the
+        // refresh timer, so the first paint and the magnifier always have
+        // pixels.
+        url: crate::overlay::local_file_url(&path),
         focused: true,
     };
     let accent = crate::ui_scale::accent();
@@ -1889,6 +1888,9 @@ pub struct CaptureRust {
     selection: Option<SelectionControl>,
     /// The absolute origin of the overlay's output.
     selection_bounds: Rect,
+    /// The frame the overlay is showing, kept so a live refresh replaces only
+    /// its URL and keeps the dimensions and name.
+    selection_info: Option<FrameInfo>,
     countdown: Option<CountdownControl>,
     /// Live frames are written to one directory the overlay's URL points at.
     selection_frames: std::sync::Arc<std::sync::Mutex<SelectionFrames>>,
@@ -1943,6 +1945,7 @@ impl Default for CaptureRust {
             scroll: None,
             selection: None,
             selection_bounds: Rect::new(0, 0, 0, 0),
+            selection_info: None,
             countdown: None,
             selection_frames: std::sync::Arc::new(std::sync::Mutex::new(SelectionFrames::new())),
             pending_action: None,
@@ -2200,6 +2203,7 @@ impl qobject::Capture {
             let state = self.as_mut().rust_mut().get_mut();
             state.selection = Some(control);
             state.selection_bounds = frame_bounds;
+            state.selection_info = Some(request.frame.clone());
         }
         self.as_mut()
             .set_selection_frame(QString::from(request.frame.json()));
@@ -2222,7 +2226,9 @@ impl qobject::Capture {
     /// Hide the area overlay and forget its frame.
     pub fn hide_selection(mut self: Pin<&mut Self>) {
         self.as_mut().set_selection_open(false);
-        self.as_mut().rust_mut().get_mut().selection = None;
+        let state = self.as_mut().rust_mut().get_mut();
+        state.selection = None;
+        state.selection_info = None;
     }
 
     /// Refresh a live overlay's frame and publish the new picture.
@@ -2246,14 +2252,23 @@ impl qobject::Capture {
             .lock()
             .ok()
             .and_then(|mut frames| grab_live_frame(&session, &mut frames, bounds));
-        let Some(frame) = frame else {
+        let Some(url) = frame else {
             return QString::from("");
         };
         // The URL changes on every refresh, so QML's image cache loads the new
-        // pixels instead of keeping the first frame.
+        // pixels instead of keeping the first frame. The rest of the frame
+        // metadata is unchanged, so the overlay keeps its size and hit tests.
+        let json = {
+            let state = self.as_mut().rust_mut().get_mut();
+            let Some(info) = state.selection_info.as_mut() else {
+                return QString::from("");
+            };
+            info.url = url;
+            info.json()
+        };
         self.as_mut()
-            .set_selection_frame(QString::from(frame.clone()));
-        QString::from(frame)
+            .set_selection_frame(QString::from(json.clone()));
+        QString::from(json)
     }
 
     /// Accept the overlay's rectangle.
@@ -3137,6 +3152,129 @@ mod tests {
             .unwrap();
         assert!(grim.args.contains(&"-o".to_owned()));
         assert!(grim.args.contains(&"DP-1".to_owned()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    struct OverlayResult {
+        rect: Option<Rect>,
+        calls: std::sync::Mutex<usize>,
+    }
+
+    impl crate::capture_session::SelectionOverlay for OverlayResult {
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn select(
+            &self,
+            _mode: CaptureMode,
+            _initial: Option<Rect>,
+            _monitors: &[Value],
+        ) -> Result<Option<Rect>, CaptureRequestError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(self.rect)
+        }
+    }
+
+    #[test]
+    fn the_area_capture_uses_the_overlay_rect_and_never_runs_slurp() {
+        let root = scratch("overlay-area");
+        let runner = Fake::new(monitors(), clients(), active());
+        let image = png(200, 150, [3, 4, 5, 255]);
+        runner.push("grim", image.clone());
+        let runtime = runtime(&runner, &root);
+        let overlay = OverlayResult {
+            rect: Some(Rect::new(40, 50, 200, 150)),
+            calls: std::sync::Mutex::new(0),
+        };
+        let result = runtime
+            .run_with_selector(request("area"), None, Some(&overlay), || false)
+            .unwrap();
+        assert_eq!(result.rect, Some(Rect::new(40, 50, 200, 150)));
+        assert_eq!((result.width, result.height), (200, 150));
+        assert_eq!(*overlay.calls.lock().unwrap(), 1);
+        let seen = runner.seen();
+        assert!(
+            seen.iter().all(|spec| spec.program != "slurp"),
+            "an available overlay must replace slurp"
+        );
+        let grim = seen.iter().find(|spec| spec.program == "grim").unwrap();
+        assert!(grim.args.contains(&"40,50 200x150".to_owned()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dismissed_overlay_cancels_without_saving() {
+        let root = scratch("overlay-cancel");
+        let runner = Fake::new(monitors(), clients(), active());
+        runner.push_text("slurp", "");
+        let runtime = runtime(&runner, &root);
+        // The overlay returned no rectangle and no fallback ran, so the
+        // caller sees a cancellation rather than an empty grab.
+        let overlay = OverlayResult {
+            rect: None,
+            calls: std::sync::Mutex::new(0),
+        };
+        let result = runtime.run_with_selector(request("area"), None, Some(&overlay), || false);
+        // A request that still needs a selection after the overlay declined
+        // runs the headless selector, which the fake answers with empty slurp
+        // output, so the capture cancels.
+        match result {
+            Err(error) => assert!(matches!(error, RuntimeError::Cancelled), "{error}"),
+            Ok(result) => panic!("expected a cancellation, got {result:?}"),
+        }
+        assert!(history::read(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_timer_capture_ticks_the_countdown_before_the_overlay() {
+        let root = scratch("overlay-timer");
+        let runner = Fake::new(monitors(), clients(), active());
+        runner.push("grim", png(100, 50, [1, 1, 1, 255]));
+        let runtime = runtime(&runner, &root);
+        let overlay = OverlayResult {
+            rect: Some(Rect::new(0, 0, 100, 50)),
+            calls: std::sync::Mutex::new(0),
+        };
+        let mut request = request("timer");
+        request.delay = 0;
+        let mut ticks = Vec::new();
+        let result = runtime
+            .run_with_selector_tick(
+                request,
+                None,
+                Some(&overlay),
+                |label| ticks.push(label.to_owned()),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(result.rect, Some(Rect::new(0, 0, 100, 50)));
+        // The self timer selects first, then counts down before the grab.
+        assert!(!ticks.is_empty(), "the timer must publish its countdown");
+        assert!(ticks[0].starts_with("Capturing in "), "{ticks:?}");
+        assert_eq!(*overlay.calls.lock().unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cancelled_countdown_stops_a_timer_capture_before_the_overlay() {
+        let root = scratch("overlay-timer-cancel");
+        let runner = Fake::new(monitors(), clients(), active());
+        let runtime = runtime(&runner, &root);
+        let overlay = OverlayResult {
+            rect: Some(Rect::new(0, 0, 100, 50)),
+            calls: std::sync::Mutex::new(0),
+        };
+        let mut request = request("timer");
+        request.delay = 300;
+        let result = runtime.run_with_selector_tick(request, None, Some(&overlay), |_| {}, || true);
+        assert!(matches!(result, Err(RuntimeError::Cancelled)), "{result:?}");
+        assert_eq!(*overlay.calls.lock().unwrap(), 0);
+        assert!(
+            runner.seen().iter().all(|spec| spec.program != "grim"),
+            "a cancelled countdown must take no pixels"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

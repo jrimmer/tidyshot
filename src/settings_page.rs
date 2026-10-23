@@ -1395,6 +1395,21 @@ mod tests {
     }
 
     #[test]
+    fn the_freeze_setting_defaults_on_and_reads_back() {
+        let empty = BTreeMap::new();
+        assert!(capture_freeze(&empty));
+        let frozen = BTreeMap::from([("capture_freeze".to_owned(), Value::Bool(true))]);
+        assert!(capture_freeze(&frozen));
+        let live = BTreeMap::from([("capture_freeze".to_owned(), Value::Bool(false))]);
+        assert!(!capture_freeze(&live));
+        // The page exposes the key, so the settings window can write it.
+        assert_eq!(
+            field("capture_freeze").map(|field| field.kind),
+            Some(FieldKind::Bool)
+        );
+    }
+
+    #[test]
     fn live_readers_see_a_written_value() {
         let dir = scratch("live");
         let path = dir.join("settings.json");
