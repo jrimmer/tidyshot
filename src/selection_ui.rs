@@ -19,6 +19,8 @@ use crate::pngzip::Image;
 pub const MIN_SELECTION: i32 = 2;
 /// The magnifier's default magnification.
 pub const MAGNIFIER_ZOOM: i32 = 6;
+/// The instruction band the overlay draws.
+pub const HINT: &str = "Drag to select · Shift locks the ratio · Arrows nudge · Shift+Arrows resize · Enter accepts · Esc cancels";
 /// The magnification bounds the overlay offers.
 pub const MIN_ZOOM: i32 = 4;
 pub const MAX_ZOOM: i32 = 8;

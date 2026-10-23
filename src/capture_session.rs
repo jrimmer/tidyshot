@@ -445,6 +445,55 @@ pub fn run_capture<R: CommandRunner>(
     on_tick: impl FnMut(&str),
     should_cancel: impl FnMut() -> bool,
 ) -> Result<CaptureOutcome, CaptureRequestError> {
+    run_capture_with_overlay(
+        session,
+        monitors,
+        request,
+        options,
+        None,
+        on_tick,
+        should_cancel,
+    )
+}
+
+/// An interactive selector the caller can show instead of slurp.
+///
+/// The GUI supplies one that drives the QML overlay; a headless run passes
+/// none and keeps slurp. A cancel is reported as
+/// [`CaptureRequestError::Selection`].
+pub trait SelectionOverlay {
+    /// Whether the selector can run right now (a GUI is up).
+    fn available(&self) -> bool;
+
+    /// Show the selector for `mode` and return the absolute chosen region.
+    ///
+    /// `Ok(None)` means the overlay could not draw (no compositor, no frozen
+    /// frame), so the caller runs slurp instead. Cancelling the overlay is an
+    /// error and never falls back.
+    fn select(
+        &self,
+        mode: CaptureMode,
+        initial: Option<Rect>,
+        monitors: &[Value],
+    ) -> Result<Option<Rect>, CaptureRequestError>;
+}
+
+/// Run a capture, preferring `overlay` for an interactive selection.
+///
+/// Area, timer, select and OCR modes ask the overlay first and fall back to
+/// slurp only when no overlay is available. Window selection still returns
+/// [`CaptureOutcome::NeedsSelection`], because it resolves a client rectangle
+/// rather than a region.
+// Ported from omnishot/app.py (capture)
+pub fn run_capture_with_overlay<R: CommandRunner>(
+    session: &CaptureSession<'_, R>,
+    monitors: &[Value],
+    request: &CaptureRequest,
+    options: CaptureOptions,
+    overlay: Option<&dyn SelectionOverlay>,
+    on_tick: impl FnMut(&str),
+    should_cancel: impl FnMut() -> bool,
+) -> Result<CaptureOutcome, CaptureRequestError> {
     let CaptureOptions { cursor, freeze } = options;
     session.capture_ready(monitors)?;
     // The self timer owns its countdown after the selection; every other mode
@@ -476,7 +525,17 @@ pub fn run_capture<R: CommandRunner>(
             request.mode,
             CaptureMode::Area | CaptureMode::Timer | CaptureMode::Ocr
         ) && request.rect.is_none());
-    let plan = if needs_plan {
+    // The overlay runs the selector itself, so it never needs the compositor
+    // mirror: it draws a frozen frame or refreshes the live desktop through
+    // grim instead of hiding a native selector from its own capture.
+    let overlay = overlay.filter(|overlay| overlay.available());
+    let overlay_selects = overlay.is_some()
+        && matches!(
+            request.mode,
+            CaptureMode::Select | CaptureMode::Area | CaptureMode::Timer | CaptureMode::Ocr
+        )
+        && request.rect.is_none();
+    let plan = if needs_plan && !overlay_selects {
         plan_selection(session.mirror, session.runner, &session.native, freeze)?
     } else {
         SelectionPlan {
@@ -484,7 +543,7 @@ pub fn run_capture<R: CommandRunner>(
             mirror: false,
         }
     };
-    if request.needs_selection(freeze, plan.live) {
+    if !overlay_selects && request.needs_selection(freeze, plan.live) {
         return Ok(CaptureOutcome::NeedsSelection);
     }
     // A live selection runs slurp itself; fullscreen/desktop keep their
@@ -492,7 +551,18 @@ pub fn run_capture<R: CommandRunner>(
     // slurp holds the selection mirror so the selector never appears in its
     // own frame.
     let mut rect = request.rect;
+    let mut overlay_chosen = false;
+    if rect.is_none() && overlay_selects {
+        let overlay = overlay.expect("checked above");
+        if let Some(selected) =
+            overlay.select(request.mode, request.initial(None, false), monitors)?
+        {
+            rect = Some(selected);
+            overlay_chosen = true;
+        }
+    }
     if rect.is_none()
+        && !overlay_chosen
         && matches!(
             request.mode,
             CaptureMode::Select | CaptureMode::Area | CaptureMode::Timer | CaptureMode::Ocr
@@ -1593,6 +1663,275 @@ mod tests {
             }
             other => panic!("expected per-output frames, got {other:?}"),
         }
+    }
+
+    struct FixedOverlay {
+        available: bool,
+        rect: Rect,
+        seen: std::sync::Mutex<Vec<CaptureMode>>,
+    }
+
+    impl FixedOverlay {
+        fn accepted(rect: Rect) -> Self {
+            Self {
+                available: true,
+                rect,
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn unavailable() -> Self {
+            Self {
+                available: false,
+                rect: Rect::new(1, 2, 3, 4),
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SelectionOverlay for FixedOverlay {
+        fn available(&self) -> bool {
+            self.available
+        }
+
+        fn select(
+            &self,
+            mode: CaptureMode,
+            _initial: Option<Rect>,
+            _monitors: &[Value],
+        ) -> Result<Option<Rect>, CaptureRequestError> {
+            self.seen.lock().unwrap().push(mode);
+            Ok(Some(self.rect))
+        }
+    }
+
+    fn run_with_overlay(
+        session: &CaptureSession<'_, Fake>,
+        request: &CaptureRequest,
+        overlay: &dyn SelectionOverlay,
+    ) -> Result<CaptureOutcome, CaptureRequestError> {
+        run_capture_with_overlay(
+            session,
+            &monitors(),
+            request,
+            CaptureOptions {
+                cursor: false,
+                freeze: true,
+            },
+            Some(overlay),
+            |_| {},
+            || false,
+        )
+    }
+
+    #[test]
+    fn the_overlay_selects_the_area_and_grim_grabs_it() {
+        let runner = Fake::default();
+        runner.push("PNG");
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let overlay = FixedOverlay::accepted(Rect::new(30, 40, 200, 150));
+        let request = CaptureRequest::resolve("area", None, None, 0).unwrap();
+        let outcome = run_with_overlay(&session, &request, &overlay).unwrap();
+        match outcome {
+            CaptureOutcome::Grabbed(frame) => {
+                assert_eq!(frame.rect, Some(Rect::new(30, 40, 200, 150)));
+                assert_eq!(frame.png, b"PNG");
+            }
+            other => panic!("expected the overlay's grab, got {other:?}"),
+        }
+        assert_eq!(*overlay.seen.lock().unwrap(), [CaptureMode::Area]);
+        let seen = runner.seen.lock().unwrap();
+        assert!(
+            seen.iter().all(|spec| spec.program != "slurp"),
+            "an available overlay must not run slurp"
+        );
+        let grim = seen.iter().find(|spec| spec.program == "grim").unwrap();
+        assert!(grim.args.contains(&"30,40 200x150".to_owned()));
+    }
+
+    #[test]
+    fn an_unavailable_overlay_leaves_the_selection_to_the_caller() {
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let overlay = FixedOverlay::unavailable();
+        let request = CaptureRequest::resolve("area", None, None, 0).unwrap();
+        // Without a GUI the capture asks its caller for a region, which is the
+        // headless slurp path, instead of touching grim.
+        assert_eq!(
+            run_with_overlay(&session, &request, &overlay).unwrap(),
+            CaptureOutcome::NeedsSelection
+        );
+        assert!(
+            overlay.seen.lock().unwrap().is_empty(),
+            "an unavailable overlay is never asked to select"
+        );
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|spec| spec.program != "grim"),
+        );
+    }
+
+    #[test]
+    fn no_overlay_keeps_the_slurp_selection_for_a_headless_capture() {
+        let runner = Live::default();
+        runner.push("5,6 100x200\n");
+        runner.push("PNG");
+        let registry = MirrorRegistry::with_arch("x86_64");
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        // A live (unfrozen) area selection with no overlay runs slurp itself.
+        let request = CaptureRequest::resolve("area", None, None, 0).unwrap();
+        let outcome = run_capture_with_overlay(
+            &session,
+            &monitors(),
+            &request,
+            CaptureOptions {
+                cursor: false,
+                freeze: false,
+            },
+            None,
+            |_| {},
+            || false,
+        )
+        .unwrap();
+        match outcome {
+            CaptureOutcome::Grabbed(frame) => {
+                assert_eq!(frame.rect, Some(Rect::new(5, 6, 100, 200)));
+            }
+            other => panic!("expected a slurp grab, got {other:?}"),
+        }
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|spec| spec.program == "slurp")
+        );
+    }
+
+    #[test]
+    fn a_declining_overlay_falls_back_to_slurp_without_cancelling() {
+        #[derive(Default)]
+        struct Declining {
+            seen: std::sync::Mutex<usize>,
+        }
+        impl SelectionOverlay for Declining {
+            fn available(&self) -> bool {
+                true
+            }
+
+            fn select(
+                &self,
+                _mode: CaptureMode,
+                _initial: Option<Rect>,
+                _monitors: &[Value],
+            ) -> Result<Option<Rect>, CaptureRequestError> {
+                *self.seen.lock().unwrap() += 1;
+                Ok(None)
+            }
+        }
+        let runner = Fake::default();
+        runner.push("9,9 50x50\n");
+        runner.push("PNG");
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let overlay = Declining::default();
+        let request = CaptureRequest::resolve("timer", None, Some(0), 0).unwrap();
+        let outcome = run_with_overlay(&session, &request, &overlay).unwrap();
+        assert!(matches!(outcome, CaptureOutcome::Grabbed(_)));
+        assert_eq!(*overlay.seen.lock().unwrap(), 1);
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|spec| spec.program == "slurp")
+        );
+    }
+
+    #[test]
+    fn a_cancelled_overlay_never_runs_slurp_or_grim() {
+        struct Cancelling;
+        impl SelectionOverlay for Cancelling {
+            fn available(&self) -> bool {
+                true
+            }
+
+            fn select(
+                &self,
+                _mode: CaptureMode,
+                _initial: Option<Rect>,
+                _monitors: &[Value],
+            ) -> Result<Option<Rect>, CaptureRequestError> {
+                Err(CaptureRequestError::Selection)
+            }
+        }
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let request = CaptureRequest::resolve("area", None, None, 0).unwrap();
+        let error = run_with_overlay(&session, &request, &Cancelling).unwrap_err();
+        assert!(matches!(error, CaptureRequestError::Selection), "{error}");
+        assert!(
+            runner
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|spec| spec.program != "slurp" && spec.program != "grim"),
+            "a dismissed overlay must take no pixels and run no selector"
+        );
+    }
+
+    #[test]
+    fn a_window_request_still_defers_to_the_window_picker() {
+        let runner = Fake::default();
+        let registry = degraded_registry();
+        let native = NativeDir::new();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: &registry,
+            native: native.0.clone(),
+        };
+        let overlay = FixedOverlay::accepted(Rect::new(0, 0, 100, 100));
+        let request = CaptureRequest::resolve("window", None, None, 0).unwrap();
+        assert_eq!(
+            run_with_overlay(&session, &request, &overlay).unwrap(),
+            CaptureOutcome::NeedsSelection
+        );
+        assert!(overlay.seen.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -201,6 +201,7 @@ pub const PAGES: &[SettingsPage] = &[
                 "overlay",
                 &["overlay", "copy", "save", "annotate", "pin"],
             ),
+            flag("capture_freeze", "Freeze the desktop while selecting", true),
             flag(
                 "capture_ctrl_copy",
                 "Ctrl at selection copies the capture",
@@ -487,6 +488,19 @@ pub fn capture_delay(values: &BTreeMap<String, Value>) -> i64 {
         .get("capture_delay")
         .and_then(Value::as_f64)
         .map_or(3, |value| value.round() as i64)
+}
+
+/// Whether the selection overlay freezes the desktop.
+///
+/// A frozen selector follows one grim frame; a live one refreshes the desktop
+/// through grim at a short interval. Freezing stays the default because a live
+/// selector on a compositor TidyShot cannot mirror may capture itself.
+#[must_use]
+pub fn capture_freeze(values: &BTreeMap<String, Value>) -> bool {
+    values
+        .get("capture_freeze")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 /// The live capture filename pattern, empty meaning the built-in default.

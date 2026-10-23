@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::app::Command;
 use crate::capture::{Display, capture_target};
 use crate::capture_session::{
-    CaptureOptions, CaptureOutcome, CaptureRequest, CaptureRequestError, CaptureSession,
-    GrabbedFrame, run_capture, slurp_region,
+    CaptureMode, CaptureOptions, CaptureOutcome, CaptureRequest, CaptureRequestError,
+    CaptureSession, GrabbedFrame, SelectionOverlay, run_capture_with_overlay, slurp_region,
 };
 use crate::commands::{CommandRunner, hypr};
 use crate::geometry::Rect;
@@ -27,6 +27,10 @@ use crate::scroll::{ScrollSession, SystemScrollCapture, SystemScrollInput};
 use crate::scroll_runtime::{
     DriveMode, DriveOutcome, ScrollCommand, ScrollControl, ScrollPanel, ScrollStatus,
     drive as drive_scroll,
+};
+use crate::selection_ui::{
+    CountdownControl, FrameInfo, SelectionControl, SelectionOutcome, SelectionRequest,
+    seconds_from_label,
 };
 
 /// A completed capture on disk.
@@ -209,7 +213,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             root: root.into(),
             options: CaptureOptions {
                 cursor: false,
-                freeze: true,
+                freeze: crate::settings_page::capture_freeze(settings),
             },
             filename_format: crate::settings_page::filename_format(settings),
             default_delay: crate::settings_page::capture_delay(settings),
@@ -263,12 +267,45 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
     /// saving the pixels it produced.
     pub fn run_with_cancel<F>(
         &self,
+        request: CaptureRequest,
+        remembered: Option<Rect>,
+        should_cancel: F,
+    ) -> Result<CaptureResult, RuntimeError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.run_with_selector(request, remembered, None, should_cancel)
+    }
+
+    /// Run one request, using `overlay` for an interactive selection.
+    ///
+    /// A headless caller passes `None` and keeps slurp; the GUI passes its
+    /// overlay so the frozen frame, magnifier and size fields own the pointer.
+    pub fn run_with_selector<F>(
+        &self,
+        request: CaptureRequest,
+        remembered: Option<Rect>,
+        overlay: Option<&dyn SelectionOverlay>,
+        should_cancel: F,
+    ) -> Result<CaptureResult, RuntimeError>
+    where
+        F: FnMut() -> bool,
+    {
+        self.run_with_selector_tick(request, remembered, overlay, |_| {}, should_cancel)
+    }
+
+    /// Run one request with a selection overlay and a countdown tick hook.
+    pub fn run_with_selector_tick<F, T>(
+        &self,
         mut request: CaptureRequest,
         remembered: Option<Rect>,
+        overlay: Option<&dyn SelectionOverlay>,
+        mut on_tick: T,
         mut should_cancel: F,
     ) -> Result<CaptureResult, RuntimeError>
     where
         F: FnMut() -> bool,
+        T: FnMut(&str),
     {
         if request.mode == crate::capture_session::CaptureMode::Previous && request.rect.is_none() {
             request.rect = remembered.or_else(|| history::last_area(&self.root));
@@ -303,14 +340,25 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             if should_cancel() {
                 return Err(RuntimeError::Cancelled);
             }
-            let outcome = run_capture(
+            let outcome = run_capture_with_overlay(
                 &session,
                 monitors,
                 &request,
                 self.options,
-                |_| {},
+                overlay,
+                &mut on_tick,
                 &mut should_cancel,
             )?;
+            if overlay.is_some()
+                && request.mode != CaptureMode::Window
+                && matches!(outcome, CaptureOutcome::NeedsSelection)
+            {
+                // The overlay could not draw and slurp was skipped; the caller
+                // still gets a selector instead of an empty result.
+                let rect = self.select_region(request.mode)?;
+                request.rect = Some(rect);
+                continue;
+            }
             match outcome {
                 CaptureOutcome::NeedsSelection => {
                     if request.mode == crate::capture_session::CaptureMode::Window {
@@ -863,7 +911,14 @@ impl Drop for CaptureLease {
 }
 
 /// The worker half of a capture: resolve the active window, then run.
-fn capture_on_worker(request: CaptureRequest, active: bool, cancel: Arc<AtomicBool>) -> Completion {
+fn capture_on_worker(
+    request: CaptureRequest,
+    active: bool,
+    cancel: Arc<AtomicBool>,
+    overlay: QtSelection,
+    countdown: CountdownControl,
+    thread: cxx_qt::CxxQtThread<qobject::Capture>,
+) -> Completion {
     let runner = crate::commands::SystemRunner;
     let runtime = CaptureRuntime::new(
         &runner,
@@ -896,7 +951,27 @@ fn capture_on_worker(request: CaptureRequest, active: bool, cancel: Arc<AtomicBo
     if cancel.load(Ordering::SeqCst) {
         return Completion::Failed(RuntimeError::Cancelled.to_string());
     }
-    match runtime.run_with_cancel(request, None, || cancel.load(Ordering::SeqCst)) {
+    // The overlay needs the live monitor list and the refresh feed, so the
+    // worker fills them in before the runtime asks for a selection.
+    let overlay = QtSelection {
+        monitors: crate::commands::hypr(&runner, "monitors")
+            .ok()
+            .and_then(|value| value.as_array().map(<[Value]>::to_vec))
+            .unwrap_or_default(),
+        ..overlay
+    };
+    let live = false;
+    let _ = live;
+    let cancel_for_countdown = countdown.clone();
+    let on_tick = move |label: &str| {
+        let label = label.to_owned();
+        let _ = thread.queue(move |mut capture| {
+            capture.as_mut().apply_countdown(label);
+        });
+    };
+    let should_cancel = move || cancel.load(Ordering::SeqCst) || cancel_for_countdown.cancelled();
+    match runtime.run_with_selector_tick(request, None, Some(&overlay), on_tick, || should_cancel())
+    {
         Ok(mut result) => {
             result.screen = crate::commands::hypr(&runner, "monitors")
                 .ok()
@@ -941,6 +1016,59 @@ fn window_on_worker(
             Completion::Captured(result)
         }
         Err(error) => Completion::Failed(error.to_string()),
+    }
+}
+
+/// The GUI's area overlay, used by the worker capture instead of slurp.
+///
+/// The worker prepares a frozen frame, publishes it to the Qt thread and waits
+/// for the rectangle the overlay returns. A cancel arrives as an error, so the
+/// worker never falls through to slurp after the user dismissed the selector.
+struct QtSelection {
+    control: SelectionControl,
+    thread: cxx_qt::CxxQtThread<qobject::Capture>,
+    mode: CaptureMode,
+    monitors: Vec<Value>,
+    live: bool,
+}
+
+impl SelectionOverlay for QtSelection {
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn select(
+        &self,
+        _mode: CaptureMode,
+        _initial: Option<Rect>,
+        monitors: &[Value],
+    ) -> Result<Option<Rect>, CaptureRequestError> {
+        let monitors = if monitors.is_empty() {
+            &self.monitors[..]
+        } else {
+            monitors
+        };
+        let prepared = match prepare_selection(self.mode, monitors, self.live) {
+            Ok(prepared) => prepared,
+            // No frame means no overlay; slurp still gives the user a selector.
+            Err(_) => return Ok(None),
+        };
+        self.control.open();
+        let control = prepared.control;
+        let bounds = prepared.request.frame.bounds;
+        let request = prepared.request;
+        let displayed = control.clone();
+        let _ = self.thread.queue(move |mut capture| {
+            capture.as_mut().show_selection(request, displayed, bounds);
+        });
+        match self.control.wait(std::time::Duration::from_secs(180)) {
+            Some(SelectionOutcome::Accepted(rect)) => Ok(Some(rect)),
+            Some(SelectionOutcome::Cancelled) => Err(CaptureRequestError::Selection),
+            None => {
+                self.control.cancel();
+                Err(CaptureRequestError::Selection)
+            }
+        }
     }
 }
 
@@ -1279,6 +1407,192 @@ pub fn dispatch(command: Command) {
     }
 }
 
+/// The live overlay's refreshed frame directory and its last URL.
+///
+/// A live selector scrapes grim on the Qt thread at the refresh interval; the
+/// frames land in one directory and the URL carries a sequence number so QML's
+/// image cache sees a new file each time.
+pub struct SelectionFrames {
+    directory: PathBuf,
+    sequence: u64,
+}
+
+impl SelectionFrames {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            directory: std::env::temp_dir()
+                .join(format!("tidyshot-selection-{}", std::process::id())),
+            sequence: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+}
+
+impl Default for SelectionFrames {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The overlay's frozen frame, as both the state machine and QML need it.
+pub struct PreparedSelection {
+    pub request: SelectionRequest,
+    pub control: SelectionControl,
+    pub accent: String,
+}
+
+/// Freeze the focused output and prepare the area overlay.
+///
+/// The frame is grabbed once, written atomically and projected as a file URL.
+/// A failed grab is returned as the error message so the caller can fall back
+/// to slurp instead of showing an empty selector.
+// Ported from omnishot/selection.py (SelectionOverlay prepare)
+fn prepare_selection(
+    mode: CaptureMode,
+    monitors: &[Value],
+    live: bool,
+) -> Result<PreparedSelection, String> {
+    let runner = crate::commands::SystemRunner;
+    let native = crate::recording::native_dir();
+    let session = CaptureSession {
+        runner: &runner,
+        mirror: MirrorRegistry::global(),
+        native,
+    };
+    let displays = crate::capture_session::displays_from_monitors(monitors);
+    let display = displays
+        .iter()
+        .find(|display| display.focused)
+        .or_else(|| displays.first())
+        .ok_or_else(|| "No display is available for capture".to_owned())?;
+    let bounds = display.geometry.bounds();
+    let directory = std::env::temp_dir().join(format!(
+        "tidyshot-selection-{}-{}",
+        std::process::id(),
+        safe_mode(mode)
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let png = session
+        .grab(
+            None,
+            false,
+            Some(&display.name),
+            Some(display.geometry.scale),
+        )
+        .map_err(|error| error.to_string())?;
+    let image = crate::pngzip::decode_png(&png).map_err(|error| error.to_string())?;
+    let path = directory.join("frozen.png");
+    crate::storage::atomic_write_file(&path, &png).map_err(|error| error.to_string())?;
+    let rows = if mode == CaptureMode::Window {
+        let clients =
+            crate::commands::hypr(&runner, "clients").map_err(|error| error.to_string())?;
+        let frame = crate::window_picker::FrozenFrame {
+            name: display.name.clone(),
+            bounds,
+            focused: true,
+            url: crate::overlay::local_file_url(&path),
+        };
+        let model = crate::window_picker::build(
+            &clients,
+            &Value::Array(monitors.to_vec()),
+            vec![frame],
+            crate::ui_scale::accent(),
+        );
+        model
+            .rows
+            .iter()
+            .flat_map(|row| {
+                model.frames.get(row.monitor).map(|frame| {
+                    let mut value = crate::window_picker::row_json(row, frame);
+                    if let Value::Object(object) = &mut value {
+                        object.insert(
+                            "address".to_owned(),
+                            Value::String(row.window.address.clone()),
+                        );
+                        object.insert(
+                            "stableId".to_owned(),
+                            Value::String(row.window.stable_id.clone().unwrap_or_default()),
+                        );
+                    }
+                    value.to_string_compact()
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let frame = FrameInfo {
+        name: display.name.clone(),
+        bounds,
+        image_width: image.width,
+        image_height: image.height,
+        url: if live {
+            String::new()
+        } else {
+            crate::overlay::local_file_url(&path)
+        },
+        focused: true,
+    };
+    let accent = crate::ui_scale::accent();
+    Ok(PreparedSelection {
+        request: SelectionRequest {
+            mode: mode.command().to_owned(),
+            frame,
+            rows,
+            accent: accent.clone(),
+            hint: crate::selection_ui::HINT.to_owned(),
+            live,
+        },
+        control: SelectionControl::new(),
+        accent,
+    })
+}
+
+fn safe_mode(mode: CaptureMode) -> &'static str {
+    mode.command()
+}
+
+/// Grab a fresh live frame and return its URL, for the refresh timer.
+fn grab_live_frame<R: CommandRunner>(
+    session: &CaptureSession<'_, R>,
+    frames: &mut SelectionFrames,
+    bounds: Rect,
+) -> Option<String> {
+    let monitors = crate::commands::hypr(session.runner, "monitors").ok()?;
+    let displays =
+        crate::capture_session::displays_from_monitors(monitors.as_array().unwrap_or(&[]));
+    let display = displays
+        .iter()
+        .find(|display| display.focused)
+        .or_else(|| {
+            displays
+                .iter()
+                .find(|display| display.geometry.bounds() == bounds)
+        })
+        .or_else(|| displays.first())?
+        .clone();
+    let png = session
+        .grab(
+            None,
+            false,
+            Some(&display.name),
+            Some(display.geometry.scale),
+        )
+        .ok()?;
+    frames.sequence = frames.sequence.wrapping_add(1);
+    let path = frames
+        .directory()
+        .join(format!("live-{}.png", frames.sequence));
+    crate::storage::atomic_write_file(&path, &png).ok()?;
+    Some(crate::overlay::local_file_url(&path))
+}
+
 /// A picker model prepared off the Qt thread.
 struct PreparedPicker {
     windows: Vec<WindowInfo>,
@@ -1383,6 +1697,22 @@ pub mod qobject {
         #[qproperty(bool, scroll_auto, cxx_name = "scrollAuto")]
         #[qproperty(bool, scroll_running, cxx_name = "scrollRunning")]
         #[qproperty(bool, scroll_horizontal, cxx_name = "scrollHorizontal")]
+        #[qproperty(bool, selection_open, cxx_name = "selectionOpen")]
+        #[qproperty(QString, selection_frame, cxx_name = "selectionFrame")]
+        #[qproperty(QStringList, selection_rows, cxx_name = "selectionRows")]
+        #[qproperty(QString, selection_mode, cxx_name = "selectionMode")]
+        #[qproperty(QString, selection_accent, cxx_name = "selectionAccent")]
+        #[qproperty(QString, selection_hint, cxx_name = "selectionHint")]
+        #[qproperty(bool, selection_live, cxx_name = "selectionLive")]
+        #[qproperty(i32, selection_x, cxx_name = "selectionX")]
+        #[qproperty(i32, selection_y, cxx_name = "selectionY")]
+        #[qproperty(i32, selection_w, cxx_name = "selectionW")]
+        #[qproperty(i32, selection_h, cxx_name = "selectionH")]
+        #[qproperty(bool, selection_has_rect, cxx_name = "selectionHasRect")]
+        #[qproperty(i32, magnifier_zoom, cxx_name = "magnifierZoom")]
+        #[qproperty(i32, countdown_seconds, cxx_name = "countdownSeconds")]
+        #[qproperty(QString, countdown_label, cxx_name = "countdownLabel")]
+        #[qproperty(bool, countdown_open, cxx_name = "countdownOpen")]
         type Capture = super::CaptureRust;
 
         /// Start an area capture.
@@ -1439,6 +1769,31 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "captureWindow"]
         fn capture_window(self: Pin<&mut Self>, index: i32);
+
+        /// Grab a fresh frame for a live overlay; empty when it could not.
+        #[qinvokable]
+        #[cxx_name = "refreshSelectionFrame"]
+        fn refresh_selection_frame(self: Pin<&mut Self>) -> QString;
+
+        /// Publish the overlay's current rectangle and accept it.
+        #[qinvokable]
+        #[cxx_name = "selectionAccept"]
+        fn selection_accept(self: Pin<&mut Self>, x: i32, y: i32, width: i32, height: i32);
+
+        /// Close the overlay without capturing.
+        #[qinvokable]
+        #[cxx_name = "selectionCancel"]
+        fn selection_cancel(self: Pin<&mut Self>);
+
+        /// Keep the overlay's magnifier zoom within its bounds.
+        #[qinvokable]
+        #[cxx_name = "chooseMagnifierZoom"]
+        fn choose_magnifier_zoom(self: Pin<&mut Self>, zoom: i32);
+
+        /// Dismiss the countdown; the worker treats it as a cancellation.
+        #[qinvokable]
+        #[cxx_name = "countdownCancel"]
+        fn countdown_cancel(self: Pin<&mut Self>);
 
         /// Begin grabbing frames for the open scrolling capture.
         #[qinvokable]
@@ -1510,11 +1865,34 @@ pub struct CaptureRust {
     scroll_auto: bool,
     scroll_running: bool,
     scroll_horizontal: bool,
+    selection_open: bool,
+    selection_frame: QString,
+    selection_rows: QStringList,
+    selection_mode: QString,
+    selection_accent: QString,
+    selection_hint: QString,
+    selection_live: bool,
+    selection_x: i32,
+    selection_y: i32,
+    selection_w: i32,
+    selection_h: i32,
+    selection_has_rect: bool,
+    magnifier_zoom: i32,
+    countdown_seconds: i32,
+    countdown_label: QString,
+    countdown_open: bool,
     cancel: Arc<AtomicBool>,
     windows: Vec<WindowInfo>,
     picker: Option<crate::window_picker::PickerModel>,
     frozen: Option<PathBuf>,
     scroll: Option<crate::scroll_runtime::ScrollControl>,
+    /// The open overlay, owned by the worker until it returns a rectangle.
+    selection: Option<SelectionControl>,
+    /// The absolute origin of the overlay's output.
+    selection_bounds: Rect,
+    countdown: Option<CountdownControl>,
+    /// Live frames are written to one directory the overlay's URL points at.
+    selection_frames: std::sync::Arc<std::sync::Mutex<SelectionFrames>>,
     pending_action: Option<String>,
     /// Ctrl was held when the window was chosen; copy after the capture.
     pending_copy: bool,
@@ -1543,11 +1921,31 @@ impl Default for CaptureRust {
             scroll_auto: false,
             scroll_running: false,
             scroll_horizontal: false,
+            selection_open: false,
+            selection_frame: QString::from(""),
+            selection_rows: QStringList::default(),
+            selection_mode: QString::from("area"),
+            selection_accent: QString::from("#FFD60A"),
+            selection_hint: QString::from(crate::selection_ui::HINT),
+            selection_live: false,
+            selection_x: 0,
+            selection_y: 0,
+            selection_w: 0,
+            selection_h: 0,
+            selection_has_rect: false,
+            magnifier_zoom: crate::selection_ui::MAGNIFIER_ZOOM,
+            countdown_seconds: 0,
+            countdown_label: QString::from(""),
+            countdown_open: false,
             cancel: Arc::new(AtomicBool::new(false)),
             windows: Vec::new(),
             picker: None,
             frozen: None,
             scroll: None,
+            selection: None,
+            selection_bounds: Rect::new(0, 0, 0, 0),
+            countdown: None,
+            selection_frames: std::sync::Arc::new(std::sync::Mutex::new(SelectionFrames::new())),
             pending_action: None,
             pending_copy: false,
         }
@@ -1783,6 +2181,140 @@ impl qobject::Capture {
             }
         }
         true
+    }
+
+    /// Show the area overlay with a prepared frozen frame.
+    ///
+    /// The worker thread already grabbed the frame; this only publishes it and
+    /// keeps the control that returns the chosen rectangle.
+    fn show_selection(
+        mut self: Pin<&mut Self>,
+        request: SelectionRequest,
+        control: SelectionControl,
+        frame_bounds: Rect,
+    ) {
+        let mut rows = QStringList::default();
+        for row in &request.rows {
+            rows.append(QString::from(row.clone()));
+        }
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.selection = Some(control);
+            state.selection_bounds = frame_bounds;
+        }
+        self.as_mut()
+            .set_selection_frame(QString::from(request.frame.json()));
+        self.as_mut().set_selection_rows(rows);
+        self.as_mut()
+            .set_selection_mode(QString::from(request.mode));
+        self.as_mut()
+            .set_selection_accent(QString::from(request.accent));
+        self.as_mut()
+            .set_selection_hint(QString::from(request.hint));
+        self.as_mut().set_selection_live(request.live);
+        self.as_mut().set_selection_x(0);
+        self.as_mut().set_selection_y(0);
+        self.as_mut().set_selection_w(0);
+        self.as_mut().set_selection_h(0);
+        self.as_mut().set_selection_has_rect(false);
+        self.as_mut().set_selection_open(true);
+    }
+
+    /// Hide the area overlay and forget its frame.
+    pub fn hide_selection(mut self: Pin<&mut Self>) {
+        self.as_mut().set_selection_open(false);
+        self.as_mut().rust_mut().get_mut().selection = None;
+    }
+
+    /// Refresh a live overlay's frame and publish the new picture.
+    ///
+    /// QML calls this on its refresh timer; a failure keeps the previous frame
+    /// on screen instead of blanking the selector.
+    pub fn refresh_selection_frame(mut self: Pin<&mut Self>) -> QString {
+        if !*self.selection_open() || !*self.selection_live() {
+            return QString::from("");
+        }
+        let runner = crate::commands::SystemRunner;
+        let native = crate::recording::native_dir();
+        let session = CaptureSession {
+            runner: &runner,
+            mirror: MirrorRegistry::global(),
+            native,
+        };
+        let bounds = self.as_mut().rust_mut().get_mut().selection_bounds;
+        let frames = std::sync::Arc::clone(&self.as_mut().rust_mut().get_mut().selection_frames);
+        let frame = frames
+            .lock()
+            .ok()
+            .and_then(|mut frames| grab_live_frame(&session, &mut frames, bounds));
+        let Some(frame) = frame else {
+            return QString::from("");
+        };
+        // The URL changes on every refresh, so QML's image cache loads the new
+        // pixels instead of keeping the first frame.
+        self.as_mut()
+            .set_selection_frame(QString::from(frame.clone()));
+        QString::from(frame)
+    }
+
+    /// Accept the overlay's rectangle.
+    pub fn selection_accept(mut self: Pin<&mut Self>, x: i32, y: i32, width: i32, height: i32) {
+        let origin = self.as_mut().rust_mut().get_mut().selection_bounds;
+        let absolute = Rect::new(origin.x + x, origin.y + y, width, height);
+        if absolute.width < crate::selection_ui::MIN_SELECTION
+            || absolute.height < crate::selection_ui::MIN_SELECTION
+        {
+            return;
+        }
+        if let Some(control) = self.as_mut().rust_mut().get_mut().selection.as_ref() {
+            control.accept(absolute);
+        }
+        self.as_mut().set_selection_open(false);
+    }
+
+    /// Dismiss the overlay without capturing.
+    pub fn selection_cancel(mut self: Pin<&mut Self>) {
+        if let Some(control) = self.as_mut().rust_mut().get_mut().selection.as_ref() {
+            control.cancel();
+        }
+        self.as_mut().set_selection_open(false);
+    }
+
+    /// Keep the magnifier's zoom inside its supported range.
+    pub fn choose_magnifier_zoom(mut self: Pin<&mut Self>, zoom: i32) {
+        let zoom = zoom.clamp(crate::selection_ui::MIN_ZOOM, crate::selection_ui::MAX_ZOOM);
+        self.as_mut().set_magnifier_zoom(zoom);
+    }
+
+    /// Publish one countdown tick and open or close the label window.
+    fn apply_countdown(mut self: Pin<&mut Self>, label: String) {
+        let seconds = seconds_from_label(&label);
+        self.as_mut().set_countdown_seconds(seconds as i32);
+        self.as_mut().set_countdown_label(QString::from(label));
+        self.as_mut().set_countdown_open(seconds > 0);
+    }
+
+    /// Close the countdown label after the delay finished.
+    fn hide_countdown(mut self: Pin<&mut Self>) {
+        self.as_mut().set_countdown_open(false);
+        self.as_mut().rust_mut().get_mut().countdown = None;
+    }
+
+    /// Dismiss the countdown before it finishes.
+    pub fn countdown_cancel(mut self: Pin<&mut Self>) {
+        let cancelled = self
+            .as_mut()
+            .rust_mut()
+            .get_mut()
+            .countdown
+            .as_ref()
+            .is_some_and(|control| {
+                control.cancel();
+                true
+            });
+        if !cancelled {
+            self.as_mut().set_countdown_open(false);
+        }
     }
 
     /// Freeze every output and load the visible window list.
@@ -2140,6 +2672,19 @@ impl qobject::Capture {
             state.pending_copy = false;
         }
         let qt_thread = self.qt_thread();
+        let worker_tick = self.qt_thread();
+        let overlay = QtSelection {
+            control: SelectionControl::new(),
+            thread: self.qt_thread(),
+            mode: request.mode,
+            monitors: Vec::new(),
+            live: !crate::settings_page::capture_freeze(&crate::settings::stored_settings()),
+        };
+        let countdown = CountdownControl::new();
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.countdown = Some(countdown.clone());
+        }
         self.as_mut().set_busy(true);
         self.as_mut().set_message(QString::from("Capturing…"));
         std::thread::spawn(move || {
@@ -2153,11 +2698,19 @@ impl qobject::Capture {
             }
             let completion = {
                 let _lease = CaptureLease;
-                capture_on_worker(request, active, worker_cancel)
+                capture_on_worker(
+                    request,
+                    active,
+                    worker_cancel,
+                    overlay,
+                    countdown,
+                    worker_tick,
+                )
             };
             let _ = qt_thread.queue(move |mut qobject| {
                 qobject.as_mut().apply_completion(completion);
                 qobject.as_mut().set_busy(false);
+                qobject.as_mut().hide_countdown();
             });
         });
     }
