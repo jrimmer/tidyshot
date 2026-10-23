@@ -9,7 +9,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use crate::commands::CommandSpec;
 use crate::json::Value;
 use crate::pin::{MAX_OPACITY, MIN_OPACITY, MIN_SIDE, PinState};
 
@@ -46,6 +48,70 @@ pub fn is_pin_title(title: &str) -> bool {
 #[must_use]
 pub fn pins_path(root: &Path) -> PathBuf {
     root.join(PINS_FILE)
+}
+
+/// The compositor matcher that identifies a pin by its file name.
+///
+/// Wayland ignores an application-set toplevel position, so a pin is placed
+/// through the same kind of dynamic window rule the preview uses. The name is
+/// regex-escaped so a filename with a parenthesis cannot widen the match, and
+/// the optional `Locked` covers the title a locked pin carries.
+#[must_use]
+pub fn pin_matcher(name: &str) -> String {
+    let mut escaped = String::with_capacity(name.len());
+    for character in name.chars() {
+        if matches!(
+            character,
+            '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' | '\\'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    format!("title:^(TidyShot (Locked )?Pin — {escaped})")
+}
+
+/// The dynamic rule that pins one window at `x`, `y`.
+#[must_use]
+pub fn placement_rule(name: &str, x: f64, y: f64) -> String {
+    format!(
+        "move {} {},{}",
+        x.round() as i64,
+        y.round() as i64,
+        pin_matcher(name)
+    )
+}
+
+/// The dynamic rule that drops a pin's placement.
+#[must_use]
+pub fn removal_rule(name: &str) -> String {
+    format!("unset,{}", pin_matcher(name))
+}
+
+fn rule_spec(rule: &str) -> CommandSpec {
+    CommandSpec::new("hyprctl")
+        .args(["keyword", "windowrule", rule])
+        .timeout(Duration::from_secs(5))
+}
+
+/// Pin one window at its stored position before it maps.
+///
+/// A compositor that does not understand the rule leaves the window at the
+/// compositor's own position: the pin still works, only its placement is
+/// lost, so the failure is reported to the window but never stops the pin.
+fn place_pin<R: crate::commands::CommandRunner>(
+    runner: &R,
+    pin: &PinnedWindow,
+) -> Result<(), String> {
+    runner
+        .run(&rule_spec(&placement_rule(&pin.name, pin.x, pin.y)))
+        .map(|_| ())
+        .map_err(|error| format!("Could not place the pin: {error}"))
+}
+
+/// Drop a pin's dynamic placement rule.
+fn unplace_pin<R: crate::commands::CommandRunner>(runner: &R, name: &str) {
+    let _ = runner.run(&rule_spec(&removal_rule(name)));
 }
 
 /// Why a pin could not be stored or restored.
@@ -454,6 +520,9 @@ pub fn restore_on_start(root: &Path) -> Result<usize, PinError> {
         *guard = Some(merged.clone());
         merged
     };
+    for pin in &merged.entries {
+        let _ = place_pin(&crate::commands::SystemRunner, pin);
+    }
     Ok(merged.len())
 }
 
@@ -495,7 +564,15 @@ pub fn pin_file(path: &Path) -> Result<String, PinError> {
     });
     let x = (cursor_x - start_width / 2.0).max(0.0);
     let y = (cursor_y - start_height / 2.0).max(0.0);
-    with_pins(|pins| pins.add(path, image.width, image.height, x, y));
+    let placed = with_pins(|pins| {
+        pins.add(path, image.width, image.height, x, y);
+        pins.entries().last().cloned()
+    });
+    if let Some(pin) = &placed
+        && let Err(message) = place_pin(&crate::commands::SystemRunner, pin)
+    {
+        set_message(&message);
+    }
     save()?;
     publish();
     Ok(format!("Pinned {}", path.display()))
@@ -523,7 +600,14 @@ pub fn toggle() -> String {
 
 /// Close every pin.
 pub fn close_all() -> String {
-    with_pins(|pins| pins.close_all());
+    let names = with_pins(|pins| {
+        let names: Vec<String> = pins.entries().iter().map(|pin| pin.name.clone()).collect();
+        pins.close_all();
+        names
+    });
+    for name in names {
+        unplace_pin(&crate::commands::SystemRunner, &name);
+    }
     save_and_publish("Pins closed")
 }
 
@@ -535,7 +619,18 @@ pub fn unlock_all() -> String {
 
 /// Remove one pin and persist the new set.
 pub fn close(path: &Path) -> String {
-    with_pins(|pins| pins.remove(path));
+    let name = with_pins(|pins| {
+        let name = pins
+            .entries()
+            .iter()
+            .find(|pin| pin.path == path)
+            .map(|pin| pin.name.clone());
+        pins.remove(path);
+        name
+    });
+    if let Some(name) = name {
+        unplace_pin(&crate::commands::SystemRunner, &name);
+    }
     save_and_publish("Pin closed")
 }
 
@@ -956,6 +1051,20 @@ mod tests {
         .unwrap();
         assert!(PinRegistry::restore_at(&root).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_placement_rule_covers_locked_pins_and_escapes_the_name() {
+        assert_eq!(
+            placement_rule("shot.png", 1547.0, 762.0),
+            "move 1547 762,title:^(TidyShot (Locked )?Pin — shot\\.png)"
+        );
+        let matcher = pin_matcher("a(b)[c]");
+        assert!(matcher.ends_with("a\\(b\\)\\[c\\])"), "{matcher}");
+        assert_eq!(
+            removal_rule("shot.png"),
+            format!("unset,{}", pin_matcher("shot.png"))
+        );
     }
 
     #[test]
