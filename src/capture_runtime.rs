@@ -970,8 +970,7 @@ fn capture_on_worker(
         });
     };
     let should_cancel = move || cancel.load(Ordering::SeqCst) || cancel_for_countdown.cancelled();
-    match runtime.run_with_selector_tick(request, None, Some(&overlay), on_tick, || should_cancel())
-    {
+    match runtime.run_with_selector_tick(request, None, Some(&overlay), on_tick, should_cancel) {
         Ok(mut result) => {
             result.screen = crate::commands::hypr(&runner, "monitors")
                 .ok()
