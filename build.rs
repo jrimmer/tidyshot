@@ -19,7 +19,9 @@ fn main() {
             "qml/Editor.qml",
             "qml/EditorToolbar.qml",
             "qml/WindowHover.qml",
+            "qml/HistoryWindow.qml",
             "qml/SettingsWindow.qml",
+            "qml/PinWindow.qml",
         ]),
     )
     .qt_module("Quick")
@@ -38,7 +40,9 @@ fn main() {
         "src/recording_runtime.rs",
         "src/editor_window.rs",
         "src/editor_image.rs",
+        "src/history_window.rs",
         "src/settings_page.rs",
+        "src/pin_runtime.rs",
     ]);
     // The load probe's header is local to src/cpp; cxx generates the binding
     // that includes it, so that directory must be on the include path.

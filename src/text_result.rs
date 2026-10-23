@@ -7,7 +7,7 @@
 //! address.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::commands::{CommandRunner, CommandSpec};
@@ -714,6 +714,44 @@ fn capture_selection() -> Result<Vec<u8>, TextError> {
         })
 }
 
+/// The Qt-side dialog, once QML has created it.
+static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::TextOutput>> =
+    std::sync::OnceLock::new();
+
+/// A recognition request that arrived before the dialog existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingRecognition {
+    path: Option<PathBuf>,
+    linebreaks: i32,
+}
+
+static PENDING: std::sync::Mutex<Vec<PendingRecognition>> = std::sync::Mutex::new(Vec::new());
+
+/// Run OCR on a file or an interactive capture from a routed command.
+///
+/// A file goes straight to recognition; no path runs the interactive capture
+/// first, matching `tidyshot ocr`. The request waits for the dialog when the
+/// GUI has not created it yet, so a forwarded command is never dropped.
+pub fn request_recognition(path: Option<PathBuf>, linebreaks: Option<bool>) {
+    let linebreaks = match linebreaks {
+        None => -1,
+        Some(false) => 0,
+        Some(true) => 1,
+    };
+    let pending = PendingRecognition { path, linebreaks };
+    match BOUND.get() {
+        Some(thread) => {
+            let _ = thread.queue(move |mut dialog| {
+                dialog.as_mut().run(pending);
+            });
+        }
+        None => PENDING
+            .lock()
+            .expect("recognition queue poisoned")
+            .push(pending),
+    }
+}
+
 // --- QML bridge: the recognized-text dialog ------------------------------
 
 #[cxx_qt::bridge]
@@ -763,6 +801,10 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "captureAndRecognize"]
         fn capture_and_recognize(self: Pin<&mut Self>, linebreaks: i32);
+
+        /// Register this dialog for recognitions that arrive before QML.
+        #[qinvokable]
+        fn bind(self: Pin<&mut Self>);
 
         /// Close the review dialog and hide it.
         #[qinvokable]
@@ -818,6 +860,32 @@ impl Default for TextResultDialogRust {
 }
 
 impl qobject::TextOutput {
+    /// Register this object and replay any recognition that arrived early.
+    pub fn bind(mut self: Pin<&mut Self>) {
+        use cxx_qt::Threading as _;
+        let _ = BOUND.set(self.qt_thread());
+        let queued = {
+            let mut pending = PENDING.lock().expect("recognition queue poisoned");
+            std::mem::take(&mut *pending)
+        };
+        for request in queued {
+            self.as_mut().run(request);
+        }
+    }
+
+    /// Run one queued recognition on the dialog.
+    fn run(mut self: Pin<&mut Self>, request: PendingRecognition) {
+        match request.path {
+            Some(path) => {
+                self.as_mut().recognize_path(
+                    &QString::from(path.display().to_string()),
+                    request.linebreaks,
+                );
+            }
+            None => self.as_mut().capture_and_recognize(request.linebreaks),
+        }
+    }
+
     /// Replace the edited text and refresh the link projections.
     pub fn update_text(mut self: Pin<&mut Self>, text: &QString) {
         self.as_mut().set_text(text.clone());

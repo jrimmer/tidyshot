@@ -351,7 +351,7 @@ fn the_settings_menu_row_and_command_open_the_window() {
     assert!(row.implemented());
     assert_eq!(
         tidyshot::menu::invoke(row),
-        tidyshot::menu::Invocation::App("settings")
+        tidyshot::menu::Invocation::Command("settings")
     );
     let args = tidyshot::cli::parse_args(["settings"]).unwrap();
     assert_eq!(

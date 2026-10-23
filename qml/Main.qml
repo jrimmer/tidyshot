@@ -60,7 +60,9 @@ ApplicationWindow {
         Capture.bind()
         Preview.bind()
         Recording.bind()
+        HistoryApi.bind()
         SettingsApi.bind()
+        PinApi.bind()
     }
 
     // The Rust action table emits the activated capture row; the runtime then
@@ -333,6 +335,61 @@ ApplicationWindow {
         transientParent: null
     }
 
+    // The capture history window. It is its own top-level window so the
+    // filmstrip can be wider than the menu, and its state comes from the
+    // Rust history view through the HistoryApi singleton.
+    HistoryWindow {
+        id: historyContent
+        transientParent: null
+        visible: HistoryApi.open
+        filter: HistoryApi.filter
+        query: HistoryApi.query
+        message: HistoryApi.message
+        cursor: HistoryApi.cursor
+        selected: HistoryApi.selected
+        tabIds: HistoryApi.tabIds
+        tabLabels: HistoryApi.tabLabels
+        onFilterChosen: function (id) { HistoryApi.chooseFilter(id) }
+        onSearchChanged: function (text) { HistoryApi.search(text) }
+        onMoved: function (delta) { HistoryApi.moveCursor(delta) }
+        onRowSelected: function (index, extend) {
+            HistoryApi.moveCursor(index - HistoryApi.cursor)
+            HistoryApi.selectCursor(extend)
+        }
+        onRowActivated: function (index) {
+            HistoryApi.moveCursor(index - HistoryApi.cursor)
+            HistoryApi.annotate()
+        }
+        onDeleteRequested: HistoryApi.deleteSelected()
+        onClearRequested: HistoryApi.clearHistory()
+        onRestoreRequested: HistoryApi.restore()
+        onAnnotateRequested: HistoryApi.annotate()
+        onPinRequested: HistoryApi.pin()
+        onDismissed: HistoryApi.close()
+    }
+
+    // cxx-qt singleton property notifications do not reach QML bindings in
+    // this build, so the history window is fed from the singleton on a timer.
+    Timer {
+        id: historySync
+        interval: 60
+        repeat: true
+        running: true
+        onTriggered: {
+            var rows = []
+            for (var r = 0; r < HistoryApi.rows.length; ++r)
+                rows.push(JSON.parse(HistoryApi.rows[r]))
+            historyContent.rows = rows
+            historyContent.filter = HistoryApi.filter
+            historyContent.query = HistoryApi.query
+            historyContent.message = HistoryApi.message
+            historyContent.cursor = HistoryApi.cursor
+            historyContent.selected = HistoryApi.selected
+            historyContent.tabIds = HistoryApi.tabIds
+            historyContent.tabLabels = HistoryApi.tabLabels
+        }
+    }
+
     // Settings: its own top-level window, opened by the menu row,
     // `tidyshot settings` or a settings URL. Every change writes the file
     // atomically and the next capture, preview or recording reads it back, so
@@ -365,6 +422,39 @@ ApplicationWindow {
         repeat: true
         running: true
         onTriggered: settingsWindow.visible = SettingsApi.open
+    }
+
+    // Pinned captures: one top-level window per pin row.
+    property var pinRows: []
+    Timer {
+        id: pinSync
+        interval: 60
+        repeat: true
+        running: true
+        onTriggered: {
+            var rows = []
+            for (var r = 0; r < PinApi.rows.length; ++r)
+                rows.push(JSON.parse(PinApi.rows[r]))
+            window.pinRows = rows
+        }
+    }
+
+    Instantiator {
+        id: pinWindows
+        model: window.pinRows
+        delegate: PinWindow {
+            required property var modelData
+            path: modelData.path
+            name: modelData.name
+            pinWidth: modelData.width
+            pinHeight: modelData.height
+            opacityValue: modelData.opacity
+            locked: modelData.locked
+            source: modelData.path !== "" ? "file://" + modelData.path : ""
+            visible: modelData.visible
+            onCloseRequested: PinApi.closeAll()
+            onUnlockRequested: PinApi.unlockAll()
+        }
     }
 
     TextResultDialog {

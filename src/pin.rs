@@ -36,7 +36,7 @@ pub fn display_scale(width: f64, image_width: usize) -> f64 {
 }
 
 /// A pin's interactive state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PinState {
     pub image_width: usize,
     pub image_height: usize,

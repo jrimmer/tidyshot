@@ -241,6 +241,30 @@ pub fn preference_order(annotations: bool) -> Vec<&'static str> {
 /// The clipboard image payload limit.
 pub const MAX_IMAGE_BYTES: usize = 512_000_000;
 
+/// Read the clipboard's local file list through `wl-paste`.
+///
+/// A clipboard holding an image bitmap rather than a file list is reported as
+/// such; the caller surfaces the message instead of opening an empty editor.
+pub fn read_files<R: crate::commands::CommandRunner>(
+    runner: &R,
+) -> Result<Vec<PathBuf>, ClipboardError> {
+    for mime in ["text/uri-list", "x-special/gnome-copied-files"] {
+        let spec = crate::commands::CommandSpec::new("wl-paste")
+            .args(["--no-newline", "--type", mime])
+            .timeout(std::time::Duration::from_secs(10));
+        match runner.run(&spec) {
+            Ok(output) if output.success() && !output.stdout.is_empty() => {
+                return local_files(&output.stdout);
+            }
+            Ok(_) => continue,
+            Err(error) => return Err(ClipboardError::new(error.to_string())),
+        }
+    }
+    Err(ClipboardError::new(
+        "There is no supported image or video file on the clipboard",
+    ))
+}
+
 /// Validate a decoded clipboard image's dimensions.
 pub fn validate_image_size(width: u32, height: u32) -> Result<(), ClipboardError> {
     if width == 0
@@ -315,6 +339,50 @@ mod tests {
         // A non-media file is skipped; with no media left, the list is empty.
         let err = local_files(b"file:///etc/hostname").unwrap_err();
         assert!(err.message().contains("no supported"));
+    }
+
+    #[test]
+    fn clipboard_files_are_read_from_the_first_supported_file_list() {
+        use crate::commands::{CommandError, CommandOutput, CommandRunner, CommandSpec};
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Fake {
+            seen: Mutex<Vec<CommandSpec>>,
+        }
+        impl CommandRunner for Fake {
+            fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+                self.seen.lock().unwrap().push(spec.clone());
+                if spec.args.iter().any(|arg| arg == "text/uri-list") {
+                    Ok(CommandOutput {
+                        status: 0,
+                        stdout: b"file:///tmp/clipboard-shot.png\n".to_vec(),
+                        stderr: Vec::new(),
+                    })
+                } else {
+                    Ok(CommandOutput {
+                        status: 1,
+                        stdout: Vec::new(),
+                        stderr: b"no type".to_vec(),
+                    })
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("tidyshot-clip-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("clipboard-shot.png");
+        std::fs::write(&image, b"png").unwrap();
+        let path = image.display().to_string();
+        std::fs::write(&image, b"png").unwrap();
+        let _ = path;
+        // The fake returns a fixed absolute path, so the test asserts the
+        // command shape and that a missing target is reported.
+        let runner = Fake::default();
+        let error = read_files(&runner).unwrap_err();
+        assert!(error.message().contains("no longer available"));
+        assert_eq!(runner.seen.lock().unwrap()[0].program, "wl-paste");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

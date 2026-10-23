@@ -310,6 +310,24 @@ marker and Studio checkpoint; the next launch recovers the playable file,
 restores the checkpoint, appends its history row and shows it in the preview,
 while a cancelled take is discarded.
 
+## Capture history
+
+`qml/HistoryWindow.qml` shows the saved captures as a newest-first horizontal
+filmstrip with type tabs (all, images, scroll, video), a name search and single
+or multi selection. `src/history_window.rs` owns the listing, the filter and
+search, the cursor and every action: Delete and Clear History move captures
+into `trash/` beside the store (a rename on one filesystem, a temp file and
+rename across filesystems) and drop their rows, never unlinking a capture;
+Restore preview, Annotate and Pin act on the selected capture. Enter opens the
+selection, arrows or h/j/k/l move the cursor, Delete trashes it and Escape
+closes the window. The History menu row and `tidyshot history` open it.
+
+`history_retention_days` in `settings.json` sets how long captures are kept;
+the default is 30 days, zero keeps everything. A cleanup pass runs on startup
+and moves older captures to the trash. The preferences window
+(`qml/SettingsWindow.qml`) edits the retention and the OCR and decoder keys the
+rest of the app reads, writing them atomically through `src/settings.rs`.
+
 ## Command surface
 
 `src/cli.rs` parses the same argument vector the OmniShot launcher uses;

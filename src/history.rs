@@ -246,6 +246,131 @@ mod tests {
     }
 
     #[test]
+    fn filters_and_search_keep_newest_first() {
+        let root = scratch("filter");
+        let rows = [
+            HistoryRow::screenshot("/tmp/Browser.png", 1, 1, None),
+            HistoryRow::scroll("/tmp/long-page.png", 1, 1, None),
+            HistoryRow::video("/tmp/take.mp4", 1, 1),
+        ];
+        write(&root, &rows).unwrap();
+        assert_eq!(filtered(&root, KindFilter::All, "").len(), 3);
+        assert_eq!(filtered(&root, KindFilter::Video, "").len(), 1);
+        assert_eq!(filtered(&root, KindFilter::Scroll, "").len(), 1);
+        // The images tab includes screenshots and scroll stitches.
+        assert_eq!(filtered(&root, KindFilter::Image, "").len(), 2);
+        let search = filtered(&root, KindFilter::All, "BROW");
+        assert_eq!(search.len(), 1);
+        assert_eq!(search[0].path, PathBuf::from("/tmp/Browser.png"));
+        assert!(filtered(&root, KindFilter::All, "missing").is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deleting_moves_the_capture_to_trash_and_drops_its_row() {
+        let root = scratch("delete");
+        std::fs::create_dir_all(captures_dir(&root)).unwrap();
+        let shot = captures_dir(&root).join("shot.png");
+        let keep = captures_dir(&root).join("keep.png");
+        std::fs::write(&shot, b"capture").unwrap();
+        std::fs::write(&keep, b"another").unwrap();
+        write(
+            &root,
+            &[
+                HistoryRow::screenshot(&shot, 1, 1, None),
+                HistoryRow::screenshot(&keep, 1, 1, None),
+            ],
+        )
+        .unwrap();
+        let trashed = delete(&root, &shot).unwrap();
+        assert!(!shot.exists(), "the capture left its old path");
+        assert_eq!(std::fs::read(&trashed).unwrap(), b"capture");
+        assert!(trashed.starts_with(trash_dir(&root)));
+        assert!(keep.exists(), "a sibling capture is untouched");
+        let rows = read(&root);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, keep);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_capture_is_reported_without_touching_history() {
+        let root = scratch("missing-delete");
+        let path = root.join("absent.png");
+        write(&root, &[HistoryRow::screenshot(&path, 1, 1, None)]).unwrap();
+        let error = delete(&root, &path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(read(&root).len(), 1, "the row stays when the move fails");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clear_moves_every_capture_to_trash() {
+        let root = scratch("clear");
+        std::fs::create_dir_all(captures_dir(&root)).unwrap();
+        let first = captures_dir(&root).join("first.png");
+        let second = captures_dir(&root).join("second.png");
+        std::fs::write(&first, b"one").unwrap();
+        std::fs::write(&second, b"two").unwrap();
+        write(
+            &root,
+            &[
+                HistoryRow::screenshot(&first, 1, 1, None),
+                HistoryRow::screenshot(&second, 1, 1, None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(clear(&root).unwrap(), 2);
+        assert!(read(&root).is_empty());
+        assert!(!first.exists() && !second.exists());
+        let trashed = std::fs::read_dir(trash_dir(&root)).unwrap().count();
+        assert_eq!(trashed, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn retention_prunes_old_rows_and_keeps_recent_ones() {
+        let root = scratch("retention");
+        std::fs::create_dir_all(captures_dir(&root)).unwrap();
+        let old = captures_dir(&root).join("old.png");
+        let recent = captures_dir(&root).join("recent.png");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&recent, b"new").unwrap();
+        let mut old_row = HistoryRow::screenshot(&old, 1, 1, None);
+        old_row.created = 1_000.0;
+        let mut recent_row = HistoryRow::screenshot(&recent, 1, 1, None);
+        recent_row.created = 990_000.0;
+        write(&root, &[old_row, recent_row.clone()]).unwrap();
+        // One day at a time base of a million seconds keeps the new row.
+        assert_eq!(prune(&root, 1, 1_000_000.0).unwrap(), 1);
+        let rows = read(&root);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, recent_row.path);
+        assert!(!old.exists());
+        // Zero days keeps everything by design.
+        assert_eq!(prune(&root, 0, 2_000_000.0).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn newest_lookups_skip_rows_whose_file_is_gone() {
+        let root = scratch("newest");
+        let missing = root.join("missing.png");
+        let present = root.join("present.png");
+        std::fs::write(&present, b"ok").unwrap();
+        write(
+            &root,
+            &[
+                HistoryRow::video(&missing, 1, 1),
+                HistoryRow::screenshot(&present, 1, 1, None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(newest_existing(&root).unwrap().path, present);
+        assert!(newest_matching(&root, KindFilter::Video).is_none());
+    }
+
+    #[test]
     fn capture_rows_without_a_path_are_dropped() {
         let value = crate::json::parse(r#"{"kind":"image"}"#).unwrap();
         assert!(HistoryRow::from_value(&value).is_none());
@@ -256,4 +381,197 @@ mod tests {
         assert_eq!(row.width, 5);
         assert!(!row.capture_named);
     }
+}
+
+/// The directory captures move to when deleted.
+#[must_use]
+pub fn trash_dir(root: &Path) -> PathBuf {
+    root.join("trash")
+}
+
+/// Which type tab a history view is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KindFilter {
+    #[default]
+    All,
+    Image,
+    Scroll,
+    Video,
+}
+
+impl KindFilter {
+    /// Parse a tab id; an unknown tab shows everything.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "image" => Self::Image,
+            "scroll" => Self::Scroll,
+            "video" => Self::Video,
+            _ => Self::All,
+        }
+    }
+
+    /// The tab id this filter came from.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Image => "image",
+            Self::Scroll => "scroll",
+            Self::Video => "video",
+        }
+    }
+
+    /// Whether a row belongs to this tab. Screenshots and scroll stitches are
+    /// both still images, so the image tab shows both.
+    #[must_use]
+    pub fn matches(self, row: &HistoryRow) -> bool {
+        match self {
+            Self::All => true,
+            Self::Image => row.kind == "image" || row.kind == "scroll",
+            Self::Scroll => row.kind == "scroll",
+            Self::Video => row.kind == "video",
+        }
+    }
+}
+
+/// Whether a row's file name contains `query`, ignoring case.
+#[must_use]
+pub fn name_matches(row: &HistoryRow, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    row.path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_lowercase().contains(&query))
+}
+
+/// The history rows for one tab and search query, newest first.
+#[must_use]
+pub fn filtered(root: &Path, filter: KindFilter, query: &str) -> Vec<HistoryRow> {
+    read(root)
+        .into_iter()
+        .filter(|row| filter.matches(row) && name_matches(row, query))
+        .collect()
+}
+
+/// A unique sibling path inside the trash directory.
+fn trash_target(root: &Path, source: &Path) -> PathBuf {
+    let directory = trash_dir(root);
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("capture");
+    let mut candidate = directory.join(name);
+    let mut sequence = 2;
+    while candidate.exists() {
+        let stem = source
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("capture");
+        let extension = source
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| format!(".{extension}"))
+            .unwrap_or_default();
+        candidate = directory.join(format!("{stem} ({sequence}){extension}"));
+        sequence += 1;
+    }
+    candidate
+}
+
+/// Move one file into the trash directory without ever unlinking it first.
+///
+/// A rename keeps the move atomic on one filesystem. Across filesystems the
+/// bytes are copied to a temporary file in the trash, fsynced and renamed into
+/// place before the source is removed, so a failed copy leaves the capture
+/// untouched. The returned path is the file inside the trash.
+pub fn move_to_trash(root: &Path, source: &Path) -> std::io::Result<PathBuf> {
+    if !source.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("the capture is no longer available: {}", source.display()),
+        ));
+    }
+    std::fs::create_dir_all(trash_dir(root))?;
+    let target = trash_target(root, source);
+    match std::fs::rename(source, &target) {
+        Ok(()) => Ok(target),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            let bytes = std::fs::read(source)?;
+            crate::storage::atomic_write_file(&target, &bytes)?;
+            std::fs::remove_file(source)?;
+            Ok(target)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Delete one history row by moving its capture to the trash.
+///
+/// The capture is moved first; only then is the row dropped from the history.
+/// A move failure leaves both the file and its row in place and is reported.
+pub fn delete(root: &Path, path: &Path) -> std::io::Result<PathBuf> {
+    let trashed = move_to_trash(root, path)?;
+    let mut rows = read(root);
+    rows.retain(|row| row.path != path);
+    write(root, &rows)?;
+    Ok(trashed)
+}
+
+/// Move every capture in the history to the trash and clear the listing.
+pub fn clear(root: &Path) -> std::io::Result<usize> {
+    let rows = read(root);
+    let mut moved = 0;
+    for row in &rows {
+        // A row whose file is already gone is dropped without touching disk.
+        if row.path.is_file() {
+            move_to_trash(root, &row.path)?;
+            moved += 1;
+        }
+    }
+    write(root, &[])?;
+    Ok(moved)
+}
+
+/// Drop rows older than `days`, moving their captures to the trash.
+///
+/// `now` is unix seconds, so the caller can pin a clock. A retention of zero
+/// keeps everything. A missing file is dropped without moving anything.
+pub fn prune(root: &Path, days: u32, now: f64) -> std::io::Result<usize> {
+    if days == 0 {
+        return Ok(0);
+    }
+    let cutoff = now - f64::from(days) * 86_400.0;
+    // A row without a timestamp cannot be shown to be old, so it is kept.
+    let (old, keep): (Vec<HistoryRow>, Vec<HistoryRow>) = read(root)
+        .into_iter()
+        .partition(|row| row.created > 0.0 && row.created < cutoff);
+    let mut pruned = 0;
+    for row in &old {
+        if row.path.is_file() {
+            move_to_trash(root, &row.path)?;
+            pruned += 1;
+        }
+    }
+    if !old.is_empty() {
+        write(root, &keep)?;
+    }
+    Ok(pruned)
+}
+
+/// The newest row whose path still exists.
+#[must_use]
+pub fn newest_existing(root: &Path) -> Option<HistoryRow> {
+    read(root).into_iter().find(|row| row.path.is_file())
+}
+
+/// The newest row matching a filter, skipping rows whose file is missing.
+#[must_use]
+pub fn newest_matching(root: &Path, filter: KindFilter) -> Option<HistoryRow> {
+    read(root)
+        .into_iter()
+        .find(|row| filter.matches(row) && row.path.is_file())
 }

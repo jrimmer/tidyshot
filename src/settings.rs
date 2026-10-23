@@ -64,6 +64,53 @@ fn preview_settings_at(path: &std::path::Path) -> crate::overlay::PreviewSetting
     crate::overlay::preview_settings(&stored_settings_at(path))
 }
 
+/// The number of days a capture is kept before the startup cleanup trashes it.
+///
+/// A missing key keeps a month, the longest retention the preferences offer;
+/// zero disables cleanup and keeps everything.
+#[must_use]
+pub fn retention_days() -> u32 {
+    retention_days_at(&settings_path())
+}
+
+/// Read the retention setting from an explicit settings file.
+#[must_use]
+fn retention_days_at(path: &std::path::Path) -> u32 {
+    stored_settings_at(path)
+        .get("history_retention_days")
+        .and_then(crate::json::Value::as_f64)
+        .map_or(DEFAULT_RETENTION_DAYS, |value| {
+            value.clamp(0.0, 3650.0) as u32
+        })
+}
+
+/// The retention a new install keeps: one month.
+pub const DEFAULT_RETENTION_DAYS: u32 = 30;
+
+/// Write one settings key, keeping every other saved key.
+///
+/// The file is rewritten atomically so a crash cannot leave a partial
+/// settings file, and a malformed existing file is replaced rather than
+/// allowed to block the write.
+pub fn write_setting(key: &str, value: crate::json::Value) -> std::io::Result<()> {
+    write_setting_at(&settings_path(), key, value)
+}
+
+/// Write one settings key to an explicit file.
+pub fn write_setting_at(
+    path: &std::path::Path,
+    key: &str,
+    value: crate::json::Value,
+) -> std::io::Result<()> {
+    let mut object = stored_settings_at(path);
+    object.insert(key.to_owned(), value);
+    let text = crate::json::Value::Object(object).to_string_pretty();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::storage::atomic_write_file(path, text.as_bytes())
+}
+
 /// Read the saved settings from an explicit file.
 #[must_use]
 fn stored_settings_at(
@@ -146,6 +193,51 @@ mod tests {
         assert_eq!(defaults.corner, crate::overlay::Corner::BottomRight);
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(preview_settings_at(&path).auto_close_ms(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn retention_defaults_to_a_month_and_reads_a_saved_value() {
+        let path =
+            std::env::temp_dir().join(format!("tidyshot-retention-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(retention_days_at(&path), DEFAULT_RETENTION_DAYS);
+        std::fs::write(&path, r#"{"history_retention_days":7}"#).unwrap();
+        assert_eq!(retention_days_at(&path), 7);
+        std::fs::write(&path, r#"{"history_retention_days":0}"#).unwrap();
+        assert_eq!(retention_days_at(&path), 0, "zero disables cleanup");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn writing_one_setting_keeps_the_others() {
+        let path = std::env::temp_dir().join(format!("tidyshot-write-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, r#"{"ocr_languages":"eng"}"#).unwrap();
+        write_setting_at(
+            &path,
+            "history_retention_days",
+            crate::json::Value::Number(14.0),
+        )
+        .unwrap();
+        let settings = stored_settings_at(&path);
+        assert_eq!(
+            settings.get("ocr_languages"),
+            Some(&crate::json::Value::String("eng".to_owned()))
+        );
+        assert_eq!(
+            settings.get("history_retention_days"),
+            Some(&crate::json::Value::Number(14.0))
+        );
+        // A malformed file is replaced instead of blocking the write.
+        std::fs::write(&path, "not json").unwrap();
+        write_setting_at(
+            &path,
+            "history_retention_days",
+            crate::json::Value::Number(2.0),
+        )
+        .unwrap();
+        assert_eq!(retention_days_at(&path), 2);
         let _ = std::fs::remove_file(&path);
     }
 

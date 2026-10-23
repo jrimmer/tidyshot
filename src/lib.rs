@@ -31,6 +31,7 @@ pub mod filenames;
 pub mod geometry;
 pub mod gif;
 pub mod history;
+pub mod history_window;
 pub mod hover_keys;
 pub mod icon;
 pub mod instance;
@@ -42,6 +43,7 @@ pub mod motion_blur;
 pub mod ocr;
 pub mod overlay;
 pub mod pin;
+pub mod pin_runtime;
 pub mod pngzip;
 pub mod preview;
 pub mod preview_placement;
@@ -127,6 +129,7 @@ pub fn run_with(argv: &[String]) {
     // reaches a live event loop.
     start_instance();
     recover_recordings();
+    cleanup_history();
     let mut engine = cxx_qt_lib::QQmlApplicationEngine::new();
     if let Some(mut engine) = engine.as_mut() {
         // The editor publishes its rendered canvas through this provider.
@@ -176,6 +179,20 @@ fn start_instance() {
             true
         });
     });
+}
+
+/// Move captures past the retention setting to the trash on startup.
+///
+/// The cleanup runs on a worker thread so a large history never delays the
+/// first window, and a failure is reported instead of stopping the app.
+fn cleanup_history() {
+    std::thread::spawn(
+        || match history_window::cleanup_on_start(&settings::data_dir()) {
+            Ok(0) => {}
+            Ok(pruned) => eprintln!("tidyshot: moved {pruned} old captures to the trash"),
+            Err(error) => eprintln!("tidyshot: could not clean up the capture history: {error}"),
+        },
+    );
 }
 
 /// Recover recordings a crashed instance left behind.

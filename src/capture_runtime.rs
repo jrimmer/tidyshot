@@ -1040,6 +1040,155 @@ static BOUND: std::sync::OnceLock<cxx_qt::CxxQtThread<qobject::Capture>> =
 /// Commands that arrived before the capture object existed.
 static PENDING: std::sync::Mutex<Vec<Command>> = std::sync::Mutex::new(Vec::new());
 
+/// Run the non-capture side of a menu route, reporting the result line.
+///
+/// Every route here has a real handler; a failure is returned as the message
+/// the window shows instead of being swallowed.
+pub fn perform_route(route: crate::menu::Route) -> Result<String, String> {
+    match route {
+        crate::menu::Route::Open => {
+            crate::editor_window::publish_chooser();
+            Ok("Choose an image to open".to_owned())
+        }
+        crate::menu::Route::Clipboard => import_clipboard(),
+        crate::menu::Route::History => {
+            crate::history_window::request_open();
+            Ok("History".to_owned())
+        }
+        crate::menu::Route::Restore => {
+            let root = crate::settings::data_dir();
+            match crate::history::newest_existing(&root) {
+                Some(row) => {
+                    crate::preview::publish_file(row.path);
+                    Ok("Restored the newest capture".to_owned())
+                }
+                None => Err("There is no capture to restore".to_owned()),
+            }
+        }
+        crate::menu::Route::Settings => {
+            crate::settings_page::publish_open("general");
+            Ok("Settings".to_owned())
+        }
+        crate::menu::Route::Pin => {
+            let root = crate::settings::data_dir();
+            let path = crate::history::newest_existing(&root)
+                .map(|row| row.path)
+                .ok_or_else(|| "There is no capture to pin".to_owned())?;
+            crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
+        }
+        crate::menu::Route::TogglePins => Ok(crate::pin_runtime::toggle()),
+        crate::menu::Route::ClosePins => Ok(crate::pin_runtime::close_all()),
+        crate::menu::Route::UnlockPins => Ok(crate::pin_runtime::unlock_all()),
+        crate::menu::Route::SaveAll => {
+            crate::preview::publish_save();
+            Ok("Saving the preview".to_owned())
+        }
+        crate::menu::Route::CloseAll => {
+            crate::preview::publish_dismiss();
+            Ok("Closing the preview".to_owned())
+        }
+        crate::menu::Route::Quit => {
+            crate::bridge::qobject::tidyshot_request_quit();
+            Ok("Quitting".to_owned())
+        }
+        crate::menu::Route::Capture(_) | crate::menu::Route::Recording(_) => {
+            Err("That action needs the capture runtime".to_owned())
+        }
+    }
+}
+
+/// Import the clipboard's local files, opening the first one.
+///
+/// The import never copies the user's file; the editor opens the original so
+/// no capture is duplicated or modified by reading the clipboard.
+pub fn import_clipboard() -> Result<String, String> {
+    let files = crate::clipboard::read_files(&crate::commands::SystemRunner)
+        .map_err(|error| error.message().to_owned())?;
+    let Some(first) = files.first() else {
+        return Err("There is no supported image or video file on the clipboard".to_owned());
+    };
+    crate::editor_window::publish_open(first.clone());
+    Ok(format!("Opened {} from the clipboard", first.display()))
+}
+
+/// Run one routed command that does not need the capture singleton.
+///
+/// This is the headless half of the dispatcher, shared by the CLI, the socket
+/// and the GUI, so every command behaves the same however it arrived.
+pub fn perform_command(command: Command) -> Result<String, String> {
+    match command {
+        Command::Edit(path) => {
+            crate::editor_window::publish_open(path.clone());
+            Ok(format!("Opened {}", path.display()))
+        }
+        Command::EditChooser => perform_route(crate::menu::Route::Open),
+        Command::Pin(path) => {
+            crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
+        }
+        Command::PinChooser => perform_route(crate::menu::Route::Pin),
+        Command::Overlay(path) => {
+            crate::preview::publish_file(path.clone());
+            Ok(format!("Showing {}", path.display()))
+        }
+        Command::Ocr { path, linebreaks } => {
+            crate::text_result::request_recognition(Some(path.clone()), linebreaks);
+            Ok(format!("Recognizing text in {}", path.display()))
+        }
+        Command::History => perform_route(crate::menu::Route::History),
+        Command::Restore => perform_route(crate::menu::Route::Restore),
+        Command::Last => {
+            let root = crate::settings::data_dir();
+            match crate::history::newest_existing(&root) {
+                Some(row) => {
+                    crate::editor_window::publish_open(row.path);
+                    Ok("Opened the newest capture".to_owned())
+                }
+                None => Err("There is no capture to open".to_owned()),
+            }
+        }
+        Command::LastScreenshot => {
+            let root = crate::settings::data_dir();
+            match crate::history::newest_matching(&root, crate::history::KindFilter::Image) {
+                Some(row) => {
+                    crate::editor_window::publish_open(row.path);
+                    Ok("Opened the newest screenshot".to_owned())
+                }
+                None => Err("There is no screenshot to open".to_owned()),
+            }
+        }
+        Command::SaveAll => perform_route(crate::menu::Route::SaveAll),
+        Command::CloseAll => perform_route(crate::menu::Route::CloseAll),
+        Command::TogglePins => perform_route(crate::menu::Route::TogglePins),
+        Command::ClosePins => perform_route(crate::menu::Route::ClosePins),
+        Command::UnlockPins => perform_route(crate::menu::Route::UnlockPins),
+        Command::Settings { tab } => {
+            crate::settings_page::publish_open(&tab);
+            Ok(format!("Settings: {tab}"))
+        }
+        Command::Record { geometry, .. } => {
+            crate::recording_runtime::request_start(geometry);
+            Ok("Recording".to_owned())
+        }
+        Command::Stop => {
+            crate::recording_runtime::request_stop();
+            Ok("Stopping the recording".to_owned())
+        }
+        Command::Pause => {
+            crate::recording_runtime::request_pause();
+            Ok("Pausing the recording".to_owned())
+        }
+        Command::Restart => {
+            crate::recording_runtime::request_restart();
+            Ok("Restarting the recording".to_owned())
+        }
+        Command::ScrollDone => Err("There is no scrolling capture running".to_owned()),
+        Command::Quit => perform_route(crate::menu::Route::Quit),
+        Command::Menu => Ok(String::new()),
+        Command::Capture { .. } => Err("A capture needs the capture runtime".to_owned()),
+        Command::Unknown(command) => Err(format!("unknown command: {command}")),
+    }
+}
+
 /// Hand a routed command to the GUI, or queue it until the GUI is ready.
 ///
 /// The single-instance server runs on a worker thread, so a forwarded capture
@@ -1507,33 +1656,46 @@ impl qobject::Capture {
             .failed_signal(&QString::from("Capture cancelled"));
     }
 
-    /// Start a capture for a menu row id.
+    /// Run the row a menu activation named.
+    ///
+    /// The row's route decides the handler, so a row is live here as soon as
+    /// it exists in the action table; an unknown id is refused rather than
+    /// silently ignored.
     pub fn capture_row(mut self: Pin<&mut Self>, id: &QString) -> bool {
         let id = id.to_string();
-        match id.as_str() {
-            "all-in-one" | "select" => self.area(),
-            "area" => self.area(),
-            "window" => self.open_window_picker(),
-            "fullscreen" => self.fullscreen(),
-            "desktop" => self.desktop(),
-            "previous" => self.previous(),
-            "timer" => self.as_mut().start_request("timer", None, false),
-            "scroll" => self.as_mut().start_scroll(None, false, false, false),
-            "scroll-horizontal" => self.as_mut().start_scroll(None, true, false, false),
-            "record" => crate::recording_runtime::request_start(None),
-            "stop" => crate::recording_runtime::request_stop(),
-            "pause" => crate::recording_runtime::request_pause(),
-            "restart" => crate::recording_runtime::request_restart(),
-            "settings" => crate::settings_page::publish_open("general"),
-            "save-all" => crate::preview::publish_save_all(),
-            "close-all" => crate::preview::publish_dismiss(),
-            "restore" => {
-                if let Some(path) = crate::history::newest_path(&crate::settings::data_dir()) {
-                    crate::preview::publish_file(path);
+        let Some(row) = crate::menu::find(&id) else {
+            self.as_mut().set_message(QString::from(format!(
+                "That menu action is not available: {id}"
+            )));
+            return false;
+        };
+        match row.route() {
+            crate::menu::Route::Capture(request) => {
+                let command = request.command();
+                if command == "window" {
+                    self.as_mut().open_window_picker();
+                } else if command == "scroll" || command == "scroll-horizontal" {
+                    self.as_mut()
+                        .start_scroll(None, command == "scroll-horizontal", false, false);
+                } else {
+                    self.as_mut().start_request(command, None, false);
                 }
             }
-            "ocr" => return false,
-            _ => return false,
+            crate::menu::Route::Recording(command) => match command {
+                "record" => crate::recording_runtime::request_start(None),
+                "stop" => crate::recording_runtime::request_stop(),
+                "pause" => crate::recording_runtime::request_pause(),
+                "restart" => crate::recording_runtime::request_restart(),
+                other => {
+                    self.as_mut()
+                        .fail(format!("That recording action is not available: {other}"));
+                }
+            },
+            route => {
+                if let Err(message) = perform_route(route) {
+                    self.as_mut().fail(message);
+                }
+            }
         }
         true
     }
@@ -1732,6 +1894,10 @@ impl qobject::Capture {
     }
 
     /// Run one routed application command through the runtime worker.
+    ///
+    /// Every command the router produces reaches a handler; a command whose
+    /// module reports a failure has that failure shown on the same message
+    /// line as a capture, so nothing is dropped silently.
     fn run_app_command(mut self: Pin<&mut Self>, command: Command) {
         // `scroll-done` finishes whichever scrolling capture is open, which is
         // what the shortcut sends while the controls window has no focus.
@@ -1739,69 +1905,59 @@ impl qobject::Capture {
             self.as_mut().scroll_done();
             return;
         }
-        // Non-capture rows keep their own behaviour; the runtime only owns
-        // the screenshot commands.
-        match command {
-            Command::Capture {
-                command,
-                geometry,
-                delay,
-                start,
-                autoscroll,
-                action,
-                ..
-            } => {
-                // A window command without a region opens the picker, the
-                // same chooser the menu row opens, so a forwarded link and a
-                // menu click cannot diverge.
-                // Ported from omnishot/app.py (capture)
-                if command == "window" && geometry.is_none() {
-                    self.as_mut().open_window_picker();
-                    return;
-                }
-                // Scrolling captures drive an interactive session rather than
-                // the one-shot grab the other modes use.
-                if command == "scroll" || command == "scroll-horizontal" {
-                    let rect = geometry
-                        .as_deref()
-                        .and_then(|text| crate::geometry::parse_geometry(text).ok());
-                    self.as_mut().start_scroll(
-                        rect,
-                        command == "scroll-horizontal",
-                        start.unwrap_or(false),
-                        autoscroll.unwrap_or(false),
-                    );
-                    return;
-                }
-                self.as_mut().start_command(
-                    CaptureRequest::resolve(
-                        &command,
-                        geometry.as_deref(),
-                        delay,
-                        crate::settings_page::capture_delay(&crate::settings::stored_settings()),
-                    ),
-                    command == "window",
-                    action,
+        // A capture is the one command that runs a worker and reports back
+        // through the capture properties.
+        if let Command::Capture {
+            command,
+            geometry,
+            delay,
+            start,
+            autoscroll,
+            action,
+            ..
+        } = &command
+        {
+            // A window command without a region opens the picker, the same
+            // chooser the menu row opens, so a forwarded link and a menu click
+            // cannot diverge.
+            // Ported from omnishot/app.py (capture)
+            if command == "window" && geometry.is_none() {
+                self.as_mut().open_window_picker();
+                return;
+            }
+            // Scrolling captures drive an interactive session rather than the
+            // one-shot grab the other modes use.
+            if command == "scroll" || command == "scroll-horizontal" {
+                let rect = geometry
+                    .as_deref()
+                    .and_then(|text| crate::geometry::parse_geometry(text).ok());
+                self.as_mut().start_scroll(
+                    rect,
+                    command == "scroll-horizontal",
+                    start.unwrap_or(false),
+                    autoscroll.unwrap_or(false),
                 );
+                return;
             }
-            Command::Edit(path) => crate::editor_window::publish_open(path),
-            Command::EditChooser => crate::editor_window::publish_chooser(),
-            Command::Overlay(path) => crate::preview::publish_file(path),
-            Command::Settings { tab } => crate::settings_page::publish_open(tab),
-            Command::Restore => {
-                if let Some(path) = crate::history::newest_path(&crate::settings::data_dir()) {
-                    crate::preview::publish_file(path);
+            self.as_mut().start_command(
+                CaptureRequest::resolve(
+                    command,
+                    geometry.as_deref(),
+                    *delay,
+                    crate::settings_page::capture_delay(&crate::settings::stored_settings()),
+                ),
+                command == "window",
+                action.clone(),
+            );
+            return;
+        }
+        match perform_command(command) {
+            Ok(message) => {
+                if !message.is_empty() {
+                    self.as_mut().set_message(QString::from(message));
                 }
             }
-            Command::CloseAll => crate::preview::publish_dismiss(),
-            Command::SaveAll => crate::preview::publish_save_all(),
-            Command::Record { geometry, .. } => {
-                crate::recording_runtime::request_start(geometry);
-            }
-            Command::Stop => crate::recording_runtime::request_stop(),
-            Command::Pause => crate::recording_runtime::request_pause(),
-            Command::Restart => crate::recording_runtime::request_restart(),
-            _ => {}
+            Err(message) => self.as_mut().fail(message),
         }
     }
 
@@ -2649,6 +2805,34 @@ mod tests {
     }
 
     #[test]
+    fn a_ctrl_choice_copies_the_picture_the_preview_shows() {
+        let settings = std::collections::BTreeMap::new();
+        let capture = Path::new("/tmp/capture.png");
+        let display = Path::new("/tmp/composed.png");
+        assert_eq!(
+            forced_copy_source(&settings, true, capture, Some(display)),
+            Some(display)
+        );
+        assert_eq!(
+            forced_copy_source(&settings, true, capture, None),
+            Some(capture)
+        );
+        assert_eq!(
+            forced_copy_source(&settings, false, capture, Some(display)),
+            None
+        );
+        let disabled = std::collections::BTreeMap::from([(
+            "capture_ctrl_copy".to_owned(),
+            crate::json::Value::Bool(false),
+        )]);
+        assert_eq!(
+            forced_copy_source(&disabled, true, capture, Some(display)),
+            None,
+            "the source's setting can disable Ctrl-copy"
+        );
+    }
+
+    #[test]
     fn the_runtime_reads_the_live_capture_defaults() {
         let runner = Fake::new(monitors(), clients(), active());
         let root = std::env::temp_dir();
@@ -2682,34 +2866,6 @@ mod tests {
             &empty,
         );
         assert_eq!(runtime.filename_format, crate::filenames::DEFAULT_FORMAT);
-    }
-
-    #[test]
-    fn a_ctrl_choice_copies_the_picture_the_preview_shows() {
-        let settings = std::collections::BTreeMap::new();
-        let capture = Path::new("/tmp/capture.png");
-        let display = Path::new("/tmp/composed.png");
-        assert_eq!(
-            forced_copy_source(&settings, true, capture, Some(display)),
-            Some(display)
-        );
-        assert_eq!(
-            forced_copy_source(&settings, true, capture, None),
-            Some(capture)
-        );
-        assert_eq!(
-            forced_copy_source(&settings, false, capture, Some(display)),
-            None
-        );
-        let disabled = std::collections::BTreeMap::from([(
-            "capture_ctrl_copy".to_owned(),
-            crate::json::Value::Bool(false),
-        )]);
-        assert_eq!(
-            forced_copy_source(&disabled, true, capture, Some(display)),
-            None,
-            "the source's setting can disable Ctrl-copy"
-        );
     }
 
     /// A runner that records the commands a post-capture action sends.
@@ -2834,6 +2990,62 @@ mod tests {
             Value::Bool(false),
         )]);
         assert!(!after_capture_opens_editor(&exclusive, Some("area-save")));
+    }
+
+    #[test]
+    fn every_menu_row_reaches_a_real_handler() {
+        use crate::menu::{ACTIONS, Route};
+        for row in ACTIONS {
+            match row.route() {
+                Route::Capture(_) | Route::Recording(_) => {}
+                // These publish to shared preview or quit state, which other
+                // tests own; their routes are asserted by `menu` instead.
+                Route::SaveAll | Route::CloseAll | Route::Quit => continue,
+                route => {
+                    // With no history the restore and pin rows report a
+                    // visible message instead of doing nothing; the rest
+                    // succeed even with nothing to act on.
+                    match crate::capture_runtime::perform_route(route) {
+                        Ok(message) => assert!(
+                            !message.is_empty() || matches!(route, Route::Quit),
+                            "{} produced no message",
+                            row.id
+                        ),
+                        Err(message) => assert!(!message.is_empty(), "{} failed silently", row.id),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_routed_command_with_no_implementation_is_a_visible_message() {
+        // A history lookup that finds nothing must say so, never succeed with
+        // an empty action.
+        let message = crate::capture_runtime::perform_command(crate::app::Command::Last)
+            .unwrap_or_else(|message| message);
+        assert!(!message.is_empty());
+    }
+
+    #[test]
+    fn pin_toggle_close_and_unlock_are_reachable_from_commands() {
+        use crate::app::Command;
+        for command in [Command::TogglePins, Command::ClosePins, Command::UnlockPins] {
+            let message = crate::capture_runtime::perform_command(command).unwrap();
+            assert!(!message.is_empty());
+        }
+    }
+
+    #[test]
+    fn settings_and_history_commands_open_their_windows() {
+        use crate::app::Command;
+        let message = crate::capture_runtime::perform_command(Command::Settings {
+            tab: "general".to_owned(),
+        })
+        .unwrap();
+        assert!(message.contains("general"));
+        let message = crate::capture_runtime::perform_command(Command::History).unwrap();
+        assert!(!message.is_empty());
     }
 
     #[test]

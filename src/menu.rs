@@ -6,8 +6,9 @@
 //! render [`ACTIONS`]. Adding an action is one row here; no renderer keeps a
 //! second copy of the list.
 //!
-//! Capture rows route to [`capture::CaptureRequest`]; every other row is an
-//! enum stub that reports not-implemented until its module lands.
+//! Capture rows route to [`capture::CaptureRequest`], recording rows to the
+//! recording runtime, and every other row to a command word the application
+//! dispatcher performs. Every row in the table is live.
 
 use cxx_qt_lib::{QString, QStringList};
 
@@ -58,6 +59,42 @@ impl MenuAction {
     }
 }
 
+/// What invoking a row asks the application to do.
+///
+/// Every variant names a handler that exists; there is no placeholder row, so
+/// a menu click can never be silently dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// Run a capture request.
+    Capture(CaptureRequest),
+    /// Send a recording command word.
+    Recording(&'static str),
+    /// Open the annotate editor.
+    Open,
+    /// Import from the clipboard.
+    Clipboard,
+    /// Show the history window.
+    History,
+    /// Restore the newest capture in the preview.
+    Restore,
+    /// Open the preferences window.
+    Settings,
+    /// Pin the newest capture or a chosen file.
+    Pin,
+    /// Show or hide every pin.
+    TogglePins,
+    /// Close every pin.
+    ClosePins,
+    /// Unlock every pin.
+    UnlockPins,
+    /// Save every visible preview.
+    SaveAll,
+    /// Close every visible preview.
+    CloseAll,
+    /// Quit the application.
+    Quit,
+}
+
 /// One row of the action table: identity, label, shortcut hint, and action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActionRow {
@@ -73,19 +110,34 @@ pub struct ActionRow {
 
 impl ActionRow {
     /// Whether this row can be performed today.
+    ///
+    /// Every row in the table has a handler, so this is always true; it stays
+    /// a method because the renderers disable a row that is not.
     #[must_use]
     pub const fn implemented(self) -> bool {
-        matches!(
-            self.action,
-            MenuAction::Capture(_)
-                | MenuAction::Record
-                | MenuAction::Stop
-                | MenuAction::Pause
-                | MenuAction::Settings
-                | MenuAction::SaveAll
-                | MenuAction::CloseAll
-                | MenuAction::Restore
-        )
+        true
+    }
+
+    /// What activating this row does.
+    #[must_use]
+    pub const fn route(self) -> Route {
+        match self.action {
+            MenuAction::Capture(request) => Route::Capture(request),
+            MenuAction::Record => Route::Recording("record"),
+            MenuAction::Stop => Route::Recording("stop"),
+            MenuAction::Pause => Route::Recording("pause"),
+            MenuAction::Open => Route::Open,
+            MenuAction::Clipboard => Route::Clipboard,
+            MenuAction::History => Route::History,
+            MenuAction::Restore => Route::Restore,
+            MenuAction::Settings => Route::Settings,
+            MenuAction::TogglePins => Route::TogglePins,
+            MenuAction::SaveAll => Route::SaveAll,
+            MenuAction::CloseAll => Route::CloseAll,
+            MenuAction::UnlockPins => Route::UnlockPins,
+            MenuAction::ClosePins => Route::ClosePins,
+            MenuAction::Quit => Route::Quit,
+        }
     }
 }
 
@@ -244,10 +296,19 @@ pub enum Invocation {
     Capture(CaptureRequest),
     /// Hand the command word to the recording runtime.
     Recording(&'static str),
-    /// Hand the command word to the window-owning runtime.
-    App(&'static str),
-    /// The action's module has not landed yet.
-    NotImplemented(&'static str),
+    /// Hand the row to the application command dispatcher.
+    Command(&'static str),
+}
+
+impl Invocation {
+    /// The command word the dispatcher should run, when this is one.
+    #[must_use]
+    pub const fn command(self) -> Option<&'static str> {
+        match self {
+            Self::Capture(_) | Self::Recording(_) => None,
+            Self::Command(command) => Some(command),
+        }
+    }
 }
 
 /// Look up a row by id.
@@ -265,15 +326,31 @@ pub fn index_of(id: &str) -> Option<usize> {
 /// Activate a row: capture requests route to the capture module, everything
 /// else is a not-implemented placeholder until its module lands.
 pub fn invoke(row: &ActionRow) -> Invocation {
-    match row.action {
-        MenuAction::Capture(request) => Invocation::Capture(request),
-        MenuAction::Record => Invocation::Recording("record"),
-        MenuAction::Stop => Invocation::Recording("stop"),
-        MenuAction::Pause => Invocation::Recording("pause"),
-        MenuAction::Settings | MenuAction::SaveAll | MenuAction::CloseAll | MenuAction::Restore => {
-            Invocation::App(row.id)
-        }
-        _ => Invocation::NotImplemented(row.id),
+    match row.route() {
+        Route::Capture(request) => Invocation::Capture(request),
+        Route::Recording(command) => Invocation::Recording(command),
+        route => Invocation::Command(command_word(route)),
+    }
+}
+
+/// The command word a non-capture, non-recording route runs.
+#[must_use]
+pub const fn command_word(route: Route) -> &'static str {
+    match route {
+        Route::Open => "open",
+        Route::Clipboard => "clipboard",
+        Route::History => "history",
+        Route::Restore => "restore",
+        Route::Settings => "settings",
+        Route::Pin => "pin",
+        Route::TogglePins => "toggle-pins",
+        Route::ClosePins => "close-pins",
+        Route::UnlockPins => "unlock-pins",
+        Route::SaveAll => "save-all",
+        Route::CloseAll => "close-all",
+        Route::Quit => "quit",
+        Route::Capture(_) => "",
+        Route::Recording(_) => "",
     }
 }
 
@@ -862,19 +939,33 @@ mod tests {
     }
 
     #[test]
-    fn window_rows_route_to_the_owning_runtime() {
-        for id in ["settings", "save-all", "close-all", "restore"] {
+    fn every_non_capture_row_routes_to_a_command() {
+        for (id, word) in [
+            ("open", "open"),
+            ("clipboard", "clipboard"),
+            ("history", "history"),
+            ("restore", "restore"),
+            ("settings", "settings"),
+            ("toggle-pins", "toggle-pins"),
+            ("save-all", "save-all"),
+            ("close-all", "close-all"),
+            ("unlock-pins", "unlock-pins"),
+            ("close-pins", "close-pins"),
+            ("quit", "quit"),
+        ] {
             let row = find(id).unwrap_or_else(|| panic!("{id} row"));
-            assert_eq!(invoke(row), Invocation::App(id));
-            assert!(row.implemented(), "{id} must be reachable");
+            assert_eq!(invoke(row), Invocation::Command(word), "{id}");
+            assert!(row.implemented(), "{id} must be live");
+            assert_eq!(row.route(), find(id).unwrap().route());
         }
     }
 
     #[test]
-    fn rows_without_a_runtime_report_not_implemented() {
-        let row = find("history").expect("history row");
-        assert_eq!(invoke(row), Invocation::NotImplemented("history"));
-        assert!(!row.implemented());
+    fn no_row_is_a_placeholder() {
+        for row in ACTIONS {
+            assert!(row.implemented(), "{} has no handler", row.id);
+            assert_ne!(invoke(row), Invocation::Command(""));
+        }
     }
 
     #[test]

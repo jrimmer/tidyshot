@@ -31,6 +31,7 @@ Dialog {
         }
     }
     Component.onCompleted: {
+        TextOutput.bind()
         if (TextOutput.shown)
             root.open()
     }
