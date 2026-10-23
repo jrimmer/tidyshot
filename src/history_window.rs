@@ -663,7 +663,7 @@ impl qobject::HistoryApi {
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             let message =
-                crate::pin_runtime::pin_file(&path).unwrap_or_else(|error| error.to_string());
+                crate::pin_window::pin_file(&path).unwrap_or_else(|error| error.to_string());
             let _ = qt_thread.queue(move |mut api| {
                 api.as_mut().change(|view| view.message = message);
             });

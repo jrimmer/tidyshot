@@ -182,6 +182,9 @@ impl WindowInfo {
         self.class.starts_with("tidyshot")
             || self.class.starts_with("org.omarchy.TidyShot")
             || self.class.starts_with("com.jasonrimmer.tidyshot")
+            // A pin is always on top and can carry a different compositor
+            // class, so its title is the identity that excludes it.
+            || crate::pin_window::is_pin_title(&self.title)
     }
 
     /// The detail line: monitor, workspace and size.

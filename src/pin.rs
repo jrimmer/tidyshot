@@ -153,8 +153,7 @@ impl PinState {
         } else {
             height.max(MIN_SIDE)
         };
-        if (width - self.width).abs() < f64::EPSILON
-            && (height - self.height).abs() < f64::EPSILON
+        if (width - self.width).abs() < f64::EPSILON && (height - self.height).abs() < f64::EPSILON
         {
             return false;
         }

@@ -43,7 +43,7 @@ pub mod motion_blur;
 pub mod ocr;
 pub mod overlay;
 pub mod pin;
-pub mod pin_runtime;
+pub mod pin_window;
 pub mod pngzip;
 pub mod preview;
 pub mod preview_placement;

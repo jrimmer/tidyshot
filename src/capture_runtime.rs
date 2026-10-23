@@ -1315,11 +1315,11 @@ pub fn perform_route_at_with<R: crate::commands::CommandRunner>(
             let path = crate::history::newest_screenshot(root)
                 .map(|row| row.path)
                 .ok_or_else(|| "There is no capture to pin".to_owned())?;
-            crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
+            crate::pin_window::pin_file(&path).map_err(|error| error.to_string())
         }
-        crate::menu::Route::TogglePins => Ok(crate::pin_runtime::toggle()),
-        crate::menu::Route::ClosePins => Ok(crate::pin_runtime::close_all()),
-        crate::menu::Route::UnlockPins => Ok(crate::pin_runtime::unlock_all()),
+        crate::menu::Route::TogglePins => Ok(crate::pin_window::toggle()),
+        crate::menu::Route::ClosePins => Ok(crate::pin_window::close_all()),
+        crate::menu::Route::UnlockPins => Ok(crate::pin_window::unlock_all()),
         crate::menu::Route::SaveAll => {
             crate::preview::publish_save();
             Ok("Saving the preview".to_owned())
@@ -1381,9 +1381,7 @@ pub fn perform_command_at(command: Command, root: &Path) -> Result<String, Strin
         }
         Command::EditChooser => perform_route_at(crate::menu::Route::Open, root),
         Command::Clipboard => perform_route_at(crate::menu::Route::Clipboard, root),
-        Command::Pin(path) => {
-            crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
-        }
+        Command::Pin(path) => crate::pin_window::pin_file(&path).map_err(|error| error.to_string()),
         Command::PinChooser => perform_route_at(crate::menu::Route::Pin, root),
         Command::Overlay(path) => {
             crate::preview::publish_file(path.clone());

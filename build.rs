@@ -44,7 +44,7 @@ fn main() {
         "src/editor_image.rs",
         "src/history_window.rs",
         "src/settings_page.rs",
-        "src/pin_runtime.rs",
+        "src/pin_window.rs",
     ]);
     // The load probe's header is local to src/cpp; cxx generates the binding
     // that includes it, so that directory must be on the include path.
