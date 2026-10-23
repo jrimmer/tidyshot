@@ -957,19 +957,28 @@ impl qobject::Preview {
     }
 
     /// Pin the capture, opening its always-on-top window.
-    pub fn pin(mut self: Pin<&mut Self>) {
+    ///
+    /// The image is decoded and the compositor is queried for its placement,
+    /// so both run on a worker to keep the preview responsive.
+    pub fn pin(self: Pin<&mut Self>) {
         let path = self.window.as_ref().map_or_else(
             || PathBuf::from(self.path().to_string()),
             |window| window.path().to_path_buf(),
         );
-        let result = crate::pin_window::pin_file(&path)
-            .map(|_| ())
-            .map_err(|error| PreviewError::Image(error.to_string()));
-        self.as_mut()
-            .rust_mut()
-            .get_mut()
-            .action_error(result, "Pinned the capture");
-        self.as_mut().sync();
+        let thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = crate::pin_window::pin_file(&path)
+                .map(|_| ())
+                .map_err(|error| PreviewError::Image(error.to_string()));
+            let _ = thread.queue(move |mut preview| {
+                preview
+                    .as_mut()
+                    .rust_mut()
+                    .get_mut()
+                    .action_error(result, "Pinned the capture");
+                preview.as_mut().sync();
+            });
+        });
     }
 
     /// Close the preview.
