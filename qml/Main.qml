@@ -158,6 +158,75 @@ ApplicationWindow {
         }
     }
 
+    // Pinned captures: one top-level window per registry row. The rows are
+    // parsed from the PinApi singleton on a short timer because cxx-qt
+    // singleton property notifications do not reach QML bindings here.
+    property var pinRows: []
+    property string pinRowsJson: ""
+    Timer {
+        id: pinSync
+        interval: 60
+        repeat: true
+        running: true
+        onTriggered: {
+            // Only rebuild the windows when the registry actually changed;
+            // recreating them on every tick would fight a user move.
+            var text = PinApi.rows.join("\n")
+            if (text === window.pinRowsJson)
+                return
+            window.pinRowsJson = text
+            var rows = []
+            for (var r = 0; r < PinApi.rows.length; ++r)
+                rows.push(JSON.parse(PinApi.rows[r]))
+            window.pinRows = rows
+        }
+    }
+
+    Instantiator {
+        id: pinWindows
+        model: window.pinRows
+        delegate: PinWindow {
+            required property var modelData
+            path: modelData.path
+            name: modelData.name
+            pinWidth: modelData.width
+            pinHeight: modelData.height
+            opacityValue: modelData.opacity
+            locked: modelData.locked
+            clickThrough: modelData.clickThrough
+            source: modelData.url !== "" ? modelData.url
+                                         : "file://" + modelData.path
+            x: modelData.x
+            y: modelData.y
+            visible: modelData.visible
+            // The registry is the source of truth once a row exists; the
+            // compositor's own move/resize is reported back to it.
+            reportGeometry: true
+            onCloseRequested: PinApi.close(modelData.path)
+            onLockRequested: PinApi.lock(modelData.path)
+            onUnlockRequested: PinApi.unlock(modelData.path)
+            onOpacityChosen: function (value) {
+                PinApi.setOpacity(modelData.path, value)
+            }
+            onClickThroughChosen: function (value) {
+                PinApi.setClickThrough(modelData.path, value)
+            }
+            onGeometryChanged: function (x, y, width, height) {
+                PinApi.saveGeometry(modelData.path, x, y, width, height)
+            }
+        }
+    }
+
+    Text {
+        objectName: "pinMessage"
+        anchors.top: parent.top
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.topMargin: 12
+        text: PinApi.message
+        color: "#FFD60A"
+        visible: text !== ""
+    }
+
     // A command-line capture has no menu window behind it; once its preview
     // is dismissed there is nothing left to show, so the process exits
     // instead of idling invisibly.
@@ -503,39 +572,6 @@ ApplicationWindow {
         repeat: true
         running: true
         onTriggered: settingsWindow.visible = SettingsApi.open
-    }
-
-    // Pinned captures: one top-level window per pin row.
-    property var pinRows: []
-    Timer {
-        id: pinSync
-        interval: 60
-        repeat: true
-        running: true
-        onTriggered: {
-            var rows = []
-            for (var r = 0; r < PinApi.rows.length; ++r)
-                rows.push(JSON.parse(PinApi.rows[r]))
-            window.pinRows = rows
-        }
-    }
-
-    Instantiator {
-        id: pinWindows
-        model: window.pinRows
-        delegate: PinWindow {
-            required property var modelData
-            path: modelData.path
-            name: modelData.name
-            pinWidth: modelData.width
-            pinHeight: modelData.height
-            opacityValue: modelData.opacity
-            locked: modelData.locked
-            source: modelData.path !== "" ? "file://" + modelData.path : ""
-            visible: modelData.visible
-            onCloseRequested: PinApi.closeAll()
-            onUnlockRequested: PinApi.unlockAll()
-        }
     }
 
     TextResultDialog {

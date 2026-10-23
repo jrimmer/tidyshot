@@ -414,8 +414,8 @@ pub fn annotate_capture(path: &Path) -> Result<(), PreviewError> {
 
 /// Pin a capture using the pin module's starting geometry.
 ///
-/// The pin window itself is not ported yet, so this only resolves the
-/// geometry the pin would start with.
+/// The window registry decodes the PNG for its dimensions and records the
+/// pin, so the caller only needs the geometry it starts with.
 pub fn pin_capture(path: &Path) -> Result<(f64, f64), PreviewError> {
     let bytes = std::fs::read(path)?;
     let image = crate::pngzip::decode_png(&bytes)
@@ -956,19 +956,19 @@ impl qobject::Preview {
         self.as_mut().sync();
     }
 
-    /// Pin the capture at its starting size.
-    ///
-    /// No pin window exists yet, so the message names the missing window.
+    /// Pin the capture, opening its always-on-top window.
     pub fn pin(mut self: Pin<&mut Self>) {
         let path = self.window.as_ref().map_or_else(
             || PathBuf::from(self.path().to_string()),
             |window| window.path().to_path_buf(),
         );
-        let result = pin_capture(&path).map(|_| ());
+        let result = crate::pin_window::pin_file(&path)
+            .map(|_| ())
+            .map_err(|error| PreviewError::Image(error.to_string()));
         self.as_mut()
             .rust_mut()
             .get_mut()
-            .action_error(result, "The pin window is not available yet");
+            .action_error(result, "Pinned the capture");
         self.as_mut().sync();
     }
 

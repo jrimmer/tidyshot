@@ -129,6 +129,7 @@ pub fn run_with(argv: &[String]) {
     // Bind the socket after the application exists so a forwarded `quit`
     // reaches a live event loop.
     start_instance();
+    restore_pins();
     recover_recordings();
     cleanup_history();
     let mut engine = cxx_qt_lib::QQmlApplicationEngine::new();
@@ -180,6 +181,19 @@ fn start_instance() {
             true
         });
     });
+}
+
+/// Restore the pins a previous session left on screen.
+///
+/// The listing is read before QML loads so a restored pin maps with its saved
+/// position, size and opacity on the first commit. A broken listing is
+/// reported and the app starts with no pins rather than dying.
+fn restore_pins() {
+    match pin_window::restore_on_start(&settings::data_dir()) {
+        Ok(0) => {}
+        Ok(_) => {}
+        Err(error) => eprintln!("tidyshot: {error}"),
+    }
 }
 
 /// Move captures past the retention setting to the trash on startup.
