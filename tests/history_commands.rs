@@ -299,10 +299,7 @@ fn every_routed_command_reaches_a_handler() {
     ];
     for command in commands {
         match perform_command_at(command.clone(), &dir) {
-            Ok(message) => assert!(
-                !message.is_empty() || matches!(command, Command::Menu),
-                "{command:?} succeeded with no message"
-            ),
+            Ok(message) => assert!(!message.is_empty(), "{command:?} succeeded with no message"),
             Err(message) => assert!(!message.is_empty(), "{command:?} failed silently"),
         }
     }
