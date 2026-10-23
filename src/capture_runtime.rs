@@ -16,7 +16,8 @@ use crate::app::Command;
 use crate::capture::{Display, capture_target};
 use crate::capture_session::{
     CaptureMode, CaptureOptions, CaptureOutcome, CaptureRequest, CaptureRequestError,
-    CaptureSession, GrabbedFrame, SelectionOverlay, run_capture_with_overlay, slurp_region,
+    CaptureSession, GrabbedFrame, OverlayChoice, SelectionOverlay, run_capture_with_overlay,
+    slurp_region,
 };
 use crate::commands::{CommandRunner, hypr};
 use crate::geometry::Rect;
@@ -386,6 +387,33 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
                 }
                 CaptureOutcome::Scroll { rect, horizontal } => {
                     return self.run_scroll(request.mode, rect, horizontal, &mut should_cancel);
+                }
+                CaptureOutcome::Window {
+                    rect,
+                    transparent,
+                    force_copy,
+                } => {
+                    // The overlay chose a client rectangle; the window is
+                    // isolated by its own surface so the capture keeps its
+                    // alpha and shape. Ctrl is carried to the after-capture
+                    // actions, matching the hover picker.
+                    let _ = force_copy;
+                    let window = self
+                        .windows()?
+                        .into_iter()
+                        .find(|window| window.rect == rect && !window.is_own_preview())
+                        .ok_or_else(|| {
+                            RuntimeError::Window("That window is no longer available".to_owned())
+                        })?;
+                    let identity = window.identity().ok_or_else(|| {
+                        RuntimeError::Window("Invalid selected window".to_owned())
+                    })?;
+                    return self.capture_window(
+                        &window,
+                        &identity,
+                        self.options.cursor,
+                        transparent,
+                    );
                 }
                 CaptureOutcome::Grabbed(frame) => return self.save_frame(&frame),
                 CaptureOutcome::Frames(frames) => return self.save_frames(&frames),
@@ -926,27 +954,35 @@ fn capture_on_worker(
         crate::recording::native_dir(),
         crate::settings::data_dir(),
     );
-    // An active-window capture copies the focused window's own surface too;
-    // the rectangle is only recorded in history.
-    let focused = if active && request.rect.is_none() {
+    // A window request without a region goes through the overlay, which
+    // hit-tests the frozen frame's client rectangles; the picker is only the
+    // fallback when no frame can be shown.
+    if active && request.rect.is_none() {
         match runtime.active_window() {
-            Ok(Some(window)) => Some(window),
-            Ok(None) => return Completion::Failed("No focused window to capture".to_owned()),
+            Ok(Some(window)) => {
+                if cancel.load(Ordering::SeqCst) {
+                    return Completion::Failed(RuntimeError::Cancelled.to_string());
+                }
+                let Some(identity) = window.identity() else {
+                    return Completion::Failed(
+                        RuntimeError::Window("Invalid selected window".to_owned()).to_string(),
+                    );
+                };
+                return match runtime.capture_window(
+                    &window,
+                    &identity,
+                    runtime.options.cursor,
+                    false,
+                ) {
+                    Ok(result) => Completion::Captured(result),
+                    Err(error) => Completion::Failed(error.to_string()),
+                };
+            }
+            Ok(None) => {
+                return Completion::Failed("No focused window to capture".to_owned());
+            }
             Err(error) => return Completion::Failed(error.to_string()),
         }
-    } else {
-        None
-    };
-    if let Some(window) = focused
-        && let Some(identity) = window.identity()
-    {
-        if cancel.load(Ordering::SeqCst) {
-            return Completion::Failed(RuntimeError::Cancelled.to_string());
-        }
-        return match runtime.capture_window(&window, &identity, runtime.options.cursor, false) {
-            Ok(result) => Completion::Captured(result),
-            Err(error) => Completion::Failed(error.to_string()),
-        };
     }
     if cancel.load(Ordering::SeqCst) {
         return Completion::Failed(RuntimeError::Cancelled.to_string());
@@ -960,8 +996,6 @@ fn capture_on_worker(
             .unwrap_or_default(),
         ..overlay
     };
-    let live = false;
-    let _ = live;
     let cancel_for_countdown = countdown.clone();
     let on_tick = move |label: &str| {
         let label = label.to_owned();
@@ -1021,14 +1055,15 @@ fn window_on_worker(
 /// The GUI's area overlay, used by the worker capture instead of slurp.
 ///
 /// The worker prepares a frozen frame, publishes it to the Qt thread and waits
-/// for the rectangle the overlay returns. A cancel arrives as an error, so the
-/// worker never falls through to slurp after the user dismissed the selector.
+/// for the rectangle the overlay returns. The control it waits on is the one
+/// QML is handed, so Accept and Cancel always wake this thread. A cancel
+/// arrives as an error, so the worker never falls through to slurp after the
+/// user dismissed the selector.
 struct QtSelection {
     control: SelectionControl,
     thread: cxx_qt::CxxQtThread<qobject::Capture>,
     mode: CaptureMode,
     monitors: Vec<Value>,
-    live: bool,
 }
 
 impl SelectionOverlay for QtSelection {
@@ -1036,34 +1071,55 @@ impl SelectionOverlay for QtSelection {
         true
     }
 
+    fn live_refresh(&self) -> bool {
+        true
+    }
+
     fn select(
         &self,
-        _mode: CaptureMode,
+        mode: CaptureMode,
         _initial: Option<Rect>,
         monitors: &[Value],
-    ) -> Result<Option<Rect>, CaptureRequestError> {
+        live: bool,
+    ) -> Result<Option<OverlayChoice>, CaptureRequestError> {
         let monitors = if monitors.is_empty() {
             &self.monitors[..]
         } else {
             monitors
         };
-        let prepared = match prepare_selection(self.mode, monitors, self.live) {
+        let mode = if mode == CaptureMode::Window {
+            mode
+        } else {
+            self.mode
+        };
+        let prepared = match prepare_selection(mode, monitors, live) {
             Ok(prepared) => prepared,
             // No frame means no overlay; slurp still gives the user a selector.
             Err(_) => return Ok(None),
         };
         self.control.open();
-        let control = prepared.control;
         let bounds = prepared.request.frame.bounds;
         let request = prepared.request;
-        let displayed = control.clone();
+        let picker = prepared.picker;
+        let directory = prepared.directory;
+        let displayed = self.control.clone();
         let _ = self.thread.queue(move |mut capture| {
-            capture.as_mut().show_selection(request, displayed, bounds);
+            capture
+                .as_mut()
+                .show_selection(request, displayed, bounds, picker, directory);
         });
         match self.control.wait(std::time::Duration::from_secs(180)) {
-            Some(SelectionOutcome::Accepted(rect)) => Ok(Some(rect)),
-            Some(SelectionOutcome::Cancelled) => Err(CaptureRequestError::Selection),
-            None => {
+            Some(SelectionOutcome::Accepted(rect)) => Ok(Some(OverlayChoice::Region(rect))),
+            Some(SelectionOutcome::Window {
+                rect,
+                transparent,
+                force_copy,
+            }) => Ok(Some(OverlayChoice::Window {
+                rect,
+                transparent,
+                force_copy,
+            })),
+            Some(SelectionOutcome::Cancelled) | None => {
                 self.control.cancel();
                 Err(CaptureRequestError::Selection)
             }
@@ -1406,29 +1462,64 @@ pub fn dispatch(command: Command) {
     }
 }
 
-/// The live overlay's refreshed frame directory and its last URL.
+/// A live overlay's refreshed frames, rotated so `/tmp` never fills.
 ///
-/// A live selector scrapes grim on the Qt thread at the refresh interval; the
-/// frames land in one directory and the URL carries a sequence number so QML's
-/// image cache sees a new file each time.
+/// A live selector grabs the desktop on its refresh timer; the frames land in
+/// one directory and only the newest few are kept. The URL carries a sequence
+/// number so QML's image cache sees a new file each time.
 pub struct SelectionFrames {
     directory: PathBuf,
     sequence: u64,
+    kept: std::collections::VecDeque<PathBuf>,
 }
 
 impl SelectionFrames {
+    /// The number of recent frames kept for a live selector.
+    const KEEP: usize = 4;
+
     #[must_use]
     pub fn new() -> Self {
         Self {
             directory: std::env::temp_dir()
                 .join(format!("tidyshot-selection-{}", std::process::id())),
             sequence: 0,
+            kept: std::collections::VecDeque::new(),
         }
     }
 
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    /// Write a frame and drop the ones that have aged out.
+    pub fn push(&mut self, png: &[u8]) -> Option<String> {
+        std::fs::create_dir_all(&self.directory).ok()?;
+        self.sequence = self.sequence.wrapping_add(1);
+        let path = self
+            .directory
+            .join(format!("live-{}.png", self.sequence));
+        crate::storage::atomic_write_file(&path, png).ok()?;
+        self.kept.push_back(path.clone());
+        while self.kept.len() > Self::KEEP {
+            if let Some(old) = self.kept.pop_front() {
+                let _ = std::fs::remove_file(old);
+            }
+        }
+        Some(crate::overlay::local_file_url(&path))
+    }
+
+    /// Remove every frame this selector wrote.
+    pub fn cleanup(&mut self) {
+        for path in self.kept.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl Drop for SelectionFrames {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
 
@@ -1441,8 +1532,10 @@ impl Default for SelectionFrames {
 /// The overlay's frozen frame, as both the state machine and QML need it.
 pub struct PreparedSelection {
     pub request: SelectionRequest,
-    pub control: SelectionControl,
-    pub accent: String,
+    /// Window mode's hit-test rows, kept on the Qt side for the choice.
+    pub picker: Option<crate::window_picker::PickerModel>,
+    /// The frozen frame's directory, removed when the overlay closes.
+    pub directory: PathBuf,
 }
 
 /// Freeze the focused output and prepare the area overlay.
@@ -1488,6 +1581,7 @@ fn prepare_selection(
     let image = crate::pngzip::decode_png(&png).map_err(|error| error.to_string())?;
     let path = directory.join("frozen.png");
     crate::storage::atomic_write_file(&path, &png).map_err(|error| error.to_string())?;
+    let mut picker = None;
     let rows = if mode == CaptureMode::Window {
         let clients =
             crate::commands::hypr(&runner, "clients").map_err(|error| error.to_string())?;
@@ -1503,7 +1597,7 @@ fn prepare_selection(
             vec![frame],
             crate::ui_scale::accent(),
         );
-        model
+        let rows = model
             .rows
             .iter()
             .flat_map(|row| {
@@ -1522,7 +1616,9 @@ fn prepare_selection(
                     value.to_string_compact()
                 })
             })
-            .collect()
+            .collect();
+        picker = Some(model);
+        rows
     } else {
         Vec::new()
     };
@@ -1547,8 +1643,8 @@ fn prepare_selection(
             hint: crate::selection_ui::HINT.to_owned(),
             live,
         },
-        control: SelectionControl::new(),
-        accent,
+        picker,
+        directory,
     })
 }
 
@@ -1583,12 +1679,7 @@ fn grab_live_frame<R: CommandRunner>(
             Some(display.geometry.scale),
         )
         .ok()?;
-    frames.sequence = frames.sequence.wrapping_add(1);
-    let path = frames
-        .directory()
-        .join(format!("live-{}.png", frames.sequence));
-    crate::storage::atomic_write_file(&path, &png).ok()?;
-    Some(crate::overlay::local_file_url(&path))
+    frames.push(&png)
 }
 
 /// A picker model prepared off the Qt thread.
@@ -1717,11 +1808,6 @@ pub mod qobject {
         #[qinvokable]
         fn area(self: Pin<&mut Self>);
 
-        /// Capture the currently focused window.
-        #[qinvokable]
-        #[cxx_name = "windowActive"]
-        fn window_active(self: Pin<&mut Self>);
-
         /// Capture the focused display.
         #[qinvokable]
         fn fullscreen(self: Pin<&mut Self>);
@@ -1768,15 +1854,25 @@ pub mod qobject {
         #[cxx_name = "captureWindow"]
         fn capture_window(self: Pin<&mut Self>, index: i32);
 
-        /// Grab a fresh frame for a live overlay; empty when it could not.
+        /// Grab a fresh frame for a live overlay on a worker thread.
         #[qinvokable]
         #[cxx_name = "refreshSelectionFrame"]
-        fn refresh_selection_frame(self: Pin<&mut Self>) -> QString;
+        fn refresh_selection_frame(self: Pin<&mut Self>);
 
         /// Publish the overlay's current rectangle and accept it.
         #[qinvokable]
         #[cxx_name = "selectionAccept"]
         fn selection_accept(self: Pin<&mut Self>, x: i32, y: i32, width: i32, height: i32);
+
+        /// Choose a window from the overlay's frozen-frame rows.
+        #[qinvokable]
+        #[cxx_name = "selectionWindow"]
+        fn selection_window(
+            self: Pin<&mut Self>,
+            index: i32,
+            transparent: bool,
+            force_copy: bool,
+        );
 
         /// Close the overlay without capturing.
         #[qinvokable]
@@ -1894,6 +1990,12 @@ pub struct CaptureRust {
     countdown: Option<CountdownControl>,
     /// Live frames are written to one directory the overlay's URL points at.
     selection_frames: std::sync::Arc<std::sync::Mutex<SelectionFrames>>,
+    /// A refresh is already grabbing, so the timer does not pile up.
+    selection_refreshing: bool,
+    /// The window rows the open overlay hit-tests, for a window choice.
+    selection_picker: Option<crate::window_picker::PickerModel>,
+    /// The frozen frame's directory, removed when the overlay closes.
+    selection_directory: Option<PathBuf>,
     pending_action: Option<String>,
     /// Ctrl was held when the window was chosen; copy after the capture.
     pending_copy: bool,
@@ -1948,6 +2050,9 @@ impl Default for CaptureRust {
             selection_info: None,
             countdown: None,
             selection_frames: std::sync::Arc::new(std::sync::Mutex::new(SelectionFrames::new())),
+            selection_refreshing: false,
+            selection_picker: None,
+            selection_directory: None,
             pending_action: None,
             pending_copy: false,
         }
@@ -1966,11 +2071,6 @@ impl qobject::Capture {
     /// Start an area capture.
     pub fn area(mut self: Pin<&mut Self>) {
         self.as_mut().start_request("area", None, false);
-    }
-
-    /// Capture the focused window.
-    pub fn window_active(mut self: Pin<&mut Self>) {
-        self.as_mut().start_request("window", None, true);
     }
 
     /// Capture the focused display.
@@ -2187,13 +2287,15 @@ impl qobject::Capture {
 
     /// Show the area overlay with a prepared frozen frame.
     ///
-    /// The worker thread already grabbed the frame; this only publishes it and
+    /// The worker thread already grabbed the frame; this publishes it and
     /// keeps the control that returns the chosen rectangle.
     fn show_selection(
         mut self: Pin<&mut Self>,
         request: SelectionRequest,
         control: SelectionControl,
         frame_bounds: Rect,
+        picker: Option<crate::window_picker::PickerModel>,
+        directory: PathBuf,
     ) {
         let mut rows = QStringList::default();
         for row in &request.rows {
@@ -2204,6 +2306,8 @@ impl qobject::Capture {
             state.selection = Some(control);
             state.selection_bounds = frame_bounds;
             state.selection_info = Some(request.frame.clone());
+            state.selection_picker = picker;
+            state.selection_directory = Some(directory);
         }
         self.as_mut()
             .set_selection_frame(QString::from(request.frame.json()));
@@ -2224,51 +2328,84 @@ impl qobject::Capture {
     }
 
     /// Hide the area overlay and forget its frame.
+    ///
+    /// The frozen frame and any live frames are removed here, so a selection
+    /// leaves no files behind and the next overlay starts clean.
     pub fn hide_selection(mut self: Pin<&mut Self>) {
         self.as_mut().set_selection_open(false);
-        let state = self.as_mut().rust_mut().get_mut();
-        state.selection = None;
-        state.selection_info = None;
+        self.as_mut().set_selection_frame(QString::from(""));
+        self.as_mut().set_selection_rows(QStringList::default());
+        self.as_mut().set_selection_live(false);
+        self.as_mut().set_selection_has_rect(false);
+        {
+            let state = self.as_mut().rust_mut().get_mut();
+            state.selection = None;
+            state.selection_info = None;
+            state.selection_picker = None;
+            state.selection_refreshing = false;
+            if let Ok(mut frames) = state.selection_frames.lock() {
+                frames.cleanup();
+            }
+            if let Some(directory) = state.selection_directory.take() {
+                let _ = std::fs::remove_dir_all(directory);
+            }
+        }
     }
 
     /// Refresh a live overlay's frame and publish the new picture.
     ///
-    /// QML calls this on its refresh timer; a failure keeps the previous frame
-    /// on screen instead of blanking the selector.
-    pub fn refresh_selection_frame(mut self: Pin<&mut Self>) -> QString {
-        if !*self.selection_open() || !*self.selection_live() {
-            return QString::from("");
+    /// QML calls this on its refresh timer. The grab runs on a worker thread,
+    /// so a slow grim never blocks the overlay's own event loop; a second tick
+    /// while one grab is in flight is dropped. A failure keeps the previous
+    /// frame on screen instead of blanking the selector.
+    pub fn refresh_selection_frame(mut self: Pin<&mut Self>) {
+        if !*self.selection_open()
+            || !*self.selection_live()
+            || self.as_mut().rust_mut().get_mut().selection_refreshing
+        {
+            return;
         }
-        let runner = crate::commands::SystemRunner;
-        let native = crate::recording::native_dir();
-        let session = CaptureSession {
-            runner: &runner,
-            mirror: MirrorRegistry::global(),
-            native,
-        };
+        self.as_mut().rust_mut().get_mut().selection_refreshing = true;
         let bounds = self.as_mut().rust_mut().get_mut().selection_bounds;
         let frames = std::sync::Arc::clone(&self.as_mut().rust_mut().get_mut().selection_frames);
-        let frame = frames
-            .lock()
-            .ok()
-            .and_then(|mut frames| grab_live_frame(&session, &mut frames, bounds));
-        let Some(url) = frame else {
-            return QString::from("");
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let runner = crate::commands::SystemRunner;
+            let session = CaptureSession {
+                runner: &runner,
+                mirror: MirrorRegistry::global(),
+                native: crate::recording::native_dir(),
+            };
+            let url = frames
+                .lock()
+                .ok()
+                .and_then(|mut frames| grab_live_frame(&session, &mut frames, bounds));
+            let _ = qt_thread.queue(move |mut capture| {
+                capture.as_mut().apply_selection_frame(url);
+            });
+        });
+    }
+
+    /// Publish a refreshed live frame; the URL changes so QML reloads it.
+    fn apply_selection_frame(mut self: Pin<&mut Self>, url: Option<String>) {
+        self.as_mut().rust_mut().get_mut().selection_refreshing = false;
+        if !*self.selection_open() {
+            return;
+        }
+        let Some(url) = url else {
+            return;
         };
-        // The URL changes on every refresh, so QML's image cache loads the new
-        // pixels instead of keeping the first frame. The rest of the frame
-        // metadata is unchanged, so the overlay keeps its size and hit tests.
+        // The rest of the frame metadata is unchanged, so the overlay keeps
+        // its size, hit tests and the frozen frame underneath.
         let json = {
             let state = self.as_mut().rust_mut().get_mut();
             let Some(info) = state.selection_info.as_mut() else {
-                return QString::from("");
+                return;
             };
             info.url = url;
             info.json()
         };
-        self.as_mut()
-            .set_selection_frame(QString::from(json.clone()));
-        QString::from(json)
+        self.as_mut().set_selection_frame(QString::from(json));
     }
 
     /// Accept the overlay's rectangle.
@@ -2283,7 +2420,48 @@ impl qobject::Capture {
         if let Some(control) = self.as_mut().rust_mut().get_mut().selection.as_ref() {
             control.accept(absolute);
         }
-        self.as_mut().set_selection_open(false);
+        self.as_mut().hide_selection();
+    }
+
+    /// Choose a window from the overlay's frozen-frame rows.
+    ///
+    /// The rows are local to the focused output, so the absolute client
+    /// rectangle comes from this side; the worker then captures the window's
+    /// own surface instead of cropping the desktop.
+    pub fn selection_window(
+        mut self: Pin<&mut Self>,
+        index: i32,
+        transparent: bool,
+        force_copy: bool,
+    ) {
+        let index = index.max(0) as usize;
+        let origin = self.as_mut().rust_mut().get_mut().selection_bounds;
+        let rect = self
+            .as_mut()
+            .rust_mut()
+            .get_mut()
+            .selection_picker
+            .as_ref()
+            .and_then(|model| {
+                let row = model.rows.get(index)?;
+                let frame = model.frames.get(row.monitor)?;
+                let local = row.clipped_rect(frame);
+                Some(Rect::new(
+                    origin.x + local.x,
+                    origin.y + local.y,
+                    local.width,
+                    local.height,
+                ))
+            });
+        let Some(rect) = rect else {
+            self.as_mut()
+                .fail("That window is no longer available".to_owned());
+            return;
+        };
+        if let Some(control) = self.as_mut().rust_mut().get_mut().selection.as_ref() {
+            control.accept_window(rect, transparent, force_copy);
+        }
+        self.as_mut().hide_selection();
     }
 
     /// Dismiss the overlay without capturing.
@@ -2291,7 +2469,7 @@ impl qobject::Capture {
         if let Some(control) = self.as_mut().rust_mut().get_mut().selection.as_ref() {
             control.cancel();
         }
-        self.as_mut().set_selection_open(false);
+        self.as_mut().hide_selection();
     }
 
     /// Keep the magnifier's zoom inside its supported range.
@@ -2692,7 +2870,6 @@ impl qobject::Capture {
             thread: self.qt_thread(),
             mode: request.mode,
             monitors: Vec::new(),
-            live: !crate::settings_page::capture_freeze(&crate::settings::stored_settings()),
         };
         let countdown = CountdownControl::new();
         {
@@ -3170,9 +3347,10 @@ mod tests {
             _mode: CaptureMode,
             _initial: Option<Rect>,
             _monitors: &[Value],
-        ) -> Result<Option<Rect>, CaptureRequestError> {
+            _live: bool,
+        ) -> Result<Option<OverlayChoice>, CaptureRequestError> {
             *self.calls.lock().unwrap() += 1;
-            Ok(self.rect)
+            Ok(self.rect.map(OverlayChoice::Region))
         }
     }
 

@@ -20,7 +20,7 @@ pub const MIN_SELECTION: i32 = 2;
 /// The magnifier's default magnification.
 pub const MAGNIFIER_ZOOM: i32 = 6;
 /// The instruction band the overlay draws.
-pub const HINT: &str = "Drag to select · Shift locks the ratio · Arrows nudge · Shift+Arrows resize · Enter accepts · Esc cancels";
+pub const HINT: &str = "Drag to select · Shift: square · A: lock ratio · Arrows nudge · Shift+Arrows resize · Enter accepts · Esc cancels";
 /// The magnification bounds the overlay offers.
 pub const MIN_ZOOM: i32 = 4;
 pub const MAX_ZOOM: i32 = 8;
@@ -514,6 +514,12 @@ impl FrameInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionOutcome {
     Accepted(Rect),
+    /// A window was chosen from the frozen-frame rows.
+    Window {
+        rect: Rect,
+        transparent: bool,
+        force_copy: bool,
+    },
     Cancelled,
 }
 
@@ -552,6 +558,18 @@ impl SelectionControl {
             return;
         }
         self.finish(SelectionOutcome::Accepted(rect));
+    }
+
+    /// The user chose a window; its rectangle identifies the client.
+    pub fn accept_window(&self, rect: Rect, transparent: bool, force_copy: bool) {
+        if rect.width < MIN_SELECTION || rect.height < MIN_SELECTION {
+            return;
+        }
+        self.finish(SelectionOutcome::Window {
+            rect,
+            transparent,
+            force_copy,
+        });
     }
 
     /// The user dismissed the overlay.
@@ -883,6 +901,16 @@ mod tests {
         assert_eq!(
             control.wait(Duration::from_millis(1)),
             Some(SelectionOutcome::Accepted(Rect::new(10, 10, 100, 100)))
+        );
+        control.open();
+        control.accept_window(Rect::new(10, 10, 100, 100), true, false);
+        assert_eq!(
+            control.wait(Duration::from_millis(1)),
+            Some(SelectionOutcome::Window {
+                rect: Rect::new(10, 10, 100, 100),
+                transparent: true,
+                force_copy: false,
+            })
         );
         control.open();
         control.cancel();
