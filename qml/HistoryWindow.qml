@@ -80,6 +80,10 @@ Window {
     /// Give the key map the window's keyboard focus.
     function takeKeyFocus() {
         historyWindow.requestActivate()
+        // A focused TextField keeps the active focus even after the enclosing
+        // scope requests it, so the search box has to give it up explicitly.
+        if (searchField.activeFocus)
+            searchField.focus = false
         keys.forceActiveFocus()
     }
 
@@ -138,6 +142,7 @@ Window {
                     placeholderText: "Search captures…"
                     text: historyWindow.query
                     onTextEdited: historyWindow.searchChanged(text)
+                    Keys.onEscapePressed: historyWindow.takeKeyFocus()
                 }
 
                 Item { width: 1; height: 1 }
@@ -221,6 +226,7 @@ Window {
                     MouseArea {
                         anchors.fill: parent
                         acceptedButtons: Qt.LeftButton
+                        onPressed: historyWindow.takeKeyFocus()
                         onClicked: function (mouse) {
                             historyWindow.rowSelected(index, (mouse.modifiers & Qt.ControlModifier) !== 0)
                         }
