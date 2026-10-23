@@ -352,3 +352,48 @@ fn clipboard_file_lists_accept_local_media_and_reject_remote_or_missing() {
     // Paste only accepts images; a video must go through Open from clipboard.
     assert!(tidyshot::clipboard::pasteable_images(&[PathBuf::from("/tmp/a.mp4")]).is_err());
 }
+
+#[test]
+fn pin_rows_dispatch_to_the_pin_window_registry() {
+    // The menu rows and the CLI commands reach the same registry, so a pin
+    // menu click and `tidyshot toggle-pins` cannot diverge.
+    for id in ["toggle-pins", "close-pins", "unlock-pins"] {
+        let row = tidyshot::menu::find(id).unwrap_or_else(|| panic!("{id} row"));
+        assert!(row.implemented(), "{id} must be reachable");
+        assert!(
+            matches!(
+                tidyshot::menu::invoke(row),
+                tidyshot::menu::Invocation::App(command) if command == id
+            ),
+            "{id} must reach its runtime"
+        );
+    }
+    for command in ["toggle-pins", "close-pins", "unlock-pins"] {
+        let routed = route(&parse(&[command])).unwrap();
+        assert!(
+            matches!(
+                routed,
+                Command::TogglePins | Command::ClosePins | Command::UnlockPins
+            ),
+            "{command} must route to its pin command"
+        );
+    }
+    let dir = scratch("pin-action");
+    let path = dir.join("shot.png");
+    let image = tidyshot::pngzip::Image::new(320, 200, vec![32u8; 320 * 200 * 4]);
+    fs::write(&path, image.to_png()).unwrap();
+    // A persisted pin starts at the pin module's size and survives a restart.
+    let mut pins = tidyshot::pin_window::PinRegistry::new();
+    pins.add(&path, 320, 200, 40.0, 60.0);
+    pins.save_at(&dir).unwrap();
+    let restored = tidyshot::pin_window::PinRegistry::restore_at(&dir).unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        (
+            restored.entries()[0].state.width,
+            restored.entries()[0].state.height
+        ),
+        (320.0, 200.0)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
