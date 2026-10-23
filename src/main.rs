@@ -174,10 +174,7 @@ fn main() {
             // An after-capture annotate action from a shortcut or URL opens
             // only the editor on the saved file; a preview behind it would
             // dismiss the process before the annotations are finished.
-            if tidyshot::capture_runtime::after_capture_opens_editor(
-                &settings,
-                action.as_deref(),
-            ) {
+            if tidyshot::capture_runtime::after_capture_opens_editor(&settings, action.as_deref()) {
                 tidyshot::editor_window::publish_open(result.path.clone());
             } else {
                 tidyshot::preview::set_startup_preview(result);
@@ -282,18 +279,22 @@ mod tests {
 
     #[test]
     fn only_an_annotate_capture_asks_the_editor_to_open() {
-        assert!(super::wants_annotate(&[
-            "area".to_owned(),
-            "--action".to_owned(),
-            "annotate".to_owned(),
-        ]));
-        assert!(!super::wants_annotate(&[
-            "area".to_owned(),
-            "--action".to_owned(),
-            "copy".to_owned(),
-        ]));
-        assert!(!super::wants_annotate(&["area".to_owned()]));
-        assert!(!super::wants_annotate(&["menu".to_owned()]));
+        let action = |argv: &[&str]| {
+            tidyshot::cli::parse_args(argv.iter().copied())
+                .unwrap()
+                .action
+        };
+        let settings = std::collections::BTreeMap::new();
+        let opens_editor = |argv: &[&str]| {
+            tidyshot::capture_runtime::after_capture_opens_editor(
+                &settings,
+                action(argv).as_deref(),
+            )
+        };
+        assert!(opens_editor(&["area", "--action", "annotate"]));
+        assert!(!opens_editor(&["area", "--action", "copy"]));
+        assert!(!opens_editor(&["area"]));
+        assert!(!opens_editor(&["menu"]));
     }
 
     #[test]

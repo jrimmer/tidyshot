@@ -2045,9 +2045,8 @@ fn run_after_capture<R: CommandRunner>(
             .map_err(|error| format!("The capture was saved but could not be copied: {error}"))?;
     }
     if actions.contains("pin") {
-        crate::preview::pin_capture(path).map_err(|error| {
-            format!("The capture was saved but could not be pinned: {error}")
-        })?;
+        crate::preview::pin_capture(path)
+            .map_err(|error| format!("The capture was saved but could not be pinned: {error}"))?;
     }
     Ok(())
 }

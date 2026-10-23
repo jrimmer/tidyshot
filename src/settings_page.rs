@@ -344,13 +344,11 @@ pub const PAGES: &[SettingsPage] = &[
     SettingsPage {
         id: "advanced",
         title: "Advanced",
-        fields: &[
-            SettingField {
-                restart: true,
-                tooltip: DECODER_TOOLTIP,
-                ..flag("hardware_video_decoding", "Hardware video decoding", false)
-            },
-        ],
+        fields: &[SettingField {
+            restart: true,
+            tooltip: DECODER_TOOLTIP,
+            ..flag("hardware_video_decoding", "Hardware video decoding", false)
+        }],
     },
     SettingsPage {
         id: "shortcuts",

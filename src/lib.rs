@@ -115,7 +115,9 @@ pub fn run_with(argv: &[String]) {
     let mut app = cxx_qt_lib::QGuiApplication::new();
     if let Some(mut application) = app.as_mut() {
         // The About page and any other version display read this back.
-        application.as_mut().set_application_version(&cxx_qt_lib::QString::from(VERSION));
+        application
+            .as_mut()
+            .set_application_version(&cxx_qt_lib::QString::from(VERSION));
     }
     // The icon follows the live theme; refresh the user copy before QML loads
     // so the desktop entry matches the running shell. A failed write is

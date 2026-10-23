@@ -717,15 +717,14 @@ impl Default for PreviewRust {
             retained: Vec::new(),
         };
         if let Some(published) = startup {
-            rust.apply(published);
+            rust.apply(published, crate::settings::preview_settings());
         }
         rust
     }
 }
 
 impl PreviewRust {
-    fn apply(&mut self, published: Published) {
-        let settings = crate::settings::preview_settings();
+    fn apply(&mut self, published: Published, settings: PreviewSettings) {
         let monitor = published.screen.map(MonitorScreen::new);
         // The preview rings the saved capture but shows the composed picture,
         // so copy and save still act on the file history recorded.
@@ -849,7 +848,11 @@ impl qobject::Preview {
         let actions = std::mem::take(&mut *ACTIONS.lock().expect("preview action queue poisoned"));
         let _ = BOUND.set(self.qt_thread());
         if let Some(published) = pending.or(startup) {
-            self.as_mut().rust_mut().get_mut().apply(published);
+            let settings = crate::settings::preview_settings();
+            self.as_mut()
+                .rust_mut()
+                .get_mut()
+                .apply(published, settings);
             self.as_mut().sync();
         }
         for action in actions {
@@ -859,7 +862,11 @@ impl qobject::Preview {
 
     /// Apply a capture published by the runtime.
     fn apply_published(mut self: Pin<&mut Self>, published: Published) {
-        self.as_mut().rust_mut().get_mut().apply(published);
+        let settings = crate::settings::preview_settings();
+        self.as_mut()
+            .rust_mut()
+            .get_mut()
+            .apply(published, settings);
         self.as_mut().sync();
     }
 
@@ -1133,14 +1140,17 @@ mod tests {
             ..PreviewRust::default()
         };
         let show = |rust: &mut PreviewRust, path: &str| {
-            rust.apply(Published {
-                path: PathBuf::from(path),
-                display: None,
-                width: 4,
-                height: 3,
-                screen: None,
-                standalone: false,
-            });
+            rust.apply(
+                Published {
+                    path: PathBuf::from(path),
+                    display: None,
+                    width: 4,
+                    height: 3,
+                    screen: None,
+                    standalone: false,
+                },
+                settings(),
+            );
         };
         show(&mut rust, "/tmp/one.png");
         show(&mut rust, "/tmp/two.png");
@@ -1219,22 +1229,22 @@ mod tests {
         )]));
         let monitor = MonitorScreen::new(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0));
         let preview =
-            PreviewWindow::new("/tmp/capture.png", 10, 10, settings, Some(monitor));
+            PreviewWindow::new("/tmp/capture.png", 10, 10, settings.clone(), Some(monitor));
         assert_eq!(preview.window_width(), 520.0);
         assert_eq!(preview.position().0, 1920.0 - 520.0 - 18.0);
         // The Rust window width is what the QML property reports.
-        let mut rust = PreviewRust {
-            window_width: preview.window_width() as i32,
-            ..PreviewRust::default()
-        };
-        rust.apply(Published {
-            path: PathBuf::from("/tmp/capture.png"),
-            display: None,
-            width: 10,
-            height: 10,
-            screen: Some(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0)),
-            standalone: false,
-        });
+        let mut rust = PreviewRust::default();
+        rust.apply(
+            Published {
+                path: PathBuf::from("/tmp/capture.png"),
+                display: None,
+                width: 10,
+                height: 10,
+                screen: Some(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0)),
+                standalone: false,
+            },
+            settings,
+        );
         assert_eq!(rust.window_width, preview.window_width() as i32);
     }
 
