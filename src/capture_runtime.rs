@@ -1184,6 +1184,14 @@ pub fn perform_command(command: Command) -> Result<String, String> {
         Command::ScrollDone => Err("There is no scrolling capture running".to_owned()),
         Command::Quit => perform_route(crate::menu::Route::Quit),
         Command::Menu => Ok(String::new()),
+        Command::Capture {
+            command,
+            linebreaks,
+            ..
+        } if command == "ocr" => {
+            crate::text_result::request_recognition(None, linebreaks);
+            Ok("Choose an area to read text from".to_owned())
+        }
         Command::Capture { .. } => Err("A capture needs the capture runtime".to_owned()),
         Command::Unknown(command) => Err(format!("unknown command: {command}")),
     }
@@ -1672,7 +1680,11 @@ impl qobject::Capture {
         match row.route() {
             crate::menu::Route::Capture(request) => {
                 let command = request.command();
-                if command == "window" {
+                if command == "ocr" {
+                    crate::text_result::request_recognition(None, None);
+                    self.as_mut()
+                        .set_message(QString::from("Choose an area to read text from"));
+                } else if command == "window" {
                     self.as_mut().open_window_picker();
                 } else if command == "scroll" || command == "scroll-horizontal" {
                     self.as_mut()
@@ -2962,6 +2974,28 @@ mod tests {
             seen.len(),
             1,
             "the shortcut adds the configured copy to its own save"
+        );
+    }
+
+    #[test]
+    fn an_ocr_capture_opens_the_recognition_flow() {
+        use crate::app::Command;
+        let message = crate::capture_runtime::perform_command(Command::Capture {
+            command: "ocr".to_owned(),
+            geometry: None,
+            coordinates: None,
+            action: None,
+            delay: None,
+            linebreaks: Some(false),
+            start: None,
+            autoscroll: None,
+        })
+        .unwrap();
+        assert!(message.contains("text"));
+        let row = crate::menu::find("ocr").unwrap();
+        assert_eq!(
+            row.route(),
+            crate::menu::Route::Capture(crate::capture::CaptureRequest::Text)
         );
     }
 

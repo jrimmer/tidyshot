@@ -59,11 +59,15 @@ Everything below is compiled and tested but **not reachable at runtime**:
 
 The recording tree is reached only through `recording::native_dir()`; none of
 its journal, checkpoint, recovery, recorder, encoder or export code has a
-production caller. `src/menu.rs` marks 14 of 24 action rows
-`Invocation::NotImplemented`, and `capture_runtime::dispatch`/
-`run_app_command` perform only `Command::Capture`, so every routed command
-outside capture (history, settings, pin, open, save-all, record, stop, ...)
-is dropped after routing.
+production caller. Every row in the action table now routes: captures and
+recording commands start their runtime, and the remaining rows become command
+words `capture_runtime::perform_route` performs (open, clipboard, history,
+restore, settings, pin, toggle/close/unlock pins, save-all, close-all, quit).
+`capture_runtime::dispatch`/`run_app_command` hand every routed `Command` to
+`perform_command`, so a command with nothing to act on reports a visible
+message instead of being dropped. The reachability list below is otherwise
+unchanged; the history window (`history_window`), preferences
+(`settings_window`) and pins (`pin_runtime`) are the new production roots.
 
 ## Parity table
 
@@ -87,9 +91,9 @@ runtime caller; **Absent** = no implementation.
 | Editable files | Reopen editable projects; original plus movable annotations | **Working** | `tidyshot open <file>` (and a path-less `open`, which shows a file chooser), the preview's Annotate button, annotate links and `--action annotate` all open `qml/Editor.qml`; a `.omnishot` path saves the project, any other path flattens to PNG, and Ctrl+S writes atomically. Covered by `tests/editor_window.rs` and `tests/link.rs`. |
 | Background | Presets, gradients/images, padding, alignment, auto balance, aspect/shadow/rounding | **Test only** | `backgrounds.rs` renders presets/padding/radius/shadow and the editor renders them when a document carries one, but no UI adds or edits a background and no preset is read from settings. |
 | Window capture | Editable background, transparency, shadows; isolated RGBA capture | **Partial** | `window` works as a rectangle grab: `openWindowPicker` lists `hyprctl -j clients`, `captureWindow` passes the client rect to slurp/grim. It is not an isolated RGBA window image: no transparency, wallpaper, shadow, rounding, Tab cycling, or covered-window handling. `WindowInfo` ignores title identity beyond display. |
-| Pin | Above windows, resize/opacity, arrows, click-through, hide | **Test only** | `pin.rs` (wheel resize/opacity, controls, shadow, clip radius) has tests only. `qml/Overlay.qml` has a Pin button whose signal has no handler; `pin`, `toggle-pins`, `close-pins`, `unlock-pins` are routed and then dropped. Hyprland pin rules are installed by `scripts/install_user.py` for windows the app never opens. |
-| OCR | Local text extraction, languages, line breaks, QR | **Partial** | `TextOutput` drives `tidyshot ocr <file>` and startup `capture-text`/`ocr-lines`/`ocr-single-line` over `tesseract` + `zbarimg`, with the recognized-text dialog and explicit Open Link. `tidyshot ocr` (no file) selects with slurp, grabs, then recognizes (`capture_then_recognize`). Gaps: the menu OCR row does nothing (`capture_row("ocr") → false`), a forwarded `Command::Ocr` is dropped (only the first process notes startup OCR), and there is no language-selection or preference UI. |
-| History | Restore, filters, search, delete, retention up to a month | **Partial** | Captures are appended to `history.json` and `captures/` by `capture_runtime`; `last_area` feeds `previous`. No history window, filmstrip, restore, search, filter, delete, trash, retention or import. `history`, `restore`, `last`, `last-screenshot` route then drop. |
+| Pin | Above windows, resize/opacity, arrows, click-through, hide | **Partial** | `pin_runtime.rs` owns the set of pins and `qml/PinWindow.qml` draws each one as a frameless always-on-top window at the `pin.rs` starting size and opacity. The preview's Pin button, the `pin` command and the menu's pin rows pin the selected or newest capture; `toggle-pins`, `close-pins` and `unlock-pins` show/hide, close and unlock every pin. Wheel resize, arrows and click-through are still missing. |
+| OCR | Local text extraction, languages, line breaks, QR | **Working** | `TextOutput` drives `tidyshot ocr <file>` and `capture-text`/`ocr-lines`/`ocr-single-line` over `tesseract` + `zbarimg`, with the recognized-text dialog and explicit Open Link. The menu OCR row and a forwarded `Command::Ocr`/`capture-text` reach `text_result::request_recognition`, which queues until the dialog binds, so every invocation runs the same completion; `tidyshot ocr` (no file) selects with slurp, grabs, then recognizes. The OCR languages and line-break defaults are editable in the preferences window. |
+| History | Restore, filters, search, delete, retention up to a month | **Working** | `qml/HistoryWindow.qml` renders the newest-first filmstrip from `history_window::HistoryView`, with all/image/scroll/video tabs, name search and single or multi selection. Delete and Clear History move captures into `trash/` (rename, or temp file plus rename across filesystems) and drop their rows; Restore preview, Annotate and Pin act on the selection; Enter opens, arrows or h/j/k/l move, Delete trashes and Escape closes. `history`, `restore`, `last`, `last-screenshot` are routed to their handlers, and `history_retention_days` (default a month) drives a startup cleanup that trashes older captures. |
 | Files | PNG/JPEG/WebP/HEIC, clipboard, drag/drop, external app, multipage print | **Absent** | Only PNG is written (`pngzip`). No JPEG/WebP/HEIC encoder, no print, no image clipboard or drag-out (`clipboard.rs` and `drag.rs` are test only; `wl-copy` is used for recognized text only), no external-app launch path. |
 | Recording | Area/window/display, H.264 MP4/GIF, FPS/quality/resolution | **Partial** | `recording_runtime::RecordingRuntime` plans a take from `hyprctl -j monitors` (an explicit `--geometry` region or the display under the pointer), leases it with `recording::journal::Journal`, launches `recording::recorder::recorder_command` through the command runner, and commits the MP4 or GIF with its sidecar, history row and preview. `record`, `stop`, `pause` and `restart` reach it from the menu, CLI and URL API. FPS/quality/size/audio/cursor/Studio/GIF choices come from settings; there is still no recording setup dialog. |
 | Audio/camera | Mic/system audio, meter, camera shape/size/position/fullscreen | **Test only** | `recording::audio`, `video_audio_tracks`, `video_camera`, `video_position`, `camera` logic exists with tests; no capture path and no meter/camera preview window. |
@@ -101,7 +105,7 @@ runtime caller; **Absent** = no implementation.
 | Video editor (5.0) | Trim/cut, smart zoom, cursor smoothing/style/size, camera/key editing | **Test only** | `studio::smart_zooms`, `video_motion`, `video_styles`, `video_camera` and `video_splits` have tests only. `video_motion` is the only cross-module caller, itself unreachable. |
 | Video editor (5.0) | Background, aspect, motion blur, hardware export | **Test only** | `studio::export_studio` is called only by `tests/video_studio.rs` (real ffmpeg export test); software x264 default and VAAPI opt-in are implemented there. No editor invokes it. |
 | Integration | Omarchy shell plugin, launcher, configurable shortcuts, local command API | **Partial** | The plugin (`manifest.json`, `plugin/BarWidget.qml`), setup/update/uninstall scripts, desktop entry, Hyprland bindings/window rules and the single-instance CLI/URL API all exist and are tested. The recording runtime writes `$XDG_RUNTIME_DIR/tidyshot-status.json` while a take runs, so the widget's recording timer and Stop/Pause rows are live during a take; most other menu rows are still inert, and only capture and recording commands do anything after routing. `doctor`/`compat` work headless. |
-| Preferences | Persistent settings/shortcuts, active Omarchy theme | **Absent** | `settings.rs` only reads `settings.json` (OCR keys, `hardware_video_decoding`); nothing writes it, no settings window, no shortcut editor. `settings` is routed and dropped. Theme accent is read only for the app icon (`ui_scale::accent_from` → `icon::refresh_installed`); `ui_scale` reflow is test only. |
+| Preferences | Persistent settings/shortcuts, active Omarchy theme | **Partial** | `qml/SettingsWindow.qml` edits the retention, OCR and decoder keys through `settings_window::SettingsView`, which validates each value and writes it atomically with `settings::write_setting` while keeping every other key. The `settings` command, URL tabs and menu row open it. There is still no shortcut editor and no theme picker; theme accent is read only for the app icon, and `ui_scale` reflow is test only. |
 
 ## Upstream branches
 
@@ -122,14 +126,10 @@ means a production caller and a UI or CLI entry exist.
    controls strip and the launch recovery; the missing pieces are a recording
    setup dialog, the countdown, and a Studio/camera capture path. The video
    editor remains test only.
-2. **Non-capture commands are dropped after routing.** `capture_runtime::dispatch`
-   and `run_app_command` handle `Command::Capture` only; `Quit` is handled only
-   by the socket server. `history`, `settings`, `pin`, `open`, `clipboard`,
-   `save-all`, `close-all`, `restore`, `last`, `last-screenshot`,
-   `toggle-pins`, `close-pins`, `unlock-pins`, `record`, `pause`, `restart`,
-   `stop`, `scroll-done`, `Command::Ocr` and `Command::Overlay` all reach a dead
-   end. This also leaves 14 of 24 menu rows inert and makes the CLI/API surface
-   look much larger than the behavior behind it.
+2. **Command routing is complete and history, settings and pins have windows.**
+   Every action-table row and every routed `Command` reaches a handler that
+   reports its result; the remaining work in those areas is import into
+   history, a shortcut editor and the pin gestures listed below.
 3. **Scrolling capture is reachable but the UI is minimal.** The controls
    window has Start/Auto-Scroll/Done/Cancel and a frame count, and the CLI runs
    the same session headlessly; there is no in-place selection overlay, no
@@ -140,20 +140,21 @@ means a production caller and a UI or CLI entry exist.
    only; no QML editor/toolbar exists, the preview's `activate` signal is
    unconnected, and after-capture `annotate` is ignored. The editing model is
    substantial but unreachable from any user action.
-5. **Quick Access preview and pins are display-only.** `overlay.rs` is test
-   only. `qml/Main.qml` connects only dismissal, so copy, save, annotate, pin,
-   drag-out, trash, Save All, Close All, gestures, auto-close action and
-   corner/timeout settings never run. `pin.rs` has no window at all.
-6. **History has no UI or management.** Captures append rows correctly, but
-   restore, filmstrip, search, type filters, multi-select, delete, Trash,
-   retention and import are absent; `history.rs` has no presentation layer.
-   Video history (`video_history`) is likewise test only.
-7. **Settings are read-only and the bar widget's feed is recording-only.** There
-   is no settings writer, no settings pages and no shortcut editor. The widget's
-   `$XDG_RUNTIME_DIR/tidyshot-status.json` producer exists but only while a
+5. **Quick Access preview gestures and trash are display-only.** `overlay.rs`
+   is test only. `qml/Main.qml` connects copy, save, annotate, pin, dismiss,
+   Save All and Close All, but drag-out, trash and the swipe gestures still do
+   nothing, and only the timeout/corner settings are read.
+6. **History has a window but no import.** The filmstrip, tabs, search,
+   multi-select, trash delete, restore, annotate, pin and retention cleanup
+   are reachable; importing an external image or video into history is still
+   absent, and `video_history` (the video editor's undo stack) remains test
+   only.
+7. **Settings have a window but no shortcut editor.** The preferences window
+   writes retention, OCR and decoder keys atomically; there is no shortcut
+   editor, no theme page, and the bar widget's
+   `$XDG_RUNTIME_DIR/tidyshot-status.json` producer still exists only while a
    recording runs, so its recording timer, Stop and Pause rows work during a
-   take while the rest of the bar state stays idle. Preferences currently affect
-   only OCR defaults and video decode policy.
+   take while the rest of the bar state stays idle.
 8. **Window capture is a rectangle, not an isolated window.** The picker uses
    `hyprctl clients` and grim grabs the client rect. Transparency, wallpaper,
    shadow, rounding, Tab cycling, covered/renamed-window identity and editable
