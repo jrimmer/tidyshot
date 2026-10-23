@@ -4,7 +4,13 @@ All notable changes to TidyShot are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-23
+
+Every capability in docs/PARITY-TIDYSHOT.md is reachable from a user action:
+capture (area, window, display, scrolling, timed), preview with actions, the
+annotation editor, pins, history, settings, recording with crash recovery, and
+JPEG/WebP/HEIC export. Window capture exports the toplevel surface itself and
+composites wallpaper, shadow and Hyprland rounding.
 
 ### Added
 

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "com.jasonrimmer.tidyshot",
   "name": "TidyShot",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": "TidyShot contributors",
   "license": "MIT",
   "description": "Native screenshots, scrolling capture, annotation, recording and capture history.",
