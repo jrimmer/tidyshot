@@ -11,6 +11,15 @@ use crate::annotation::Rect;
 /// The starting maximum side of a new pin.
 pub const MAX_START_SIDE: f64 = 520.0;
 
+/// The smallest width or height a pin can be resized to.
+pub const MIN_SIDE: f64 = 50.0;
+
+/// The lowest opacity a pin can be reduced to.
+pub const MIN_OPACITY: f64 = 0.1;
+
+/// The highest opacity a pin can reach.
+pub const MAX_OPACITY: f64 = 1.0;
+
 /// The pin window size for an image, preserving aspect ratio.
 // Ported from omnishot/widgets.py (Pin.__init__)
 #[must_use]
@@ -109,15 +118,48 @@ impl PinState {
             } else {
                 delta / 120.0 * 0.08
             };
-            self.opacity = (self.opacity + amount).clamp(0.1, 1.0);
+            self.set_opacity(self.opacity + amount);
         } else {
             let factor = 1.1f64.powf((delta / 120.0).clamp(-10.0, 10.0));
-            let width = (self.width * factor).round().clamp(50.0, 3000.0);
+            let width = (self.width * factor).round().clamp(MIN_SIDE, 3000.0);
             self.width = width;
             self.height = (width * self.image_height as f64 / self.image_width.max(1) as f64)
                 .round()
                 .max(1.0);
         }
+        true
+    }
+
+    /// Set the pin's opacity, clamped to the range a wheel gesture allows.
+    ///
+    /// Returns true when the value changed.
+    pub fn set_opacity(&mut self, value: f64) -> bool {
+        let value = value.clamp(MIN_OPACITY, MAX_OPACITY);
+        if (value - self.opacity).abs() < f64::EPSILON {
+            return false;
+        }
+        self.opacity = value;
+        true
+    }
+
+    /// Resize the pin content, preserving its aspect ratio when `keep_aspect`
+    /// is set and never going below [`MIN_SIDE`] on either axis.
+    pub fn resize(&mut self, width: f64, height: f64, keep_aspect: bool) -> bool {
+        let width = width.max(MIN_SIDE);
+        let height = if keep_aspect && self.image_width > 0 && self.image_height > 0 {
+            (width * self.image_height as f64 / self.image_width as f64)
+                .round()
+                .max(MIN_SIDE)
+        } else {
+            height.max(MIN_SIDE)
+        };
+        if (width - self.width).abs() < f64::EPSILON
+            && (height - self.height).abs() < f64::EPSILON
+        {
+            return false;
+        }
+        self.width = width;
+        self.height = height;
         true
     }
 
