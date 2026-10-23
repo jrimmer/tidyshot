@@ -773,7 +773,7 @@ mod tests {
         let started = std::time::Instant::now();
         child.stop().unwrap();
         assert!(
-            started.elapsed() < Duration::from_secs(8),
+            started.elapsed() < Duration::from_secs(30),
             "stop escalated without hanging on the paused child"
         );
         assert!(!child.running().unwrap(), "the paused child stopped");

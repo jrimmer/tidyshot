@@ -175,6 +175,11 @@ pub struct CaptureRuntime<'a, R: CommandRunner> {
     pub filename_format: String,
     /// Default self-timer delay in seconds.
     pub default_delay: i64,
+    /// The settings map this runtime was built with.
+    ///
+    /// Kept on the struct so window composition and other paths never re-read
+    /// the user's settings file behind a caller's back; tests inject their own.
+    pub settings: std::collections::BTreeMap<String, Value>,
 }
 
 impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
@@ -218,6 +223,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
             },
             filename_format: crate::settings_page::filename_format(settings),
             default_delay: crate::settings_page::capture_delay(settings),
+            settings: settings.clone(),
         }
     }
 
@@ -669,7 +675,7 @@ impl<'a, R: CommandRunner> CaptureRuntime<'a, R> {
         image: crate::pngzip::Image,
         window: &WindowInfo,
     ) -> Result<Option<PathBuf>, RuntimeError> {
-        self.style_window_frame_with(capture, image, window, &crate::settings::stored_settings())
+        self.style_window_frame_with(capture, image, window, &self.settings.clone())
     }
 
     /// Compose a window frame with an explicit settings map, for tests.
@@ -1496,9 +1502,7 @@ impl SelectionFrames {
     pub fn push(&mut self, png: &[u8]) -> Option<String> {
         std::fs::create_dir_all(&self.directory).ok()?;
         self.sequence = self.sequence.wrapping_add(1);
-        let path = self
-            .directory
-            .join(format!("live-{}.png", self.sequence));
+        let path = self.directory.join(format!("live-{}.png", self.sequence));
         crate::storage::atomic_write_file(&path, png).ok()?;
         self.kept.push_back(path.clone());
         while self.kept.len() > Self::KEEP {
@@ -1867,12 +1871,7 @@ pub mod qobject {
         /// Choose a window from the overlay's frozen-frame rows.
         #[qinvokable]
         #[cxx_name = "selectionWindow"]
-        fn selection_window(
-            self: Pin<&mut Self>,
-            index: i32,
-            transparent: bool,
-            force_copy: bool,
-        );
+        fn selection_window(self: Pin<&mut Self>, index: i32, transparent: bool, force_copy: bool);
 
         /// Close the overlay without capturing.
         #[qinvokable]
@@ -3237,8 +3236,14 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("tidyshot-runtime-{}-{name}", std::process::id()));
+        // A per-call counter: tests run in parallel, and a pid-only path lets
+        // two tests that share a name delete each other's fixture mid-run.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let call = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "tidyshot-runtime-{}-{call}-{name}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -3278,6 +3283,11 @@ mod tests {
             },
             filename_format: "shot %S".to_owned(),
             default_delay: 0,
+            settings: {
+                let mut map = std::collections::BTreeMap::new();
+                map.insert("window_wallpaper".to_owned(), Value::Bool(false));
+                map
+            },
         }
     }
 

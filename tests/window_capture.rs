@@ -140,6 +140,11 @@ fn runtime<'a>(runner: &'a Fake, root: &'a Path) -> CaptureRuntime<'a, Fake> {
         },
         filename_format: "shot %S".to_owned(),
         default_delay: 0,
+        settings: {
+            let mut map = std::collections::BTreeMap::new();
+            map.insert("window_wallpaper".to_owned(), Value::Bool(false));
+            map
+        },
     }
 }
 

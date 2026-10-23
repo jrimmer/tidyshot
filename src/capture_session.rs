@@ -602,12 +602,7 @@ pub fn run_capture_with_overlay<R: CommandRunner>(
         } else {
             None
         };
-        let selected = overlay.select(
-            request.mode,
-            request.initial(None, false),
-            monitors,
-            live,
-        );
+        let selected = overlay.select(request.mode, request.initial(None, false), monitors, live);
         if let Some(mut lease) = refresh_lease.take() {
             let _ = lease.stop(session.runner);
         }
@@ -2168,6 +2163,7 @@ mod tests {
                 .any(|expression| expression.contains("selection_capture(")),
             "{expressions:?}"
         );
+        drop(seen);
         // A frozen plan leaves the mirror alone.
         let overlay = RefreshOverlay::default();
         let outcome = run_capture_with_overlay(
