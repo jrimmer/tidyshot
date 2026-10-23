@@ -559,8 +559,13 @@ fn the_ocr_capture_reaches_stubbed_slurp_grim_and_ocr() {
 /// session stops at the repeated rows and the binary prints the saved path.
 /// A small region keeps the matching budget tiny. Saving must not end the
 /// process: it stays alive with the corner preview, exactly as a one-shot CLI
-/// capture does, so the test checks it is still running and only then asks it
-/// to stop (SIGTERM) before reading what it printed.
+/// capture does, so the test waits for the printed path (which follows the
+/// save), checks it is still running, and only then asks it to stop (SIGTERM)
+/// before reading what it printed.
+///
+/// Stdout and stderr go to files rather than pipes: the path is printed after
+/// the history row is written, so polling the file lets the test wait for the
+/// print itself instead of signalling in the window between the two.
 #[test]
 fn a_headless_scrolling_capture_saves_a_composite() {
     if missing_binary() {
@@ -575,6 +580,8 @@ fn a_headless_scrolling_capture_saves_a_composite() {
     );
     let marker = home.marker();
     let history_path = home.root.join("data/tidyshot/history.json");
+    let stdout_path = home.root.join("scroll.stdout");
+    let stderr_path = home.root.join("scroll.stderr");
     let mut child = home
         .command()
         .args(["scroll", "--geometry", "0,0 4x4"])
@@ -582,30 +589,31 @@ fn a_headless_scrolling_capture_saves_a_composite() {
         .env("TIDYSHOT_E2E_MARKER", &marker)
         .env("TIDYSHOT_NATIVE_DIR", home.native_dir())
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(fs::File::create(&stdout_path).unwrap()))
+        .stderr(Stdio::from(fs::File::create(&stderr_path).unwrap()))
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let saved = fs::read_to_string(&history_path)
-            .is_ok_and(|history| history.contains("\"kind\": \"scroll\""));
-        if saved {
+        let printed = fs::read_to_string(&stdout_path).unwrap_or_default();
+        if printed.trim().ends_with(".png") {
             break;
         }
         if child.try_wait().unwrap().is_some() {
             panic!(
-                "scroll exited before saving: {}",
-                String::from_utf8_lossy(&child.wait_with_output().unwrap().stderr)
+                "scroll exited before printing the path: {}",
+                fs::read_to_string(&stderr_path).unwrap_or_default()
             );
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("scroll did not save within the bound");
+            panic!("scroll did not print the saved path within the bound");
         }
         std::thread::sleep(POLL);
     }
+    let printed = fs::read_to_string(&stdout_path).unwrap_or_default();
+    let saved = printed.trim().to_owned();
     assert!(
         child.try_wait().unwrap().is_none(),
         "scroll exited after saving instead of staying with its preview"
@@ -628,9 +636,7 @@ fn a_headless_scrolling_capture_saves_a_composite() {
         }
         std::thread::sleep(POLL);
     }
-    let output = child.wait_with_output().unwrap();
-    let saved = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    assert!(saved.ends_with(".png"), "no capture path printed: {saved}");
+    let _ = child.wait();
     let bytes = fs::read(&saved).expect("the printed capture exists");
     let image = tidyshot::pngzip::decode_png(&bytes).expect("the capture is a PNG");
     assert!(image.width > 0 && image.height >= 4);
