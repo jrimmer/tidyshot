@@ -419,7 +419,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(newest_existing(&root).unwrap().path, present);
-        assert!(newest_matching(&root, KindFilter::Video).is_none());
+        assert_eq!(newest_screenshot(&root).unwrap().path, present);
     }
 
     #[test]
@@ -631,14 +631,6 @@ pub fn prune(root: &Path, days: u32, now: f64) -> std::io::Result<usize> {
 #[must_use]
 pub fn newest_existing(root: &Path) -> Option<HistoryRow> {
     read(root).into_iter().find(|row| row.path.is_file())
-}
-
-/// The newest row matching a filter, skipping rows whose file is missing.
-#[must_use]
-pub fn newest_matching(root: &Path, filter: KindFilter) -> Option<HistoryRow> {
-    read(root)
-        .into_iter()
-        .find(|row| filter.matches(row) && row.path.is_file())
 }
 
 /// The newest screenshot the annotate-last path reopens.

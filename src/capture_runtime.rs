@@ -1103,7 +1103,7 @@ pub fn perform_route_at(route: crate::menu::Route, root: &Path) -> Result<String
             // The menu has no file argument, so the pin with nothing chosen is
             // the newest capture. A chosen file arrives as `pin <path>`, which
             // is `Command::Pin` and never reaches this route.
-            let path = crate::history::newest_existing(root)
+            let path = crate::history::newest_screenshot(root)
                 .map(|row| row.path)
                 .ok_or_else(|| "There is no capture to pin".to_owned())?;
             crate::pin_runtime::pin_file(&path).map_err(|error| error.to_string())
