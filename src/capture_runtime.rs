@@ -1227,7 +1227,7 @@ pub fn perform_command_at(command: Command, root: &Path) -> Result<String, Strin
         }
         Command::ScrollDone => Err("There is no scrolling capture running".to_owned()),
         Command::Quit => perform_route_at(crate::menu::Route::Quit, root),
-        Command::Menu => Ok("Tidyshot menu".to_owned()),
+        Command::Menu => Ok("TidyShot ready".to_owned()),
         Command::Capture {
             command,
             linebreaks,
