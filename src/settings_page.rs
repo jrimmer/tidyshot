@@ -259,6 +259,12 @@ pub const PAGES: &[SettingsPage] = &[
         id: "recording",
         title: "Recording",
         fields: &[
+            choice(
+                "after_recording",
+                "After a recording",
+                "save",
+                &["copy", "save", "overlay", "edit"],
+            ),
             choice("recording_format", "Format", "mp4", &["mp4", "gif"]),
             choice("recording_fps", "Frame rate", "60", &["24", "30", "60"]),
             choice(
