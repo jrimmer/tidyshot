@@ -181,3 +181,26 @@ means a production caller and a UI or CLI entry exist.
   `src/capture_session.rs` test literal; that file is untouched by this audit
   and the difference is present on the branch base.
 - No GUI was started; QML behavior was read from the files above.
+
+## Gap closure (2026-10-23)
+
+The top-10 list above is the audit baseline. Since then, every item is
+closed at runtime, each landed with a glm verify or, where the model lane
+blocked verification, coordinator gates (full suite twice, fmt, clippy) plus a
+live check on the desktop:
+
+| Gap | Resolution |
+|---|---|
+| 1 Recording runtime | `e196ba9`: gpu-screen-recorder start/stop/pause/restart, journal, status feed, controls strip, crash recovery; live MP4 verified |
+| 2 Non-capture commands | `ad6ccd4`: every routed command has a handler, blocking tools run off the Qt thread, tests isolated |
+| 3 Scrolling capture | `d6efecf`: overlay session, controls, stitching, stop conditions, horizontal mode |
+| 4 Annotation editor | `77db2b6`: 12 tools, undo, atomic save, clipboard, project open/save, annotate entry points |
+| 5 Preview and pins | preview `053f60b`; pins `d8b6712` with persistence, click-through, hide/show all, own-window exclusion |
+| 6 History | `ad6ccd4`: filmstrip, tabs, search, selection, trash, retention |
+| 7 Settings and widget feed | `1c90883` settings writer/pages/shortcuts; recording status file from `e196ba9` |
+| 8 Window fidelity | `68c289b`: native toplevel RGBA export, hover picker, wallpaper/shadow/superellipse/padding, editable |
+| 9 Export, clipboard, drag | `1c90883`: JPEG/WebP/HEIC, clipboard image/file/text, drag-out |
+| 10 Selection UX | `05fad4d`: overlay with magnifier, exact size/aspect, nudge, countdown; slurp kept headless |
+
+Remaining known gaps are behavioural detail, not missing surfaces: pinned-window
+gesture timing, exact reference styling, HDR, and physical camera/mic coverage.
