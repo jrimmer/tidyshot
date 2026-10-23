@@ -188,7 +188,7 @@ pub const PAGES: &[SettingsPage] = &[
             ),
             flag("window_shadow", "Draw a window shadow", true),
             number("window_padding", "Window padding", 48.0, 0.0, 240.0, 2.0),
-            text("wallpaper_source", "Wallpaper source", ""),
+            text("wallpaper_source", "Wallpaper source", "desktop"),
         ],
     },
     SettingsPage {

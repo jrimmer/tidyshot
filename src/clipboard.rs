@@ -174,7 +174,7 @@ fn percent_decode(value: &str) -> String {
 /// The clipboard representation for an image of `format`.
 ///
 /// A copied JPEG stays a JPEG so the receiver gets the same bytes the user
-/// exported, and a format with no clipboard MIME falls back to PNG.
+/// exported.
 #[must_use]
 pub fn image_mime(format: crate::export::ExportFormat) -> &'static str {
     match format {
