@@ -197,16 +197,6 @@ fn a_settings_save_round_trips_the_retention_key() {
 }
 
 #[test]
-fn a_clipboard_command_with_no_files_reports_that_nothing_was_found() {
-    // The clipboard query shells out to wl-paste; on a machine without a
-    // clipboard it must report the failure, never open an empty editor.
-    let result = tidyshot::capture_runtime::import_clipboard();
-    if let Err(message) = result {
-        assert!(!message.is_empty());
-    }
-}
-
-#[test]
 fn a_clipboard_file_list_imports_the_file_it_names() {
     use tidyshot::commands::{CommandError, CommandOutput, CommandRunner, CommandSpec};
 
@@ -278,7 +268,6 @@ fn every_routed_command_reaches_a_handler() {
         Command::Menu,
         Command::Edit(path.clone()),
         Command::EditChooser,
-        Command::Clipboard,
         Command::Pin(path.clone()),
         Command::PinChooser,
         Command::Overlay(path.clone()),

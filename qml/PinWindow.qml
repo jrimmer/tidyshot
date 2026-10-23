@@ -26,7 +26,6 @@ Window {
 
     width: pinWindow.pinWidth
     height: pinWindow.pinHeight
-    visible: pinWindow.path !== ""
     title: qsTr("TidyShot Pin — ") + pinWindow.name
     color: "transparent"
     opacity: pinWindow.opacityValue

@@ -1053,15 +1053,23 @@ pub const fn route_blocks(route: crate::menu::Route) -> bool {
     )
 }
 
-/// Whether a command's handler blocks on a subprocess or an image decode.
+/// Whether a command's handler blocks on a subprocess, an image decode or the
+/// capture store.
 ///
 /// This mirrors [`route_blocks`] for the commands that reach the same handlers
-/// directly, plus the chosen-file pin.
+/// directly, plus the chosen-file pin and the history lookups that stat every
+/// saved row.
 #[must_use]
 pub const fn command_blocks(command: &Command) -> bool {
     matches!(
         command,
-        Command::Clipboard | Command::Restore | Command::Pin(_) | Command::PinChooser
+        Command::Clipboard
+            | Command::Restore
+            | Command::Pin(_)
+            | Command::PinChooser
+            | Command::Overlay(_)
+            | Command::Last
+            | Command::LastScreenshot
     )
 }
 
@@ -1078,12 +1086,24 @@ pub fn perform_route(route: crate::menu::Route) -> Result<String, String> {
 /// The root is a parameter so a test never reads or writes the user's history;
 /// production passes [`crate::settings::data_dir`].
 pub fn perform_route_at(route: crate::menu::Route, root: &Path) -> Result<String, String> {
+    perform_route_at_with(route, root, &crate::commands::SystemRunner)
+}
+
+/// Run one menu route against an explicit capture store and command runner.
+///
+/// The runner is a parameter so the clipboard read can be exercised without a
+/// live Wayland clipboard, exactly as [`import_clipboard_with`] allows.
+pub fn perform_route_at_with<R: crate::commands::CommandRunner>(
+    route: crate::menu::Route,
+    root: &Path,
+    runner: &R,
+) -> Result<String, String> {
     match route {
         crate::menu::Route::Open => {
             crate::editor_window::publish_chooser();
             Ok("Choose an image to open".to_owned())
         }
-        crate::menu::Route::Clipboard => import_clipboard(),
+        crate::menu::Route::Clipboard => import_clipboard_with(runner),
         crate::menu::Route::History => {
             crate::history_window::request_open_at(root);
             Ok("History".to_owned())
@@ -1979,9 +1999,19 @@ impl qobject::Capture {
             start,
             autoscroll,
             action,
+            linebreaks,
             ..
         } = &command
         {
+            // An interactive OCR captures a region and then runs recognition
+            // on the saved file, matching `tidyshot ocr` and the menu row; the
+            // plain grab-and-save path would drop the text step.
+            if command == "ocr" {
+                crate::text_result::request_recognition(None, *linebreaks);
+                self.as_mut()
+                    .set_message(QString::from("Choose an area to read text from"));
+                return;
+            }
             // A window command without a region opens the picker, the same
             // chooser the menu row opens, so a forwarded link and a menu click
             // cannot diverge.
@@ -2446,6 +2476,20 @@ mod tests {
             .take(width * height * 4)
             .collect();
         crate::pngzip::Image::new(width, height, data).to_png()
+    }
+
+    /// A runner whose clipboard is empty, so the clipboard route never reads
+    /// the user's real clipboard.
+    struct EmptyClipboard;
+
+    impl CommandRunner for EmptyClipboard {
+        fn run(&self, _spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
+            Ok(CommandOutput {
+                status: 1,
+                stdout: Vec::new(),
+                stderr: b"no clipboard".to_vec(),
+            })
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -3113,6 +3157,9 @@ mod tests {
     fn every_menu_row_reaches_a_real_handler() {
         use crate::menu::{ACTIONS, Route};
         let root = scratch("menu-handlers");
+        // The clipboard row asks the real clipboard unless a runner answers;
+        // this one reports an empty clipboard so the row is still exercised.
+        let empty = EmptyClipboard;
         for row in ACTIONS {
             match row.route() {
                 Route::Capture(_) | Route::Recording(_) => {}
@@ -3123,7 +3170,7 @@ mod tests {
                     // With no history the restore and pin rows report a
                     // visible message instead of doing nothing; the rest
                     // succeed even with nothing to act on.
-                    match crate::capture_runtime::perform_route_at(route, &root) {
+                    match crate::capture_runtime::perform_route_at_with(route, &root, &empty) {
                         Ok(message) => assert!(
                             !message.is_empty() || matches!(route, Route::Quit),
                             "{} produced no message",

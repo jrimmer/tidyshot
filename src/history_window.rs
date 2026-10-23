@@ -272,13 +272,15 @@ impl HistoryView {
         }
         self.selection.clear();
         self.reload();
-        self.message = if errors.is_empty() {
+        self.message = if !errors.is_empty() {
+            errors.join("; ")
+        } else if paths.is_empty() {
+            "There is no capture to delete".to_owned()
+        } else {
             format!(
                 "Moved {moved} {} to the trash",
                 if moved == 1 { "capture" } else { "captures" }
             )
-        } else {
-            errors.join("; ")
         };
         moved
     }
@@ -566,14 +568,13 @@ impl qobject::HistoryApi {
         // listing here so the filmstrip is never empty on first show. Every
         // queued snapshot is replayed in order, so a delete that followed an
         // open does not lose the open.
-        let pending = PENDING.lock().expect("history queue poisoned");
+        let pending = std::mem::take(&mut *PENDING.lock().expect("history queue poisoned"));
         if pending.is_empty() {
-            drop(pending);
             let snapshot = view(|view| Snapshot::of(view));
             self.as_mut().apply(snapshot);
         } else {
-            for snapshot in pending.iter() {
-                self.as_mut().apply(snapshot.clone());
+            for snapshot in pending {
+                self.as_mut().apply(snapshot);
             }
         }
     }
