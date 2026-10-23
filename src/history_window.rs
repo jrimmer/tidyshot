@@ -810,6 +810,16 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_delete_reports_there_is_nothing_to_delete() {
+        let root = scratch("empty-delete");
+        let mut view = HistoryView::new(&root);
+        view.show();
+        assert_eq!(view.delete_selected(), 0);
+        assert_eq!(view.message(), "There is no capture to delete");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_delete_of_a_missing_file_is_surfaced_and_keeps_the_row() {
         let root = scratch("missing");
         let path = captures_dir(&root).join("gone.png");
