@@ -107,10 +107,18 @@ Rectangle {
                 font.bold: true
             }
             Item { width: 1; height: 1 }
+            // QuickOverlay's header chip: a 36x36 trash control.
             Button {
                 objectName: "trashButton"
                 visible: preview.trashVisible
-                text: "Trash"
+                text: "🗑"
+                font.pixelSize: 16
+                implicitWidth: 36
+                implicitHeight: 36
+                padding: 0
+                Accessible.name: qsTr("Move to Trash")
+                ToolTip.visible: hovered
+                ToolTip.text: qsTr("Move capture and automatically saved file to Trash")
                 onClicked: preview.trashRequested()
             }
             Button {

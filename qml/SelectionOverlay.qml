@@ -20,8 +20,8 @@ Window {
     property string mode: "area"
     /// The live Omarchy accent.
     property string accent: "#FFD60A"
-    /// The instruction band text.
-    property string hint: "Drag to select · Shift locks the ratio · Enter accepts · Esc cancels"
+    /// The instruction line, worded as the source words it.
+    property string hint: "Drag to select · Shift locks proportions · Enter captures · Esc cancels"
     /// Whether the frame refreshes instead of staying frozen.
     property bool live: false
     /// The magnifier's magnification, 4 to 8.
@@ -47,8 +47,12 @@ Window {
     signal cancelled()
 
     readonly property bool hasRect: rectW >= 2 && rectH >= 2
-    readonly property int magnifierSize: 140
+    // Source geometry: a 100x100 inset holding a 24px sample.
+    readonly property int magnifierSize: 100
+    readonly property int magnifierSample: 24
     readonly property int handleSlack: 8
+    // The capture scale, from the frame's image size and logical size.
+    readonly property double captureScale: frame && frame.w > 0 ? frame.iw / frame.w : 1
 
     width: frame ? frame.w : 1280
     height: frame ? frame.h : 720
@@ -80,10 +84,34 @@ Window {
     /// The source rectangle the magnifier shows, in image pixels.
     function magnifierRect(px, py) {
         var point = imagePoint(px !== undefined ? px : pointerX, py !== undefined ? py : pointerY)
-        var span = Math.max(1, magnifierSize / Math.max(4, Math.min(8, zoom)))
+        var span = magnifierSample
         var x = Math.max(0, Math.min(Math.max(0, (frame ? frame.iw : 0) - span), point.x - span / 2))
         var y = Math.max(0, Math.min(Math.max(0, (frame ? frame.ih : 0) - span), point.y - span / 2))
         return { "x": x, "y": y, "w": span, "h": span }
+    }
+
+    /// The eight handles: corners first, then the edge midpoints.
+    function handlePoints() {
+        var midX = rectX + rectW / 2
+        var midY = rectY + rectH / 2
+        return [
+            Qt.point(rectX, rectY),
+            Qt.point(rectX + rectW, rectY),
+            Qt.point(rectX, rectY + rectH),
+            Qt.point(rectX + rectW, rectY + rectH),
+            Qt.point(midX, rectY),
+            Qt.point(midX, rectY + rectH),
+            Qt.point(rectX, midY),
+            Qt.point(rectX + rectW, midY)
+        ]
+    }
+
+    /// The size chip text: logical size and captured pixels.
+    function sizeLabel() {
+        var scale = captureScale
+        return rectW + " × " + rectH
+            + "   (" + Math.round(rectW * scale) + " × "
+            + Math.round(rectH * scale) + " px)"
     }
 
     function clampX(value) {
@@ -304,8 +332,8 @@ Window {
                 context.fillStyle = "rgba(20, 20, 20, 0.35)"
                 context.fillRect(0, 0, canvas.width, canvas.height)
             }
-            // Dim everything outside the selection.
-            context.fillStyle = "rgba(0, 0, 0, 0.39)"
+            // The source dims everything by 75/255.
+            context.fillStyle = "rgba(0, 0, 0, 0.294117647)"
             context.fillRect(0, 0, canvas.width, canvas.height)
             if (overlay.hasRect) {
                 if (overlay.frame && overlay.frame.url !== "") {
@@ -316,30 +344,34 @@ Window {
                     context.drawImage(overlay.frame.url, 0, 0, canvas.width, canvas.height)
                     context.restore()
                 }
+                // A one-pixel accent outline, drawn on the rectangle itself.
                 context.strokeStyle = overlay.accent
-                context.lineWidth = 2
-                context.strokeRect(overlay.rectX + 1, overlay.rectY + 1,
-                                   overlay.rectW - 2, overlay.rectH - 2)
-                // Corner handles.
-                context.fillStyle = overlay.accent
-                var handles = [
-                    [overlay.rectX, overlay.rectY],
-                    [overlay.rectX + overlay.rectW, overlay.rectY],
-                    [overlay.rectX, overlay.rectY + overlay.rectH],
-                    [overlay.rectX + overlay.rectW, overlay.rectY + overlay.rectH]
-                ]
-                for (var h = 0; h < handles.length; ++h)
-                    context.fillRect(handles[h][0] - 3, handles[h][1] - 3, 6, 6)
-                var label = overlay.rectW + " × " + overlay.rectH
-                context.font = "13px sans-serif"
+                context.lineWidth = 1
+                context.strokeRect(overlay.rectX + 0.5, overlay.rectY + 0.5,
+                                   overlay.rectW - 1, overlay.rectH - 1)
+                // Eight 6x6 handles: white with an accent border, at the
+                // corners and the edge midpoints, as the source paints them.
+                var handles = overlay.handlePoints()
+                for (var h = 0; h < handles.length; ++h) {
+                    context.fillStyle = "white"
+                    context.fillRect(handles[h].x - 3, handles[h].y - 3, 6, 6)
+                    context.strokeStyle = overlay.accent
+                    context.lineWidth = 1
+                    context.strokeRect(handles[h].x - 3.5, handles[h].y - 3.5, 6, 6)
+                }
+                // The size chip: logical size and the captured pixel size,
+                // 28 px above the rectangle and clamped into the screen.
+                var label = overlay.sizeLabel()
+                context.font = "14px sans-serif"
                 var labelWidth = context.measureText(label).width + 16
-                var labelY = overlay.rectY + overlay.rectH + 8
-                if (labelY + 24 > canvas.height)
-                    labelY = overlay.rectY - 30
-                context.fillStyle = "rgba(30, 30, 30, 0.9)"
-                context.fillRect(overlay.rectX, labelY, labelWidth, 22)
+                var labelX = Math.max(8, Math.min(overlay.rectX,
+                                                canvas.width - labelWidth - 8))
+                var labelY = Math.max(5, Math.min(overlay.rectY - 28,
+                                                  canvas.height - 29))
+                context.fillStyle = "#1e1e1e"
+                context.fillRect(labelX, labelY, labelWidth, 24)
                 context.fillStyle = "white"
-                context.fillText(label, overlay.rectX + 8, labelY + 15)
+                context.fillText(label, labelX + 8, labelY + 16)
             }
             // Window mode highlights the client rectangle under the pointer.
             if (overlay.mode === "window" && overlay.current >= 0
@@ -351,7 +383,7 @@ Window {
             }
             // The crosshair follows the pointer until a rectangle exists.
             if (!overlay.hasRect && overlay.mode !== "window") {
-                context.strokeStyle = overlay.accent
+                context.strokeStyle = "rgba(255, 255, 255, 0.568627451)"
                 context.lineWidth = 1
                 context.beginPath()
                 context.moveTo(overlay.pointerX, 0)
@@ -360,13 +392,10 @@ Window {
                 context.lineTo(canvas.width, overlay.pointerY)
                 context.stroke()
             }
-            // The instruction band.
-            var bandWidth = Math.min(780, canvas.width - 24)
-            context.fillStyle = "rgba(30, 30, 30, 0.9)"
-            context.fillRect(12, 12, bandWidth, 30)
+            // The instruction line sits at 24,36 with no band behind it.
             context.fillStyle = "white"
-            context.font = "13px sans-serif"
-            context.fillText(overlay.hint, 24, 32, bandWidth - 24)
+            context.font = "14px sans-serif"
+            context.fillText(overlay.hint, 24, 36, Math.min(780, canvas.width - 48))
         }
     }
 
@@ -380,9 +409,8 @@ Window {
         border.color: overlay.accent
         border.width: 2
         color: "black"
-        x: Math.min(canvas.width - width - 12, overlay.pointerX + 20)
-        y: overlay.pointerY + 20 + height > canvas.height
-           ? overlay.pointerY - height - 20 : overlay.pointerY + 20
+        x: Math.min(canvas.width - width - 12, overlay.pointerX + 22)
+        y: Math.max(10, Math.min(canvas.height - 170, overlay.pointerY + 22))
 
         Canvas {
             id: magnifierCanvas

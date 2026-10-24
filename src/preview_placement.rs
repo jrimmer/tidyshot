@@ -3,7 +3,7 @@
 //! Wayland ignores an application-set toplevel position, and this compositor
 //! rejects `movewindowpixel`, so the preview computes its corner and pins it
 //! through a dynamic window rule before the window maps. The rule is named
-//! after its matcher (`title:^(TidyShot Preview)`) so `scripts/uninstall_user.py`
+//! after its matcher (`title:^(Capture|Recording) ready$`) so `scripts/uninstall_user.py`
 //! can remove the same rule.
 
 use std::time::Duration;
@@ -14,7 +14,7 @@ use crate::commands::{CommandError, CommandRunner, CommandSpec};
 ///
 /// The title is `TidyShot Preview — <file>`, so a prefix match covers every
 /// capture and recording.
-pub const PREVIEW_MATCHER: &str = "title:^(TidyShot Preview)";
+pub const PREVIEW_MATCHER: &str = "title:^(Capture|Recording) ready$";
 
 /// The rule syntax the running compositor accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,15 +178,15 @@ mod tests {
     fn the_placement_rule_carries_the_computed_corner() {
         assert_eq!(
             placement_rule(1547.0, 762.0),
-            "move 1547 762,title:^(TidyShot Preview)"
+            "move 1547 762,title:^(Capture|Recording) ready$"
         );
         // A fractional scale anchor is rounded to the logical pixel the
         // compositor moves to.
         assert_eq!(
             placement_rule(960.4, 540.6),
-            "move 960 541,title:^(TidyShot Preview)"
+            "move 960 541,title:^(Capture|Recording) ready$"
         );
-        assert_eq!(removal_rule(), "unset,title:^(TidyShot Preview)");
+        assert_eq!(removal_rule(), "unset,title:^(Capture|Recording) ready$");
     }
 
     #[test]
@@ -194,7 +194,10 @@ mod tests {
         for (x, y) in [(18.0, 18.0), (1547.0, 762.0), (-120.0, 40.0)] {
             let rule = placement_rule(x, y);
             assert!(rule.starts_with("move "), "{rule}");
-            assert!(rule.ends_with(",title:^(TidyShot Preview)"), "{rule}");
+            assert!(
+                rule.ends_with(",title:^(Capture|Recording) ready$"),
+                "{rule}"
+            );
         }
     }
 
@@ -210,11 +213,11 @@ mod tests {
             [
                 (
                     "windowrule".to_owned(),
-                    "unset,title:^(TidyShot Preview)".to_owned()
+                    "unset,title:^(Capture|Recording) ready$".to_owned()
                 ),
                 (
                     "windowrule".to_owned(),
-                    "move 1547 762,title:^(TidyShot Preview)".to_owned()
+                    "move 1547 762,title:^(Capture|Recording) ready$".to_owned()
                 ),
             ]
         );
@@ -235,7 +238,7 @@ mod tests {
             applied.last(),
             Some(&(
                 "windowrulev2".to_owned(),
-                "move 100 200,title:^(TidyShot Preview)".to_owned()
+                "move 100 200,title:^(Capture|Recording) ready$".to_owned()
             ))
         );
     }

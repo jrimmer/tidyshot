@@ -77,6 +77,50 @@ Window {
         enabled: previewWindow.open && previewWindow.active
         onActivated: previewWindow.dismissed()
     }
+    // QuickOverlay's hover keys, scoped to this window.
+    Shortcut {
+        objectName: "copyKey"
+        sequences: ["Ctrl+C"]
+        context: Qt.WindowShortcut
+        enabled: previewWindow.open && previewWindow.active
+        onActivated: previewWindow.copyRequested()
+    }
+    Shortcut {
+        objectName: "saveKey"
+        sequences: ["Ctrl+S"]
+        context: Qt.WindowShortcut
+        enabled: previewWindow.open && previewWindow.active
+        onActivated: previewWindow.saveRequested()
+    }
+    Shortcut {
+        objectName: "annotateKey"
+        sequences: ["Ctrl+E"]
+        context: Qt.WindowShortcut
+        enabled: previewWindow.open && previewWindow.active
+        onActivated: previewWindow.annotateRequested()
+    }
+    Shortcut {
+        objectName: "pinKey"
+        sequences: ["Ctrl+P"]
+        context: Qt.WindowShortcut
+        enabled: previewWindow.open && previewWindow.active && !previewWindow.video
+        onActivated: previewWindow.pinRequested()
+    }
+    Shortcut {
+        objectName: "closeKey"
+        sequences: ["Ctrl+W"]
+        context: Qt.WindowShortcut
+        enabled: previewWindow.open && previewWindow.active
+        onActivated: previewWindow.dismissed()
+    }
+    Shortcut {
+        objectName: "previewKey"
+        sequences: ["Space"]
+        context: Qt.WindowShortcut
+        enabled: previewWindow.open && previewWindow.active
+        onActivated: previewWindow.annotateRequested()
+    }
+
 
     Overlay {
         id: overlay

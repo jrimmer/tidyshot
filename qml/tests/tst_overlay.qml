@@ -191,4 +191,31 @@ TestCase {
         overlay.setCollapsed(false)
         compare(overlay.collapsed, false)
     }
+    // The QuickOverlay layout the port promises.
+    function test_the_quick_overlay_layout_is_preserved() {
+        overlay.overlaySize = 300
+        overlay.trashVisible = true
+        overlay.title = "Capture ready"
+        compare(overlay.width, 335)          // max(335, 300 + 20)
+        overlay.overlaySize = 400
+        compare(overlay.width, 420)          // max(335, 400 + 20)
+        compare(overlay.title, "Capture ready")
+        var trash = findChild(overlay, "trashButton")
+        verify(trash.visible)
+        compare(trash.implicitWidth, 36)
+        compare(trash.implicitHeight, 36)
+        var annotate = findChild(overlay, "annotateButton")
+        var copy = findChild(overlay, "copyButton")
+        var save = findChild(overlay, "saveButton")
+        var pin = findChild(overlay, "pinButton")
+        verify(annotate.text === "Annotate")
+        verify(copy.text === "Copy")
+        verify(save.text === "Save")
+        verify(pin.visible)
+        verify(pin.text === "Pin")
+        var restore = findChild(overlay, "restoreButton")
+        compare(restore.text, "\u2191 Show capture")
+    }
+
+
 }

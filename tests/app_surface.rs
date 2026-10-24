@@ -330,9 +330,9 @@ fn the_preview_window_anchors_bottom_right_and_honours_saved_settings() {
         ..PreviewSettings::default()
     };
     let preview = PreviewWindow::new("/tmp/capture.png", 640, 480, settings, Some(monitor));
-    // The right monitor runs from 1920 to 4480; a 355 px window with an 18 px
+    // The right monitor runs from 1920 to 4480; a 335 px window with an 18 px
     // margin ends at 4480 - 18.
-    assert_eq!(preview.position(), (4107.0, 1122.0));
+    assert_eq!(preview.position(), (4127.0, 1122.0));
     assert_eq!(preview.auto_close_ms(), 3000);
     assert_eq!(preview.auto_close_action(), "close");
     assert!(preview.close_after_drag());

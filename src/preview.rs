@@ -13,7 +13,7 @@ use crate::json::Value;
 use crate::overlay::{Corner, PreviewSettings, ScreenRect, corner_position, is_video};
 
 /// The default preview window size in logical pixels.
-pub const WINDOW_WIDTH: f64 = 355.0;
+pub const WINDOW_WIDTH: f64 = 335.0;
 /// The expandable body height; a collapsed preview keeps only its title bar.
 pub const WINDOW_HEIGHT: f64 = 300.0;
 /// The collapsed height that leaves the restore control visible.
@@ -200,24 +200,29 @@ impl PreviewWindow {
     }
 
     /// The title matches the compositor rule that floats a preview.
+    ///
+    /// QuickOverlay titles a still "Capture ready" and a recording
+    /// "Recording ready"; the file name lives in the info line and tooltip.
     #[must_use]
     pub fn title(&self) -> String {
-        let name = self
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("capture");
-        format!("TidyShot Preview — {name}")
+        if self.is_video() {
+            "Recording ready".to_owned()
+        } else {
+            "Capture ready".to_owned()
+        }
     }
 
     /// The line under the thumbnail: dimensions.
     #[must_use]
     pub fn info(&self) -> String {
-        if self.width > 0 && self.height > 0 {
-            format!("{} × {}", self.width, self.height)
-        } else {
-            String::new()
+        if self.width == 0 || self.height == 0 {
+            return String::new();
         }
+        // QuickOverlay shows "W × H · NN KB".
+        let size = std::fs::metadata(&self.path)
+            .map(|meta| meta.len() / 1024)
+            .unwrap_or(0);
+        format!("{} × {} · {size} KB", self.width, self.height)
     }
 
     /// The auto-close delay in milliseconds; zero keeps the window open.
@@ -247,12 +252,10 @@ impl PreviewWindow {
         }
     }
 
-    /// The configured preview width, clamped to the usable range.
+    /// The window width: the thumbnail size plus its margins, at least 335.
     #[must_use]
     pub fn window_width(&self) -> f64 {
-        self.settings
-            .width
-            .clamp(crate::overlay::MIN_WIDTH, crate::overlay::MAX_WIDTH)
+        (self.settings.width + 20.0).clamp(335.0, crate::overlay::MAX_WIDTH)
     }
 
     /// The window position on the focused monitor.
@@ -1124,10 +1127,10 @@ mod tests {
         let monitor = MonitorScreen::new(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0));
         let preview = PreviewWindow::new("/tmp/capture.png", 640, 480, settings(), Some(monitor));
         assert_eq!(preview.settings().corner, default_corner());
-        assert_eq!(preview.position(), (1547.0, 762.0));
+        assert_eq!(preview.position(), (1567.0, 762.0));
         assert_eq!(preview.auto_close_ms(), 0);
-        assert!(preview.title().starts_with("TidyShot Preview"));
-        assert_eq!(preview.info(), "640 × 480");
+        assert_eq!(preview.title(), "Capture ready");
+        assert!(preview.info().starts_with("640 × 480 · "));
     }
 
     #[test]
@@ -1190,7 +1193,40 @@ mod tests {
         preview.set_capture_path(PathBuf::from("/tmp/capture.png"));
         assert_eq!(preview.path(), Path::new("/tmp/composed.png"));
         assert_eq!(preview.capture_path(), Path::new("/tmp/capture.png"));
-        assert_eq!(preview.info(), "640 × 480");
+        assert!(preview.info().starts_with("640 × 480 · "));
+    }
+
+    #[test]
+    fn the_preview_matches_the_quick_overlay_title_and_width() {
+        let preview = PreviewWindow::new(
+            "/tmp/capture.png",
+            640,
+            480,
+            settings(),
+            Some(MonitorScreen::new(ScreenRect::new(
+                0.0, 0.0, 1920.0, 1080.0,
+            ))),
+        );
+        assert_eq!(preview.title(), "Capture ready");
+        assert_eq!(preview.window_width(), 335.0); // max(335, 300 + 20)
+        assert!(preview.info().starts_with("640 × 480 · "));
+        let wide = PreviewWindow::new(
+            "/tmp/capture.png",
+            640,
+            480,
+            crate::overlay::PreviewSettings {
+                width: 520.0,
+                ..settings()
+            },
+            None,
+        );
+        assert_eq!(wide.window_width(), 540.0);
+    }
+
+    #[test]
+    fn a_recording_preview_says_recording_ready() {
+        let preview = PreviewWindow::new("/tmp/take.mp4", 640, 480, settings(), None);
+        assert_eq!(preview.title(), "Recording ready");
     }
 
     #[test]
@@ -1239,8 +1275,8 @@ mod tests {
         let monitor = MonitorScreen::new(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0));
         let preview =
             PreviewWindow::new("/tmp/capture.png", 10, 10, settings.clone(), Some(monitor));
-        assert_eq!(preview.window_width(), 520.0);
-        assert_eq!(preview.position().0, 1920.0 - 520.0 - 18.0);
+        assert_eq!(preview.window_width(), 540.0);
+        assert_eq!(preview.position().0, 1920.0 - 540.0 - 18.0);
         // The Rust window width is what the QML property reports.
         let mut rust = PreviewRust::default();
         rust.apply(
@@ -1285,7 +1321,7 @@ mod tests {
     fn a_missing_monitor_list_falls_back_to_the_bottom_right_corner() {
         assert!(focused_monitor(&[]).is_none());
         let preview = PreviewWindow::new("/tmp/capture.png", 10, 10, settings(), None);
-        assert_eq!(preview.position(), (1547.0, 762.0));
+        assert_eq!(preview.position(), (1567.0, 762.0));
     }
 
     #[test]
@@ -1313,16 +1349,16 @@ mod tests {
             },
             Some(monitor),
         );
-        assert_eq!(preview.position(), (1565.0, 780.0));
+        assert_eq!(preview.position(), (1585.0, 780.0));
     }
 
     #[test]
     fn the_corner_setting_reaches_the_rule_that_places_the_window() {
         let monitor = MonitorScreen::new(ScreenRect::new(0.0, 0.0, 1920.0, 1080.0));
         let cases = [
-            (Corner::BottomRight, (1547.0, 762.0)),
+            (Corner::BottomRight, (1567.0, 762.0)),
             (Corner::BottomLeft, (18.0, 762.0)),
-            (Corner::TopRight, (1547.0, 18.0)),
+            (Corner::TopRight, (1567.0, 18.0)),
             (Corner::TopLeft, (18.0, 18.0)),
         ];
         for (corner, expected) in cases {
@@ -1341,7 +1377,7 @@ mod tests {
             assert_eq!(
                 crate::preview_placement::placement_rule(x, y),
                 format!(
-                    "move {} {},title:^(TidyShot Preview)",
+                    "move {} {},title:^(Capture|Recording) ready$",
                     expected.0 as i64, expected.1 as i64
                 )
             );
@@ -1353,10 +1389,10 @@ mod tests {
         let monitor = MonitorScreen::new(ScreenRect::new(1920.0, 0.0, 2560.0, 1440.0));
         let preview = PreviewWindow::new("/tmp/capture.png", 640, 480, settings(), Some(monitor));
         let (x, y) = preview.position();
-        assert_eq!((x, y), (4107.0, 1122.0));
+        assert_eq!((x, y), (4127.0, 1122.0));
         assert_eq!(
             crate::preview_placement::placement_rule(x, y),
-            "move 4107 1122,title:^(TidyShot Preview)"
+            "move 4127 1122,title:^(Capture|Recording) ready$"
         );
     }
 

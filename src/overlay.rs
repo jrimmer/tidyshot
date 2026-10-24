@@ -313,7 +313,7 @@ impl Default for PreviewSettings {
             close_after_drag: true,
             corner: Corner::BottomRight,
             margin: 18.0,
-            width: 355.0,
+            width: 300.0,
         }
     }
 }

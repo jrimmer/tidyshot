@@ -152,7 +152,8 @@ TestCase {
         var point = overlay.imagePoint(400, 300)
         compare(point.x, 800)
         compare(point.y, 600)
-        var span = 140 / 6
+        // The source samples a 24 px square at the pointer.
+        var span = 24
         verify(Math.abs(source.x - (800 - span / 2)) < 0.001, "source x " + source.x)
         verify(Math.abs(source.w - span) < 0.001)
         // A pointer at the edge clamps instead of wrapping.
@@ -177,4 +178,42 @@ TestCase {
         compare(windowSpy.signalArguments[0][0], 1)
         compare(windowSpy.signalArguments[0][1], true)
     }
+    // The source geometry the port promises: eight handles, a pixel size in
+    // the chip, a 100px magnifier over a 24px sample, and the source hint.
+    function test_the_source_geometry_is_preserved() {
+        overlay.rectX = 100
+        overlay.rectY = 120
+        overlay.rectW = 200
+        overlay.rectH = 100
+        compare(overlay.magnifierSize, 100)
+        compare(overlay.magnifierSample, 24)
+        compare(overlay.handlePoints().length, 8)
+        var points = overlay.handlePoints()
+        compare(points[0].x, 100)
+        compare(points[0].y, 120)
+        compare(points[4].x, 200)   // top midpoint
+        compare(points[6].y, 170)   // left midpoint
+        var label = overlay.sizeLabel()
+        verify(label.indexOf("200 × 100") === 0)
+        verify(label.indexOf(" px)") > 0)
+        verify(overlay.hint.indexOf("Shift locks proportions") > 0)
+    }
+
+    function test_the_magnifier_follows_the_pointer() {
+        overlay.pointerX = 400
+        overlay.pointerY = 300
+        var mag = findChild(overlay, "selectionMagnifier")
+        // +22 from the pointer, clamped to the source's bounds.
+        compare(mag.x, Math.min(overlay.width - mag.width - 12, 422))
+        compare(mag.y, Math.max(10, Math.min(overlay.height - 170, 322)))
+    }
+
+    function test_the_magnifier_samples_a_24_pixel_square() {
+        overlay.pointerX = 400
+        overlay.pointerY = 300
+        var source = overlay.magnifierRect()
+        compare(source.w, 24)
+        compare(source.h, 24)
+    }
+
 }
