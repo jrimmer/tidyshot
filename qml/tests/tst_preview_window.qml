@@ -211,4 +211,21 @@ TestCase {
         compare(button("annotateButton").text, "Edit")
         preview.video = false
     }
+    // QuickOverlay's hover keys, scoped to the preview window.
+    function test_the_hover_keys_match_the_source() {
+        var expected = {
+            "copyKey": "Ctrl+C",
+            "saveKey": "Ctrl+S",
+            "annotateKey": "Ctrl+E",
+            "pinKey": "Ctrl+P",
+            "closeKey": "Ctrl+W",
+            "previewKey": "Space"
+        }
+        for (var name in expected) {
+            var shortcut = findChild(preview, name)
+            verify(shortcut !== null, name)
+            compare(shortcut.sequences[0].toString(), expected[name])
+        }
+    }
+
 }
