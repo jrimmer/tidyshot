@@ -875,6 +875,7 @@ impl qobject::Preview {
                 .get_mut()
                 .apply(published, settings);
             self.as_mut().sync();
+            place_window();
         }
         for action in actions {
             run_action(self.as_mut(), action);
@@ -889,6 +890,7 @@ impl qobject::Preview {
             .get_mut()
             .apply(published, settings);
         self.as_mut().sync();
+        place_window();
     }
 
     /// Copy the capture to the clipboard.
@@ -1392,12 +1394,12 @@ mod tests {
             );
             let (x, y) = preview.position();
             assert_eq!((x, y), expected, "{corner:?}");
-            assert_eq!(
-                crate::preview_placement::placement_rule(x, y),
-                format!(
-                    "move {} {},title:^(Capture|Recording) ready$",
+            assert!(
+                crate::preview_placement::placement_rule(x, y).contains(&format!(
+                    "move = \"{} {}\"",
                     expected.0 as i64, expected.1 as i64
-                )
+                )),
+                "{corner:?}"
             );
         }
     }
@@ -1408,9 +1410,9 @@ mod tests {
         let preview = PreviewWindow::new("/tmp/capture.png", 640, 480, settings(), Some(monitor));
         let (x, y) = preview.position();
         assert_eq!((x, y), (4127.0, 1122.0));
-        assert_eq!(
-            crate::preview_placement::placement_rule(x, y),
-            "move 4127 1122,title:^(Capture|Recording) ready$"
+        assert!(
+            crate::preview_placement::placement_rule(x, y).contains("move = \"4127 1122\""),
+            "{x} {y}"
         );
     }
 

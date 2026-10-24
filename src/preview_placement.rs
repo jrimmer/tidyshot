@@ -1,114 +1,73 @@
 //! Place the Quick Access preview with a Hyprland window rule.
 //!
 //! Wayland ignores an application-set toplevel position, and this compositor
-//! rejects `movewindowpixel`, so the preview computes its corner and pins it
-//! through a dynamic window rule before the window maps. The rule is named
-//! after its matcher (`title:^(Capture|Recording) ready$`) so `scripts/uninstall_user.py`
-//! can remove the same rule.
+//! runs the Lua configuration, where `hyprctl keyword windowrule` is rejected
+//! ("can't work with non-legacy parsers"). The rule therefore goes through
+//! `hyprctl eval`, which is the documented path for a Lua configuration:
+//!
+//!   o.window({ title = "..." }, { name = "tidyshot-preview", move = "X Y" })
+//!
+//! The rule is named so a later position replaces it and uninstall can disable
+//! it by name.
 
 use std::time::Duration;
 
 use crate::commands::{CommandError, CommandRunner, CommandSpec};
 
-/// The matcher that identifies the Quick Access preview window.
+/// The title matcher that identifies the Quick Access preview window.
 ///
-/// The title is `TidyShot Preview — <file>`, so a prefix match covers every
-/// capture and recording.
-pub const PREVIEW_MATCHER: &str = "title:^(Capture|Recording) ready$";
+/// QuickOverlay titles a still "Capture ready" and a recording
+/// "Recording ready".
+pub const PREVIEW_MATCHER: &str = "^(Capture|Recording) ready$";
 
-/// The rule syntax the running compositor accepted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleSyntax {
-    /// Hyprland 0.56's `windowrule` keyword.
-    WindowRule,
-    /// The older `windowrulev2` spelling, kept as a fallback.
-    WindowRuleV2,
-}
+/// The name the dynamic rule is registered under.
+pub const RULE_NAME: &str = "tidyshot-preview";
 
-impl RuleSyntax {
-    /// The `hyprctl keyword` name for this syntax.
-    #[must_use]
-    pub const fn keyword(self) -> &'static str {
-        match self {
-            Self::WindowRule => "windowrule",
-            Self::WindowRuleV2 => "windowrulev2",
-        }
-    }
-
-    const fn all() -> [Self; 2] {
-        [Self::WindowRule, Self::WindowRuleV2]
-    }
-}
-
-/// The dynamic rule that pins the preview at `x`, `y` in logical pixels.
+/// The Lua call that pins the preview at `x`, `y` in logical pixels.
 #[must_use]
 pub fn placement_rule(x: f64, y: f64) -> String {
     format!(
-        "move {} {},{}",
+        "o.window({{ title = \"{PREVIEW_MATCHER}\" }}, {{ name = \"{RULE_NAME}\", move = \"{} {}\" }})",
         x.round() as i64,
-        y.round() as i64,
-        PREVIEW_MATCHER
+        y.round() as i64
     )
 }
 
-/// The rule that removes every dynamic rule matching the preview.
+/// The Lua call that disables the dynamic rule.
 #[must_use]
 pub fn removal_rule() -> String {
-    format!("unset,{PREVIEW_MATCHER}")
+    format!("hl.window_rule({{ name = \"{RULE_NAME}\", enabled = false }})")
 }
 
-fn keyword_spec(keyword: &str, rule: &str) -> CommandSpec {
+fn eval_spec(expression: &str) -> CommandSpec {
     CommandSpec::new("hyprctl")
-        .args(["keyword", keyword, rule])
+        .args(["eval", expression])
         .timeout(Duration::from_secs(5))
 }
 
 /// Pin the preview rule for one open, replacing any rule from a previous one.
 ///
-/// The previous rule is removed first so a changed corner, margin or focused
-/// monitor is honoured instead of leaving two moves to fight. A removal the
-/// compositor does not understand is not fatal: the new rule still lands last
-/// and wins for the next map.
-pub fn apply<R: CommandRunner>(runner: &R, x: f64, y: f64) -> Result<RuleSyntax, CommandError> {
-    let removal = removal_rule();
-    let mut last_error = None;
-    for syntax in RuleSyntax::all() {
-        match runner.run(&keyword_spec(syntax.keyword(), &removal)) {
-            Ok(_) => break,
-            Err(error) => last_error = Some(error),
-        }
-    }
-    let rule = placement_rule(x, y);
-    for syntax in RuleSyntax::all() {
-        match runner.run(&keyword_spec(syntax.keyword(), &rule)) {
-            Ok(_) => return Ok(syntax),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(last_error.expect("every syntax was attempted"))
+/// A named rule replaces its earlier definition, so a changed corner, margin
+/// or focused monitor is honoured instead of leaving two moves to fight.
+pub fn apply<R: CommandRunner>(runner: &R, x: f64, y: f64) -> Result<(), CommandError> {
+    runner.run(&eval_spec(&placement_rule(x, y)))?;
+    Ok(())
 }
 
 /// Remove the dynamic preview rule.
 ///
-/// Uninstall calls this through the same matcher, so a rule left by a running
-/// preview never survives the removal of its application.
-pub fn remove<R: CommandRunner>(runner: &R) -> Result<RuleSyntax, CommandError> {
-    let removal = removal_rule();
-    let mut last_error = None;
-    for syntax in RuleSyntax::all() {
-        match runner.run(&keyword_spec(syntax.keyword(), &removal)) {
-            Ok(_) => return Ok(syntax),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(last_error.expect("every syntax was attempted"))
+/// Uninstall calls this so a rule left by a running preview never survives the
+/// removal of its application.
+pub fn remove<R: CommandRunner>(runner: &R) -> Result<(), CommandError> {
+    runner.run(&eval_spec(&removal_rule()))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::{CommandOutput, CommandSpec};
-    use std::sync::Mutex;
+    use crate::commands::CommandOutput;
+    use parking_lot::Mutex;
 
     fn output() -> CommandOutput {
         CommandOutput {
@@ -118,59 +77,24 @@ mod tests {
         }
     }
 
-    /// A runner that records specs and rejects chosen keyword syntaxes.
+    #[derive(Default)]
     struct Fake {
         seen: Mutex<Vec<CommandSpec>>,
-        rejects: Mutex<Vec<&'static str>>,
-    }
-
-    impl Fake {
-        fn rejecting(keywords: &[&'static str]) -> Self {
-            Self {
-                seen: Mutex::new(Vec::new()),
-                rejects: Mutex::new(keywords.to_vec()),
-            }
-        }
-    }
-
-    impl Default for Fake {
-        fn default() -> Self {
-            Self {
-                seen: Mutex::new(Vec::new()),
-                rejects: Mutex::new(Vec::new()),
-            }
-        }
     }
 
     impl CommandRunner for Fake {
         fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, CommandError> {
-            self.seen.lock().unwrap().push(spec.clone());
-            if self
-                .rejects
-                .lock()
-                .unwrap()
-                .contains(&spec.args[1].as_str())
-            {
-                return Err(CommandError::Failure {
-                    program: spec.program.clone(),
-                    output: CommandOutput {
-                        status: 1,
-                        stdout: Vec::new(),
-                        stderr: b"unknown keyword".to_vec(),
-                    },
-                });
-            }
+            self.seen.lock().push(spec.clone());
             Ok(output())
         }
     }
 
-    fn rules(runner: &Fake) -> Vec<(String, String)> {
+    fn expressions(runner: &Fake) -> Vec<String> {
         runner
             .seen
             .lock()
-            .unwrap()
             .iter()
-            .map(|spec| (spec.args[1].clone(), spec.args[2].clone()))
+            .map(|spec| spec.args[1].clone())
             .collect()
     }
 
@@ -178,77 +102,52 @@ mod tests {
     fn the_placement_rule_carries_the_computed_corner() {
         assert_eq!(
             placement_rule(1547.0, 762.0),
-            "move 1547 762,title:^(Capture|Recording) ready$"
+            "o.window({ title = \"^(Capture|Recording) ready$\" }, \
+             { name = \"tidyshot-preview\", move = \"1547 762\" })"
         );
-        // A fractional scale anchor is rounded to the logical pixel the
-        // compositor moves to.
+        // A fractional anchor is rounded to the logical pixel the compositor
+        // moves to.
         assert_eq!(
             placement_rule(960.4, 540.6),
-            "move 960 541,title:^(Capture|Recording) ready$"
+            "o.window({ title = \"^(Capture|Recording) ready$\" }, \
+             { name = \"tidyshot-preview\", move = \"960 541\" })"
         );
-        assert_eq!(removal_rule(), "unset,title:^(Capture|Recording) ready$");
+        assert_eq!(
+            removal_rule(),
+            "hl.window_rule({ name = \"tidyshot-preview\", enabled = false })"
+        );
     }
 
     #[test]
     fn the_rule_matches_every_corner_and_margin_shape() {
         for (x, y) in [(18.0, 18.0), (1547.0, 762.0), (-120.0, 40.0)] {
             let rule = placement_rule(x, y);
-            assert!(rule.starts_with("move "), "{rule}");
-            assert!(
-                rule.ends_with(",title:^(Capture|Recording) ready$"),
-                "{rule}"
-            );
+            assert!(rule.starts_with("o.window({ title = "), "{rule}");
+            assert!(rule.contains("name = \"tidyshot-preview\""), "{rule}");
+            assert!(rule.ends_with("})"), "{rule}");
         }
     }
 
     #[test]
-    fn applying_replaces_the_previous_rule_before_pinning_the_new_one() {
+    fn applying_sets_the_named_rule_in_one_eval() {
         let runner = Fake::default();
+        apply(&runner, 1547.0, 762.0).unwrap();
         assert_eq!(
-            apply(&runner, 1547.0, 762.0).unwrap(),
-            RuleSyntax::WindowRule
+            expressions(&runner),
+            [placement_rule(1547.0, 762.0).to_owned()]
         );
-        assert_eq!(
-            rules(&runner),
-            [
-                (
-                    "windowrule".to_owned(),
-                    "unset,title:^(Capture|Recording) ready$".to_owned()
-                ),
-                (
-                    "windowrule".to_owned(),
-                    "move 1547 762,title:^(Capture|Recording) ready$".to_owned()
-                ),
-            ]
-        );
-        let seen = runner.seen.lock().unwrap();
-        assert_eq!(seen[0].program, "hyprctl");
-        assert_eq!(seen[0].args[0], "keyword");
-    }
-
-    #[test]
-    fn an_older_compositor_falls_back_to_windowrulev2() {
-        let runner = Fake::rejecting(&["windowrule"]);
-        assert_eq!(
-            apply(&runner, 100.0, 200.0).unwrap(),
-            RuleSyntax::WindowRuleV2
-        );
-        let applied = rules(&runner);
-        assert_eq!(
-            applied.last(),
-            Some(&(
-                "windowrulev2".to_owned(),
-                "move 100 200,title:^(Capture|Recording) ready$".to_owned()
-            ))
+        assert!(
+            runner.seen.lock()[0]
+                .args
+                .first()
+                .is_some_and(|arg| arg == "eval")
         );
     }
 
     #[test]
-    fn removal_tries_both_spellings_and_reports_the_last_failure() {
-        let runner = Fake::rejecting(&["windowrule"]);
-        assert_eq!(remove(&runner).unwrap(), RuleSyntax::WindowRuleV2);
-        let failing = Fake::rejecting(&["windowrule", "windowrulev2"]);
-        let error = remove(&failing).unwrap_err();
-        assert_eq!(error.to_string(), "unknown keyword");
+    fn removing_disables_the_named_rule() {
+        let runner = Fake::default();
+        remove(&runner).unwrap();
+        assert_eq!(expressions(&runner), [removal_rule().to_owned()]);
     }
 }

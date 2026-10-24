@@ -104,13 +104,15 @@ if bindings.exists():rewrite(bindings,without_bindings(bindings.read_text()))
 hypr=hypr_dir()/"hyprland.lua"
 if hypr.exists():rewrite(hypr,without_require(hypr.read_text()))
 remove(hypr_dir()/"tidyshot.lua")
-# The preview pins its corner with a dynamic rule (`move X Y,title:^(TidyShot
-# Preview)`); drop it with the same matcher so no stale position survives.
-PREVIEW_RULE_TITLE="title:^(TidyShot Preview)"
+# The preview pins its corner with a named dynamic rule the app sets through
+# `hyprctl eval`; disable it by name so no stale position survives. Older
+# installs used a keyword rule with the previous title, so try that too.
 def clear_preview_rule():
     if not shutil.which("hyprctl"):return
+    disabled=subprocess.run(["hyprctl","eval",'hl.window_rule({ name = "tidyshot-preview", enabled = false })'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    if disabled.returncode==0:return
     for keyword in ("windowrule","windowrulev2"):
-        if subprocess.run(["hyprctl","keyword",keyword,"unset,"+PREVIEW_RULE_TITLE],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:return
+        if subprocess.run(["hyprctl","keyword",keyword,"unset,title:^(TidyShot Preview)"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:return
 if data is not None:
     layout=data.get("bar",{}).get("layout",{})
     for section in ("left","center","right"):

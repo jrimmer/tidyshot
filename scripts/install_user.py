@@ -110,10 +110,11 @@ if marker not in old:
 rules=hypr_dir()/"tidyshot.lua";preserve(rules)
 rules_text='''-- TidyShot user-owned window rules.
 -- The preview pins its corner with a dynamic rule the app sets before the
--- window maps: hyprctl keyword windowrule "move X Y,title:^(TidyShot Preview)".
--- scripts/uninstall_user.py removes that rule with the same title matcher.
+-- window maps: hyprctl eval 'o.window({ title = "^(Capture|Recording) ready$" },
+-- { name = "tidyshot-preview", move = "X Y" })'. scripts/uninstall_user.py
+-- disables that named rule.
 o.window("^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$", { float = true, opacity = "1 1", no_anim = true })
-o.window({ class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$", title = "^TidyShot Preview.*" }, { pin = true, no_initial_focus = true, no_follow_mouse = true })
+o.window({ class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$", title = "^(Capture ready|Recording ready)$" }, { pin = true, no_initial_focus = true, no_follow_mouse = true })
 o.window({ title = "^TidyShot Pin.*", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
 o.window({ title = "^TidyShot Locked Pin.*", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_focus = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })
 o.window({ title = "^TidyShot (Recording Controls|Camera Preview|Self Timer)$", class = "^(tidyshot|org\\\\.omarchy\\\\.TidyShot)$" }, { pin = true, no_initial_focus = true, no_follow_mouse = true, no_blur = true, no_shadow = true, border_size = 0, rounding = 0 })

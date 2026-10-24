@@ -490,9 +490,8 @@ fn uninstall_removes_the_preview_position_rule() {
         cleared.iter().any(|call| call
             == &[
                 "hyprctl".to_owned(),
-                "keyword".to_owned(),
-                "windowrule".to_owned(),
-                "unset,title:^(TidyShot Preview)".to_owned(),
+                "eval".to_owned(),
+                "hl.window_rule({ name = \"tidyshot-preview\", enabled = false })".to_owned(),
             ]),
         "uninstall clears the preview rule: {cleared:?}"
     );
