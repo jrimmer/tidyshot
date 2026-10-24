@@ -797,6 +797,21 @@ impl PreviewRust {
     }
 }
 
+/// The last published window position, read by the placement helper.
+static PREVIEW_STATE: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+/// Pin the preview's compositor rule before the window maps.
+///
+/// Wayland ignores an application-set toplevel position, so the corner is a
+/// Hyprland rule applied ahead of the map. Best effort: without a compositor
+/// the window simply lands where the compositor places it.
+fn place_window() {
+    let rust = PREVIEW_STATE.lock().expect("preview state poisoned");
+    if let Some((x, y)) = *rust {
+        let _ = crate::preview_placement::apply(&crate::commands::SystemRunner, x, y);
+    }
+}
+
 impl qobject::Preview {
     /// Copy the Rust state onto the QObject properties.
     ///
@@ -841,6 +856,9 @@ impl qobject::Preview {
         self.as_mut().set_auto_close_ms(snapshot.13);
         self.as_mut().set_auto_close_action(snapshot.14);
         self.as_mut().set_close_after_drag(snapshot.15);
+        if let Ok(mut state) = PREVIEW_STATE.lock() {
+            *state = Some((snapshot.9 as f64, snapshot.10 as f64));
+        }
     }
 
     /// Register this object, then replay any capture or action that arrived
